@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, resolve } from "node:path";
 import { selectNextTask } from "./eligibility.js";
 import { assertJobInvariant, digest, evolveJob, taskFromSelection, } from "./model.js";
@@ -851,12 +852,27 @@ function validatePiRoleArgv(name, argv, skills, tools) {
     const skillPaths = flagValues(argv, "--skill");
     if (skillPaths.some((path) => !isAbsolute(path)))
         fail("skill paths must be absolute");
-    const loadedSkills = new Set(skillPaths.map(piSkillName));
+    let loadedSkillIdentities = [];
+    try {
+        loadedSkillIdentities = skillPaths.map(readPiSkillIdentity);
+    }
+    catch (error) {
+        fail(`skill metadata cannot be verified: ${message(error)}`);
+    }
+    const loadedSkills = new Set(loadedSkillIdentities.map((skill) => skill.name));
     if (skills.some((skill) => !loadedSkills.has(skill)))
         fail(`required skills: ${skills.join(",")}`);
-    const reviewSkillPaths = skillPaths.filter((path) => piSkillName(path) === "code-review");
-    if (reviewSkillPaths.length !== 1 || piSkillDirectory(reviewSkillPaths[0]) !== BUNDLED_CODE_REVIEW_SKILL) {
+    const reviewSkills = loadedSkillIdentities.filter((skill) => skill.name === "code-review");
+    if (reviewSkills.length !== 1 || reviewSkills[0].directory !== BUNDLED_CODE_REVIEW_SKILL) {
         fail("code-review must resolve to the bundled Harness skill");
+    }
+    for (const skillName of ["implement", "tdd"]) {
+        if (!skills.includes(skillName))
+            continue;
+        const matches = loadedSkillIdentities.filter((skill) => skill.name === skillName);
+        if (matches.length !== 1 || !hasMattPocockProvenance(matches[0])) {
+            fail(`${skillName} must come from the installed mattpocock/skills package`);
+        }
     }
     const toolValues = flagValues(argv, "--tools");
     if (toolValues.length !== 1 || !sameSet(toolValues[0].split(",").map((tool) => tool.trim()), tools)) {
@@ -869,13 +885,38 @@ function validatePiRoleArgv(name, argv, skills, tools) {
 function flagValues(argv, flag) {
     return argv.flatMap((value, index) => value === flag && argv[index + 1] ? [argv[index + 1]] : []);
 }
-function piSkillName(path) {
-    const parts = path.replace(/[\\/]+$/, "").split(/[\\/]/);
-    return parts.at(-1) === "SKILL.md" ? (parts.at(-2) ?? "") : (parts.at(-1) ?? "");
-}
 function piSkillDirectory(path) {
     const absolute = resolve(path);
     return basename(absolute) === "SKILL.md" ? dirname(absolute) : absolute;
+}
+function readPiSkillIdentity(path) {
+    const directory = piSkillDirectory(path);
+    const frontmatter = readFileSync(resolve(directory, "SKILL.md"), "utf8")
+        .match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/)?.[1];
+    const name = frontmatter?.match(/^name:\s*["']?([a-zA-Z0-9._-]+)["']?\s*$/m)?.[1];
+    if (!name)
+        throw new Error(`${directory}/SKILL.md has no valid name frontmatter`);
+    return { name, directory };
+}
+function hasMattPocockProvenance(skill) {
+    const installRoot = resolve(skill.directory, "../..");
+    if (skill.directory !== resolve(installRoot, "skills", skill.name))
+        return false;
+    try {
+        const lock = JSON.parse(readFileSync(resolve(installRoot, ".skill-lock.json"), "utf8"));
+        const entry = lock.skills?.[skill.name];
+        return lock.version === 3
+            && entry?.source === "mattpocock/skills"
+            && entry.sourceType === "github"
+            && entry.sourceUrl === "https://github.com/mattpocock/skills.git"
+            && entry.skillPath === `skills/engineering/${skill.name}/SKILL.md`
+            && entry.pluginName === "mattpocock-skills"
+            && typeof entry.skillFolderHash === "string"
+            && entry.skillFolderHash.length > 0;
+    }
+    catch {
+        return false;
+    }
 }
 function sameSet(actual, expected) {
     const values = new Set(actual);

@@ -1,0 +1,21 @@
+{
+  "version": 3,
+  "skills": {
+    "implement": {
+      "source": "mattpocock/skills",
+      "sourceType": "github",
+      "sourceUrl": "https://github.com/mattpocock/skills.git",
+      "skillPath": "skills/engineering/implement/SKILL.md",
+      "skillFolderHash": "test-implement-tree",
+      "pluginName": "mattpocock-skills"
+    },
+    "tdd": {
+      "source": "mattpocock/skills",
+      "sourceType": "github",
+      "sourceUrl": "https://github.com/mattpocock/skills.git",
+      "skillPath": "skills/engineering/tdd/SKILL.md",
+      "skillFolderHash": "test-tdd-tree",
+      "pluginName": "mattpocock-skills"
+    }
+  }
+}

@@ -1,11 +1,15 @@
 import { resolve } from "node:path";
 import { digest } from "../src/model.js";
 export const validCodeReviewSkillPath = resolve("pi/skills/code-review");
+export const validImplementSkillPath = resolve("test/fixtures/pi-skills/skills/implement");
+export const validTddSkillPath = resolve("test/fixtures/pi-skills/skills/tdd");
+export const substituteCodeReviewSkillPath = resolve("test/fixtures/substitute-review/other/SKILL.md");
+export const untrustedImplementSkillPath = resolve("test/fixtures/untrusted-skills/skills/implement");
 export const validWorkerArgv = [
     "--no-approve",
     "--no-skills",
-    "--skill", "/skills/implement",
-    "--skill", "/skills/tdd",
+    "--skill", validImplementSkillPath,
+    "--skill", validTddSkillPath,
     "--skill", validCodeReviewSkillPath,
     "--tools", "read,bash,edit,write,grep,find,ls,subagent",
     "--thinking", "high",

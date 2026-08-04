@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { HarnessController } from "../src/controller.js";
-import { FakeAnalyst, FakeClock, FakeEvidence, FakeGit, FakeGitHub, FakeHerdr, MemoryStore, SequenceIds, issue, validCodeReviewSkillPath, validReviewerArgv, validWorkerArgv, } from "./fakes.js";
+import { FakeAnalyst, FakeClock, FakeEvidence, FakeGit, FakeGitHub, FakeHerdr, MemoryStore, SequenceIds, issue, substituteCodeReviewSkillPath, untrustedImplementSkillPath, validCodeReviewSkillPath, validImplementSkillPath, validReviewerArgv, validWorkerArgv, } from "./fakes.js";
 const config = {
     repo: "owner/repo",
     localPath: "/repo",
@@ -43,6 +43,11 @@ test("config rejects incomplete Pi role contracts", () => {
             reviewerArgv: validReviewerArgv.map((value) => value === validCodeReviewSkillPath ? "/tmp/code-review" : value),
         },
         { ...config, reviewerArgv: [...validReviewerArgv, "--skill", "/tmp/code-review"] },
+        { ...config, reviewerArgv: [...validReviewerArgv, "--skill", substituteCodeReviewSkillPath] },
+        {
+            ...config,
+            workerArgv: validWorkerArgv.map((value) => value === validImplementSkillPath ? untrustedImplementSkillPath : value),
+        },
         {
             ...config,
             reviewerArgv: validReviewerArgv.map((value) => (value === "read,bash,grep,find,ls,subagent" ? `${value},write` : value)),

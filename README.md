@@ -88,7 +88,7 @@ pi install /absolute/path/to/HerdrHarness-lite
 - Reviewer 至少显式加载本仓库的 bundled `code-review`，样例不加载其他 skill，也没有 `edit/write` 工具；dispatch 以 `/skill:code-review` 开头。同名 substitute skill 即使与 bundled skill 并存也会被拒绝。
 - `code-review` 通过 `pi-subagents` 在父 Pi 当前 turn 内并行运行两个 fresh、foreground、只读子审查器，分别检查 Standards 与 Spec。任一轴缺失或失败都不能判定通过。
 
-Controller 启动时会 fail fast：两种角色都必须显式使用 `--no-approve --no-skills --thinking high`，加载各自必需的 skill，并使用样例所列的精确工具集合；`code-review` 必须指向本仓库随包提供的目录，任何 Pi session 复用参数都会被拒绝。缺失/替换 skill、写权限越界或冲突的 tool/extension flags 同样不能启动。
+Matt Pocock `implement/tdd` 应通过支持 `.agents/.skill-lock.json` 的 skills installer 安装，并保留其中的 `mattpocock/skills` 来源记录。Controller 启动时会读取每个 `SKILL.md` 的 `name` frontmatter 并 fail fast：Worker 的 `implement/tdd` 必须匹配 installer lock，`code-review` 必须是本仓库随包提供的唯一同名 skill；两种角色还必须显式使用 `--no-approve --no-skills --thinking high` 和样例所列的精确工具集合。Pi session 复用、缺失/替换 skill、写权限越界或冲突的 tool/extension flags 都不能启动。
 
 子审查器从父 Pi 获得当前工作目录、环境和未覆写的模型；`thinking=high` 被显式固定，因为该扩展没有通用的动态 thinking 继承。工具、skills、扩展和递归深度有意收窄，不能复制父 Pi 的写权限；`async=false` 保证 Herdr 观察到的顶层 Pi 生命周期覆盖整次审查。这里的“只读”仍由最小工具面、指令与 Harness 的 HEAD/clean-tree 复核共同保证，不把 shell 当作操作系统沙箱。
 
