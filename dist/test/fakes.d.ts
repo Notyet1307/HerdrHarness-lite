@@ -1,0 +1,166 @@
+import { type AnalystSession, type AnalystTurn, type AttemptResult, type EvidenceItem, type EvidenceRequest, type HarnessState, type IssueSnapshot, type Job, type PullRequestRef, type SelectedTask } from "../src/model.js";
+import type { AnalystPort, Clock, EvidencePort, GitHubPort, GitPort, HerdrPort, IdGenerator, StateStore } from "../src/ports.js";
+export declare class FakeClock implements Clock {
+    private tick;
+    now(): string;
+}
+export declare class SequenceIds implements IdGenerator {
+    private count;
+    next(prefix: string): string;
+}
+export declare class MemoryStore implements StateStore {
+    state: HarnessState;
+    saves: HarnessState[];
+    load(): Promise<HarnessState>;
+    save(next: HarnessState, expectedActiveRevision: number | null): Promise<void>;
+}
+export declare class FakeGitHub implements GitHubPort {
+    graph: IssueSnapshot[];
+    claims: Array<{
+        issue: number;
+        jobId: string;
+    }>;
+    published: PullRequestRef[];
+    mergeStatus: "open" | "merged" | "closed_unmerged";
+    constructor(graph: IssueSnapshot[]);
+    listIssueGraph(_repo: string, _readyLabel: string): Promise<IssueSnapshot[]>;
+    getIssue(_repo: string, issueNumber: number): Promise<IssueSnapshot>;
+    claimIssue(input: {
+        repo: string;
+        task: SelectedTask;
+        jobId: string;
+        claimLabel: string;
+        readyLabel: string;
+    }): Promise<void>;
+    publish(input: {
+        repo: string;
+        issueNumber: number;
+        branch: string;
+        baseRef: string;
+        headSha: string;
+        title: string;
+        worktreePath: string;
+    }): Promise<PullRequestRef>;
+    observePullRequest(_repo: string, _pullRequest: PullRequestRef): Promise<"open" | "merged" | "closed_unmerged">;
+}
+export declare class FakeGit implements GitPort {
+    baseSha: string;
+    workerFailure: {
+        class: "integrity_violation" | "stale_task";
+        reason: string;
+    } | null;
+    reviewerFailure: string | null;
+    refreshBase(): Promise<string>;
+    verifyWorker(input: {
+        reportedHeadSha: string;
+    }): Promise<{
+        ok: true;
+        headSha: string;
+    } | {
+        ok: false;
+        class: "integrity_violation" | "stale_task";
+        reason: string;
+    }>;
+    verifyReviewer(): Promise<{
+        ok: true;
+    } | {
+        ok: false;
+        class: "integrity_violation";
+        reason: string;
+    }>;
+}
+type Outcome = {
+    lane: "worker";
+    status: "completed" | "blocked" | "failed";
+    summary?: string;
+    headSha?: string;
+} | {
+    lane: "reviewer";
+    status: "pass" | "changes" | "blocked" | "failed";
+    summary?: string;
+    reviewedHeadSha?: string;
+    findings?: Array<{
+        severity: "critical" | "major" | "minor";
+        summary: string;
+        evidence: string;
+    }>;
+};
+export declare class FakeHerdr implements HerdrPort {
+    private readonly outcomes;
+    prepared: Array<{
+        attemptId: string;
+        lane: string;
+        handle: {
+            agentName: string;
+            paneId: string;
+            workspaceId: string;
+        };
+    }>;
+    prompts: Array<{
+        dispatchId: string;
+        text: string;
+    }>;
+    closed: string[];
+    constructor(outcomes: Outcome[]);
+    createWorktree(input: {
+        branch: string;
+        path: string;
+    }): Promise<{
+        workspaceId: string;
+        path: string;
+        branch: string;
+    }>;
+    prepareAttempt(input: {
+        worktree: {
+            workspaceId: string;
+        };
+        attempt: {
+            id: string;
+            lane: "worker" | "reviewer";
+        };
+        argv: string[];
+    }): Promise<{
+        agentName: string;
+        paneId: string;
+        workspaceId: string;
+    }>;
+    prompt(input: {
+        dispatchId: string;
+        text: string;
+    }): Promise<void>;
+    wait(input: {
+        expectedJobId: string;
+        expectedAttemptId: string;
+        expectedLane: "worker" | "reviewer";
+    }): Promise<{
+        agentStatus: "idle" | "done" | "blocked" | "unknown";
+        result: AttemptResult | null;
+    }>;
+    close(handle: {
+        agentName: string;
+    }): Promise<void>;
+}
+export declare class FakeAnalyst implements AnalystPort {
+    starts: Array<{
+        jobId: string;
+        taskDigest: string;
+    }>;
+    turns: AnalystTurn[];
+    constructor(turns?: AnalystTurn[]);
+    start(input: {
+        jobId: string;
+        task: {
+            digest: string;
+        };
+    }): Promise<AnalystSession>;
+    turn(): Promise<AnalystTurn>;
+}
+export declare class FakeEvidence implements EvidencePort {
+    initial(job: Job): Promise<{
+        items: EvidenceItem[];
+        missing: string[];
+    }>;
+    collect(_job: Job, requests: EvidenceRequest[]): Promise<EvidenceItem[]>;
+}
+export declare function issue(input: Partial<IssueSnapshot> & Pick<IssueSnapshot, "number" | "title">): IssueSnapshot;
+export {};

@@ -1,0 +1,21 @@
+{
+  "repo": "owner/repository",
+  "localPath": "/absolute/path/to/repository",
+  "baseRef": "main",
+  "readyLabel": "ready-for-agent",
+  "claimLabel": "agent:claimed",
+  "stateDir": "/absolute/path/to/.herdr-harness-lite",
+  "worktreeRoot": "/absolute/path/to/worktrees",
+  "maxReviewRounds": 3,
+  "maxAnalystTurns": 3,
+  "workerArgv": ["pi", "--profile", "worker"],
+  "reviewerArgv": ["pi", "--profile", "reviewer"],
+  "herdr": {
+    "bin": "herdr",
+    "session": "herdr-harness"
+  },
+  "analyst": {
+    "command": "/absolute/path/to/codex-analyst-wrapper",
+    "argv": []
+  }
+}
