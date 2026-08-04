@@ -8,7 +8,7 @@ export type HarnessConfig = {
     worktreeRoot: string;
     maxReviewRounds: number;
     maxAnalystTurns: number;
-    /** Native Pi arguments only; Herdr selects the `pi` executable. Empty arrays are valid. */
+    /** Native Pi arguments only; Herdr selects `pi` and Controller validates the role contract. */
     workerArgv: string[];
     reviewerArgv: string[];
 };
@@ -70,6 +70,7 @@ export interface GitPort {
         worktree: WorktreeHandle;
         expectedHeadSha: string;
         reportedHeadSha: string;
+        allowedResultPaths: string[];
     }): Promise<ReviewerVerification>;
 }
 export interface HerdrPort {

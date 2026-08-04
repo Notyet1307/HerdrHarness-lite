@@ -42,6 +42,7 @@ test("config rejects incomplete Pi role contracts", () => {
             ...config,
             reviewerArgv: validReviewerArgv.map((value) => value === validCodeReviewSkillPath ? "/tmp/code-review" : value),
         },
+        { ...config, reviewerArgv: [...validReviewerArgv, "--skill", "/tmp/code-review"] },
         {
             ...config,
             reviewerArgv: validReviewerArgv.map((value) => (value === "read,bash,grep,find,ls,subagent" ? `${value},write` : value)),

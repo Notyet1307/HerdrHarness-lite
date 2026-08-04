@@ -34,7 +34,7 @@ npm ci
 npm run verify
 ```
 
-仓库固定使用 TypeScript 5.8.3；严格类型检查通过，42 项测试通过。测试覆盖：
+仓库固定使用 TypeScript 5.8.3；严格类型检查通过，43 项测试通过。测试覆盖：
 
 - `ready-for-agent`、OPEN、assignee、OPEN blocker 的领取条件；
 - Map 容器不领取、严格首个 OPEN 子任务前沿；
@@ -48,6 +48,7 @@ npm run verify
 - 成功 attempt 在结果与 Git 验证后关闭自有 pane，关闭后崩溃可凭 durable result 收敛；
 - Herdr 适配器使用原生 `worktree / tab / agent` 命令，并在 blocked/wait 失败时使用官方 `agent get/read` 诊断，不再通过 `pane split + pane run` 模拟 agent 启动。
 - Worker/Reviewer 的强制 skill dispatch、Pi package 资源、foreground 双轴审查与收窄后的 child agent 契约。
+- Reviewer 验真会拒绝 tracked 改动和除该 Job 已知 result JSON 外的任何 untracked 文件。
 - Codex Analyst wrapper 的 start/turn effect receipt、崩溃后禁止重复 dispatch、完成结果重放、证据漂移拒绝、精确 UUID close，以及 close 失败时保留终态 Job。
 
 默认测试使用 fake GitHub/Git/Herdr/Analyst。本次另在 `Notyet1307/harness-sandbox@fd9defa` 上使用 Herdr 0.8.0、Pi 0.83.0 与 Pi integration v8 完成了独立命名 session canary：Pi 写出预期 result、tracked tree 未改，自有 attempt pane 已关闭；又从 `harness-sandbox@2b9ebce` 验证了 Codex CLI 0.145.0 的真实 `exec -> resume -> delete` 生命周期、完成 turn 的 receipt 重放、同 digest payload 漂移拒绝和目标 tracked tree 零改动。Analyst 实际运行目录是私有 state dir，不接触目标仓库。
@@ -84,7 +85,7 @@ pi install /absolute/path/to/HerdrHarness-lite
 将 `harness.config.example.json` 中的 skill 路径替换为本机绝对路径。Harness 继续直接透传 Pi 原生 argv，不增加第二套 profile 配置：
 
 - Worker 显式加载 Matt Pocock `implement`、`tdd` 和本仓库的 `code-review`，拥有完成任务所需的写工具；dispatch 以 `/skill:implement` 开头，完成实现 checkpoint 后必须执行 `code-review` 自审。
-- Reviewer 只显式加载本仓库的 `code-review`，没有 `edit/write` 工具；dispatch 以 `/skill:code-review` 开头。
+- Reviewer 至少显式加载本仓库的 bundled `code-review`，样例不加载其他 skill，也没有 `edit/write` 工具；dispatch 以 `/skill:code-review` 开头。同名 substitute skill 即使与 bundled skill 并存也会被拒绝。
 - `code-review` 通过 `pi-subagents` 在父 Pi 当前 turn 内并行运行两个 fresh、foreground、只读子审查器，分别检查 Standards 与 Spec。任一轴缺失或失败都不能判定通过。
 
 Controller 启动时会 fail fast：两种角色都必须显式使用 `--no-approve --no-skills --thinking high`，加载各自必需的 skill，并使用样例所列的精确工具集合；`code-review` 必须指向本仓库随包提供的目录，任何 Pi session 复用参数都会被拒绝。缺失/替换 skill、写权限越界或冲突的 tool/extension flags 同样不能启动。

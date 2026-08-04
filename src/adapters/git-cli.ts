@@ -1,3 +1,4 @@
+import { relative } from "node:path";
 import type { GitPort, ReviewerVerification, WorkerVerification } from "../ports.js";
 import { type CommandRunner, requireSuccess, SyncCommandRunner } from "./command.js";
 
@@ -55,6 +56,7 @@ export class GitCli implements GitPort {
     worktree: { path: string; branch: string; workspaceId: string };
     expectedHeadSha: string;
     reportedHeadSha: string;
+    allowedResultPaths: string[];
   }): Promise<ReviewerVerification> {
     const head = this.git(input.worktree.path, ["rev-parse", "HEAD"]).trim();
     if (head !== input.expectedHeadSha || input.reportedHeadSha !== input.expectedHeadSha) {
@@ -64,9 +66,17 @@ export class GitCli implements GitPort {
         reason: `review is not bound to the current HEAD ${input.expectedHeadSha}`,
       };
     }
-    const dirty = this.git(input.worktree.path, ["status", "--porcelain", "--untracked-files=no"]);
-    if (dirty.trim()) {
-      return { ok: false, class: "integrity_violation", reason: `reviewer modified tracked files:\n${dirty.trim()}` };
+    const status = this.git(input.worktree.path, ["status", "--porcelain=v1", "--untracked-files=all"]);
+    const allowed = new Set(input.allowedResultPaths.map((path) => relative(input.worktree.path, path).replace(/\\/g, "/")));
+    const unexpected = status.split(/\r?\n/).filter((line) => (
+      line && (!line.startsWith("?? ") || !allowed.has(line.slice(3)))
+    ));
+    if (unexpected.length > 0) {
+      return {
+        ok: false,
+        class: "integrity_violation",
+        reason: `reviewer modified the worktree outside Harness result files:\n${unexpected.join("\n")}`,
+      };
     }
     return { ok: true };
   }

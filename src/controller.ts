@@ -531,6 +531,7 @@ export class HarnessController {
       worktree: job.worktree,
       expectedHeadSha: job.headSha,
       reportedHeadSha: review.reviewedHeadSha,
+      allowedResultPaths: [...job.attempts.map((settled) => settled.resultPath), attempt.resultPath],
     });
     if (!verification.ok) {
       return this.block(state, job, {
@@ -981,7 +982,8 @@ function validatePiRoleArgv(
   if (skillPaths.some((path) => !isAbsolute(path))) fail("skill paths must be absolute");
   const loadedSkills = new Set(skillPaths.map(piSkillName));
   if (skills.some((skill) => !loadedSkills.has(skill))) fail(`required skills: ${skills.join(",")}`);
-  if (!skillPaths.some((path) => piSkillName(path) === "code-review" && piSkillDirectory(path) === BUNDLED_CODE_REVIEW_SKILL)) {
+  const reviewSkillPaths = skillPaths.filter((path) => piSkillName(path) === "code-review");
+  if (reviewSkillPaths.length !== 1 || piSkillDirectory(reviewSkillPaths[0]!) !== BUNDLED_CODE_REVIEW_SKILL) {
     fail("code-review must resolve to the bundled Harness skill");
   }
   const toolValues = flagValues(argv, "--tools");
