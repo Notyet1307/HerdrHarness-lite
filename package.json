@@ -13,7 +13,8 @@
     "verify": "npm run typecheck && npm test"
   },
   "bin": {
-    "herdr-harness-lite": "./dist/src/cli.js"
+    "herdr-harness-lite": "./dist/src/cli.js",
+    "codex-analyst-wrapper": "./dist/src/codex-analyst-wrapper.js"
   },
   "devDependencies": {
     "typescript": "5.8.3"

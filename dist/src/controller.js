@@ -715,6 +715,12 @@ export class HarnessController {
         return result(true, "recovery_applied", job.id, "approval consumed; a fresh worker attempt is now required");
     }
     async archive(state, job) {
+        try {
+            await this.deps.analyst.close({ jobId: job.id, taskDigest: job.task.digest, session: job.analyst });
+        }
+        catch (error) {
+            return result(false, "archived", job.id, `Codex Analyst could not be closed safely: ${message(error)}`);
+        }
         const terminal = {
             id: job.id,
             repo: job.task.repo,

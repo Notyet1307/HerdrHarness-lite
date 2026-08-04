@@ -149,6 +149,8 @@ export class FakeHerdr {
 }
 export class FakeAnalyst {
     starts = [];
+    closes = [];
+    closeFailure = null;
     turns;
     constructor(turns = [{
             kind: "advice",
@@ -174,6 +176,11 @@ export class FakeAnalyst {
         if (!turn)
             throw new Error("no analyst turn queued");
         return turn;
+    }
+    async close(input) {
+        this.closes.push({ jobId: input.jobId, sessionId: input.session?.id ?? null, taskDigest: input.taskDigest });
+        if (this.closeFailure)
+            throw this.closeFailure;
     }
 }
 export class FakeEvidence {

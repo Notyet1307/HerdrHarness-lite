@@ -18,5 +18,7 @@ export declare class JsonCommandAnalyst implements AnalystPort {
         task: TaskSnapshot;
     }): Promise<AnalystSession>;
     turn(input: Parameters<AnalystPort["turn"]>[0]): Promise<AnalystTurn>;
+    close(input: Parameters<AnalystPort["close"]>[0]): Promise<void>;
     private call;
 }
+export declare function parseAnalystTurn(value: unknown): AnalystTurn;

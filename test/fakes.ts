@@ -180,6 +180,8 @@ export class FakeHerdr implements HerdrPort {
 
 export class FakeAnalyst implements AnalystPort {
   starts: Array<{ jobId: string; taskDigest: string }> = [];
+  closes: Array<{ jobId: string; sessionId: string | null; taskDigest: string }> = [];
+  closeFailure: Error | null = null;
   turns: AnalystTurn[];
 
   constructor(turns: AnalystTurn[] = [{
@@ -207,6 +209,11 @@ export class FakeAnalyst implements AnalystPort {
     const turn = this.turns.shift();
     if (!turn) throw new Error("no analyst turn queued");
     return turn;
+  }
+
+  async close(input: { jobId: string; session: AnalystSession | null; taskDigest: string }): Promise<void> {
+    this.closes.push({ jobId: input.jobId, sessionId: input.session?.id ?? null, taskDigest: input.taskDigest });
+    if (this.closeFailure) throw this.closeFailure;
   }
 }
 

@@ -34,7 +34,7 @@ npm ci
 npm run verify
 ```
 
-仓库固定使用 TypeScript 5.8.3；严格类型检查通过，22 项测试通过。测试覆盖：
+仓库固定使用 TypeScript 5.8.3；严格类型检查通过，35 项测试通过。测试覆盖：
 
 - `ready-for-agent`、OPEN、assignee、OPEN blocker 的领取条件；
 - Map 容器不领取、严格首个 OPEN 子任务前沿；
@@ -47,8 +47,9 @@ npm run verify
 - attempt 在 `prepared -> pane_ready -> agent_ready -> running` 各阶段先持久化再推进；prompt 结果不确定时不重放；
 - 成功 attempt 在结果与 Git 验证后关闭自有 pane，关闭后崩溃可凭 durable result 收敛；
 - Herdr 适配器使用原生 `worktree / tab / agent` 命令，并在 blocked/wait 失败时使用官方 `agent get/read` 诊断，不再通过 `pane split + pane run` 模拟 agent 启动。
+- Codex Analyst wrapper 的 start/turn effect receipt、崩溃后禁止重复 dispatch、完成结果重放、证据漂移拒绝、精确 UUID close，以及 close 失败时保留终态 Job。
 
-默认测试使用 fake GitHub/Git/Herdr/Analyst。本次另在 `Notyet1307/harness-sandbox@fd9defa` 上使用 Herdr 0.8.0、Pi 0.83.0 与 Pi integration v8 完成了独立命名 session canary：Pi 写出预期 result、tracked tree 未改，自有 attempt pane 已关闭。这仍不代表 GitHub issue 到 PR/merge 的完整端到端已经跑通。worktree 自动删除不在本次实现范围内。
+默认测试使用 fake GitHub/Git/Herdr/Analyst。本次另在 `Notyet1307/harness-sandbox@fd9defa` 上使用 Herdr 0.8.0、Pi 0.83.0 与 Pi integration v8 完成了独立命名 session canary：Pi 写出预期 result、tracked tree 未改，自有 attempt pane 已关闭；又从 `harness-sandbox@2b9ebce` 验证了 Codex CLI 0.145.0 的真实 `exec -> resume -> delete` 生命周期、完成 turn 的 receipt 重放、同 digest payload 漂移拒绝和目标 tracked tree 零改动。Analyst 实际运行目录是私有 state dir，不接触目标仓库。这仍不代表 GitHub issue 到 PR/merge 的完整端到端已经跑通。worktree 自动删除不在本次实现范围内。
 
 ## 最小命令面
 
@@ -93,7 +94,11 @@ src/
 
 ## Codex Analyst wrapper 协议
 
-参考实现没有硬编码某一版 Codex CLI 的持久 session 参数。`analyst.command` 指向一个 wrapper；Harness 通过 stdin 发送 JSON，并从 stdout 接收单个 JSON。
+仓库内置 `codex-analyst-wrapper`，但 Controller 仍只依赖 JSON command seam。源码构建产物是 JavaScript，因此配置样例以 Node 作为 `analyst.command`，并在 `analyst.argv` 中传入 wrapper 路径和 `--state-dir`；Harness 通过 stdin 发送 JSON，并从 stdout 接收单个 JSON。
+
+wrapper 使用 Codex CLI 的持久 session：首次调用 `codex exec`，后续调用 `codex exec resume <UUID>`，终态调用 `codex delete --force <UUID>`。start 与 turn 都先在 `analyst-effects/` 写入并 fsync 私有 effect receipt，再调用 Codex；receipt 同时绑定完整请求摘要，重复请求返回已记录结果，payload 漂移或未决请求 fail closed，绝不自动创建替代 session。这些 receipt 只负责外部副作用幂等，不是 Job workflow truth。
+
+start 和 resume 都使用同一 restricted profile：strict config、忽略用户 config/rules、read-only sandbox、关闭 web search 与 shell tool。Codex 没有 controller、GitHub、Git、Herdr 或恢复权限；所有 task/evidence 都按不可信数据处理。
 
 启动请求：
 
@@ -140,6 +145,19 @@ src/
 ```
 
 Analyst 不会获得 controller write、任意 shell recovery 或直接向旧 worker 发消息的能力。
+
+关闭请求由 Controller 在归档前发送：
+
+```json
+{
+  "operation": "close",
+  "jobId": "job-id",
+  "taskDigest": "sha256",
+  "session": { "id": "real-codex-session-uuid", "taskDigest": "sha256" }
+}
+```
+
+只允许删除 wrapper 为该 Job 和 task digest 记录的精确 UUID；删除失败时终态 Job 保留，不会静默归档。
 
 ## 生产迁移建议
 

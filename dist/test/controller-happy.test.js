@@ -63,6 +63,11 @@ test("happy path claims, starts Analyst, runs fresh Pi worker/reviewer, publishe
     assert.equal(github.claims.length, 1);
     assert.equal(github.claims[0]?.issue, 21);
     assert.equal(analyst.starts.length, 1);
+    assert.deepEqual(analyst.closes, [{
+            jobId: "job-001",
+            sessionId: "analyst-job-001",
+            taskDigest: analyst.starts[0].taskDigest,
+        }]);
     assert.equal(herdr.prepared.length, 2);
     assert.equal(herdr.prepared[0]?.lane, "worker");
     assert.equal(herdr.prepared[1]?.lane, "reviewer");
@@ -130,5 +135,35 @@ test("a durable valid result completes even when the closed agent is no longer k
         await controller.tick();
     assert.equal(store.state.activeJob?.state, "reviewer_ready");
     assert.equal(herdr.closed.length, 1);
+});
+test("a terminal job is retained when its exact Analyst session cannot be closed", async () => {
+    const store = new MemoryStore();
+    const github = new FakeGitHub([issue({ number: 24, title: "Retain cleanup failure" })]);
+    const analyst = new FakeAnalyst();
+    analyst.closeFailure = new Error("session delete failed");
+    const controller = new HarnessController({
+        config,
+        store,
+        github,
+        git: new FakeGit(),
+        herdr: new FakeHerdr([
+            { lane: "worker", status: "completed", headSha: "b".repeat(40) },
+            { lane: "reviewer", status: "pass" },
+        ]),
+        analyst,
+        evidence: new FakeEvidence(),
+        clock: new FakeClock(),
+        ids: new SequenceIds(),
+    });
+    for (let index = 0; index < 14; index += 1)
+        await controller.tick();
+    github.mergeStatus = "merged";
+    await controller.tick();
+    const retained = await controller.tick();
+    assert.equal(retained.action, "archived");
+    assert.equal(retained.ok, false);
+    assert.match(retained.message, /session delete failed/);
+    assert.equal(store.state.activeJob?.state, "done");
+    assert.equal(store.state.terminalJobs.length, 0);
 });
 //# sourceMappingURL=controller-happy.test.js.map

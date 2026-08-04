@@ -15,7 +15,11 @@
     "session": "herdr-harness"
   },
   "analyst": {
-    "command": "/absolute/path/to/codex-analyst-wrapper",
-    "argv": []
+    "command": "/absolute/path/to/node",
+    "argv": [
+      "/absolute/path/to/HerdrHarness-lite/dist/src/codex-analyst-wrapper.js",
+      "--state-dir",
+      "/absolute/path/to/.herdr-harness-lite"
+    ]
   }
 }

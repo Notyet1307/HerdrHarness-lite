@@ -156,6 +156,12 @@ export declare class FakeAnalyst implements AnalystPort {
         jobId: string;
         taskDigest: string;
     }>;
+    closes: Array<{
+        jobId: string;
+        sessionId: string | null;
+        taskDigest: string;
+    }>;
+    closeFailure: Error | null;
     turns: AnalystTurn[];
     constructor(turns?: AnalystTurn[]);
     start(input: {
@@ -165,6 +171,11 @@ export declare class FakeAnalyst implements AnalystPort {
         };
     }): Promise<AnalystSession>;
     turn(): Promise<AnalystTurn>;
+    close(input: {
+        jobId: string;
+        session: AnalystSession | null;
+        taskDigest: string;
+    }): Promise<void>;
 }
 export declare class FakeEvidence implements EvidencePort {
     initial(job: Job): Promise<{

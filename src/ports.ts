@@ -120,6 +120,7 @@ export interface AnalystPort {
     evidence: EvidencePack;
     turn: number;
   }): Promise<AnalystTurn>;
+  close(input: { jobId: string; taskDigest: string; session: AnalystSession | null }): Promise<void>;
 }
 
 export interface EvidencePort {
