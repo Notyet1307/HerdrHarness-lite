@@ -18,6 +18,7 @@ test("Pi package exposes the Harness review skill and child agent", () => {
 test("Pi review adapter uses fresh foreground user-scope reviewers", () => {
   const skill = readFileSync("pi/skills/code-review/SKILL.md", "utf8");
   assert.match(skill, /^---\nname: code-review\n/m);
+  assert.match(skill, /artifacts:\s*false/);
   assert.match(skill, /agentScope:\s*"user"/);
   assert.match(skill, /context:\s*"fresh"/);
   assert.match(skill, /async:\s*false/);

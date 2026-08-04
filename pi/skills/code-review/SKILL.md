@@ -68,6 +68,7 @@ either child.
 
 ```text
 subagent({
+  artifacts: false,
   agentScope: "user",
   context: "fresh",
   async: false,
@@ -83,6 +84,10 @@ subagent({
   ]
 })
 ```
+
+Keep `artifacts: false`: child reports return inline to the parent without
+writing `.pi-subagents/` debug files into the reviewed worktree. Do not replace
+this with post-review deletion or a wider Harness Git allowlist.
 
 The Standards brief must contain the fixed-point diff command, commit list,
 standards-source paths, the full smell list above, and these rules: cite every
