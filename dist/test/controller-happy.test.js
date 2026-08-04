@@ -37,6 +37,7 @@ test("config rejects incomplete Pi role contracts", () => {
         { ...config, workerArgv: [...validWorkerArgv.slice(0, 2), ...validWorkerArgv.slice(4)] },
         { ...config, workerArgv: validWorkerArgv.map((value) => value === "high" ? "low" : value) },
         { ...config, reviewerArgv: [...validReviewerArgv, "--no-extensions"] },
+        { ...config, reviewerArgv: [...validReviewerArgv, "--extension", "/tmp/override.js"] },
         { ...config, reviewerArgv: [...validReviewerArgv, "--continue"] },
         {
             ...config,
@@ -65,6 +66,29 @@ test("config rejects incomplete Pi role contracts", () => {
             ids: new SequenceIds(),
         }), /(?:workerArgv|reviewerArgv) must enforce the Pi role contract/);
     }
+});
+test("blocked Reviewer cannot bypass worktree verification", async () => {
+    const store = new MemoryStore();
+    const git = new FakeGit();
+    git.reviewerFailure = "reviewer left an untracked product file";
+    const controller = new HarnessController({
+        config,
+        store,
+        github: new FakeGitHub([issue({ number: 22, title: "Verify blocked review" })]),
+        git,
+        herdr: new FakeHerdr([
+            { lane: "worker", status: "completed", headSha: "b".repeat(40) },
+            { lane: "reviewer", status: "blocked", summary: "review evidence unavailable" },
+        ]),
+        analyst: new FakeAnalyst(),
+        evidence: new FakeEvidence(),
+        clock: new FakeClock(),
+        ids: new SequenceIds(),
+    });
+    for (let index = 0; index < 13; index += 1)
+        await controller.tick();
+    assert.equal(store.state.activeJob?.incident?.class, "integrity_violation");
+    assert.match(store.state.activeJob?.incident?.summary ?? "", /untracked product file/);
 });
 test("happy path claims, starts Analyst, runs fresh Pi worker/reviewer, publishes, and archives", async () => {
     const store = new MemoryStore();

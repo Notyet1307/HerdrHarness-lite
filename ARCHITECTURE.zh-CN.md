@@ -441,7 +441,7 @@ tracked worktree clean
 
 Herdr 只管理顶层 Worker/Reviewer Pi。子审查器由顶层 Pi 在同一 foreground turn 内拥有；它们继承父 Pi 的工作目录、环境和未覆写模型，但 `thinking=high` 显式固定，工具、skills、扩展和递归深度按只读职责收窄。禁止 async child，避免顶层 Pi 提前完成而留下未被 Harness 生命周期覆盖的后台执行。
 
-Controller 直接校验原生 role argv：解析每个 `SKILL.md` 的真实 `name`，用 installer `.skill-lock.json` 核对 Matt Pocock `implement/tdd` 来源，并要求 bundled `code-review` 是唯一同名 skill；精确工具集合与 `thinking=high` 缺一不可，`continue/resume/session/session-id/fork` 一律拒绝。因此 fresh attempt 不能被路径伪装或配置降级，且没有引入另一套 profile DSL。
+Controller 直接校验原生 role argv：解析每个 `SKILL.md` 的真实 `name`，用 installer `.skill-lock.json` 核对 Matt Pocock `implement/tdd` 来源，并要求 bundled `code-review` 是唯一同名 skill；精确工具集合与 `thinking=high` 缺一不可。除可选 `provider/model/no-session` 外，extension、system prompt、session 复用和 positional prompt 等参数全部拒绝。因此 fresh attempt 不能被路径伪装或配置降级，且没有引入另一套 profile DSL。
 
 结果：
 
@@ -555,7 +555,7 @@ npm run verify
 
 ```text
 TypeScript strict typecheck: PASS
-Tests: 43 passed, 0 failed
+Tests: 44 passed, 0 failed
 ```
 
 覆盖：

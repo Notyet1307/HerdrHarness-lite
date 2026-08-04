@@ -69,7 +69,7 @@ export interface GitPort {
     verifyReviewer(input: {
         worktree: WorktreeHandle;
         expectedHeadSha: string;
-        reportedHeadSha: string;
+        reportedHeadSha: string | null;
         allowedResultPaths: string[];
     }): Promise<ReviewerVerification>;
 }

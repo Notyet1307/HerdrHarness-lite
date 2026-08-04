@@ -55,11 +55,11 @@ export class GitCli implements GitPort {
   async verifyReviewer(input: {
     worktree: { path: string; branch: string; workspaceId: string };
     expectedHeadSha: string;
-    reportedHeadSha: string;
+    reportedHeadSha: string | null;
     allowedResultPaths: string[];
   }): Promise<ReviewerVerification> {
     const head = this.git(input.worktree.path, ["rev-parse", "HEAD"]).trim();
-    if (head !== input.expectedHeadSha || input.reportedHeadSha !== input.expectedHeadSha) {
+    if (head !== input.expectedHeadSha || (input.reportedHeadSha !== null && input.reportedHeadSha !== input.expectedHeadSha)) {
       return {
         ok: false,
         class: "integrity_violation",

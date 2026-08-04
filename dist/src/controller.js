@@ -346,6 +346,33 @@ export class HarnessController {
                 attemptResult: null,
             });
         }
+        if (lane === "reviewer") {
+            if (!job.headSha) {
+                return this.block(state, job, {
+                    class: "integrity_violation",
+                    lane,
+                    summary: "reviewer lane lost its expected implementation HEAD",
+                    attemptResult: observation.result,
+                });
+            }
+            const reportedHeadSha = observation.result?.lane === "reviewer"
+                ? (observation.result.reviewedHeadSha ?? null)
+                : null;
+            const verification = await this.deps.git.verifyReviewer({
+                worktree: job.worktree,
+                expectedHeadSha: job.headSha,
+                reportedHeadSha,
+                allowedResultPaths: [...job.attempts.map((settled) => settled.resultPath), attempt.resultPath],
+            });
+            if (!verification.ok) {
+                return this.block(state, job, {
+                    class: verification.class,
+                    lane,
+                    summary: verification.reason,
+                    attemptResult: observation.result,
+                });
+            }
+        }
         const validated = validateAttemptResult(job.id, attempt, observation.result);
         if (!validated.ok) {
             return this.block(state, job, {
@@ -431,20 +458,6 @@ export class HarnessController {
                 class: "integrity_violation",
                 lane: "reviewer",
                 summary: "review result lacks a bound implementation HEAD",
-                attemptResult: review,
-            });
-        }
-        const verification = await this.deps.git.verifyReviewer({
-            worktree: job.worktree,
-            expectedHeadSha: job.headSha,
-            reportedHeadSha: review.reviewedHeadSha,
-            allowedResultPaths: [...job.attempts.map((settled) => settled.resultPath), attempt.resultPath],
-        });
-        if (!verification.ok) {
-            return this.block(state, job, {
-                class: verification.class,
-                lane: "reviewer",
-                summary: verification.reason,
                 attemptResult: review,
             });
         }
@@ -831,24 +844,11 @@ function validatePiRoleArgv(name, argv, skills, tools) {
     const fail = (reason) => {
         throw new Error(`${name} must enforce the Pi role contract: ${reason}`);
     };
-    if (!argv.includes("--no-approve") || argv.includes("--approve") || argv.includes("-a")) {
+    validateAllowedPiArgv(argv, fail);
+    if (!argv.includes("--no-approve"))
         fail("--no-approve is required");
-    }
     if (!argv.includes("--no-skills"))
         fail("--no-skills is required");
-    const conflictingFlags = [
-        "--no-extensions", "-ne", "--no-tools", "-nt", "--no-builtin-tools", "-nbt", "--exclude-tools", "-xt", "-t",
-    ];
-    if (argv.some((argument) => conflictingFlags.some((flag) => argument === flag || argument.startsWith(`${flag}=`)))) {
-        fail("conflicting extension or tool flags are not allowed");
-    }
-    if (argv.some((argument) => ["--skill=", "--tools=", "--thinking="].some((prefix) => argument.startsWith(prefix)))) {
-        fail("role options must use separate flag and value arguments");
-    }
-    const sessionReuseFlags = ["--continue", "-c", "--resume", "-r", "--session", "--session-id", "--fork"];
-    if (argv.some((argument) => sessionReuseFlags.some((flag) => argument === flag || argument.startsWith(`${flag}=`)))) {
-        fail("session reuse flags are not allowed");
-    }
     const skillPaths = flagValues(argv, "--skill");
     if (skillPaths.some((path) => !isAbsolute(path)))
         fail("skill paths must be absolute");
@@ -884,6 +884,21 @@ function validatePiRoleArgv(name, argv, skills, tools) {
 }
 function flagValues(argv, flag) {
     return argv.flatMap((value, index) => value === flag && argv[index + 1] ? [argv[index + 1]] : []);
+}
+function validateAllowedPiArgv(argv, fail) {
+    const valueFlags = new Set(["--skill", "--tools", "--thinking", "--provider", "--model"]);
+    const booleanFlags = new Set(["--no-approve", "--no-skills", "--no-session"]);
+    for (let index = 0; index < argv.length; index += 1) {
+        const argument = argv[index];
+        if (booleanFlags.has(argument))
+            continue;
+        if (!valueFlags.has(argument))
+            fail(`unsupported Pi argument: ${argument}`);
+        const value = argv[index + 1];
+        if (!value || value.startsWith("-"))
+            fail(`${argument} requires a separate value`);
+        index += 1;
+    }
 }
 function piSkillDirectory(path) {
     const absolute = resolve(path);

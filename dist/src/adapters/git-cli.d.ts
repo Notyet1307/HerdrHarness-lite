@@ -21,7 +21,7 @@ export declare class GitCli implements GitPort {
             workspaceId: string;
         };
         expectedHeadSha: string;
-        reportedHeadSha: string;
+        reportedHeadSha: string | null;
         allowedResultPaths: string[];
     }): Promise<ReviewerVerification>;
     private git;

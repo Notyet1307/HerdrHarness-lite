@@ -34,7 +34,7 @@ npm ci
 npm run verify
 ```
 
-仓库固定使用 TypeScript 5.8.3；严格类型检查通过，43 项测试通过。测试覆盖：
+仓库固定使用 TypeScript 5.8.3；严格类型检查通过，44 项测试通过。测试覆盖：
 
 - `ready-for-agent`、OPEN、assignee、OPEN blocker 的领取条件；
 - Map 容器不领取、严格首个 OPEN 子任务前沿；
@@ -48,7 +48,7 @@ npm run verify
 - 成功 attempt 在结果与 Git 验证后关闭自有 pane，关闭后崩溃可凭 durable result 收敛；
 - Herdr 适配器使用原生 `worktree / tab / agent` 命令，并在 blocked/wait 失败时使用官方 `agent get/read` 诊断，不再通过 `pane split + pane run` 模拟 agent 启动。
 - Worker/Reviewer 的强制 skill dispatch、Pi package 资源、foreground 双轴审查与收窄后的 child agent 契约。
-- Reviewer 验真会拒绝 tracked 改动和除该 Job 已知 result JSON 外的任何 untracked 文件。
+- Reviewer 无论返回 `pass/changes/blocked/failed` 还是缺失结果，都会先经过 Git gate；tracked 改动和除该 Job 已知 result JSON 外的任何 untracked 文件都不能进入 recovery/publish。
 - Codex Analyst wrapper 的 start/turn effect receipt、崩溃后禁止重复 dispatch、完成结果重放、证据漂移拒绝、精确 UUID close，以及 close 失败时保留终态 Job。
 
 默认测试使用 fake GitHub/Git/Herdr/Analyst。本次另在 `Notyet1307/harness-sandbox@fd9defa` 上使用 Herdr 0.8.0、Pi 0.83.0 与 Pi integration v8 完成了独立命名 session canary：Pi 写出预期 result、tracked tree 未改，自有 attempt pane 已关闭；又从 `harness-sandbox@2b9ebce` 验证了 Codex CLI 0.145.0 的真实 `exec -> resume -> delete` 生命周期、完成 turn 的 receipt 重放、同 digest payload 漂移拒绝和目标 tracked tree 零改动。Analyst 实际运行目录是私有 state dir，不接触目标仓库。
@@ -88,7 +88,7 @@ pi install /absolute/path/to/HerdrHarness-lite
 - Reviewer 至少显式加载本仓库的 bundled `code-review`，样例不加载其他 skill，也没有 `edit/write` 工具；dispatch 以 `/skill:code-review` 开头。同名 substitute skill 即使与 bundled skill 并存也会被拒绝。
 - `code-review` 通过 `pi-subagents` 在父 Pi 当前 turn 内并行运行两个 fresh、foreground、只读子审查器，分别检查 Standards 与 Spec。任一轴缺失或失败都不能判定通过。
 
-Matt Pocock `implement/tdd` 应通过支持 `.agents/.skill-lock.json` 的 skills installer 安装，并保留其中的 `mattpocock/skills` 来源记录。Controller 启动时会读取每个 `SKILL.md` 的 `name` frontmatter 并 fail fast：Worker 的 `implement/tdd` 必须匹配 installer lock，`code-review` 必须是本仓库随包提供的唯一同名 skill；两种角色还必须显式使用 `--no-approve --no-skills --thinking high` 和样例所列的精确工具集合。Pi session 复用、缺失/替换 skill、写权限越界或冲突的 tool/extension flags 都不能启动。
+Matt Pocock `implement/tdd` 应通过支持 `.agents/.skill-lock.json` 的 skills installer 安装，并保留其中的 `mattpocock/skills` 来源记录。Controller 启动时会读取每个 `SKILL.md` 的 `name` frontmatter 并 fail fast：Worker 的 `implement/tdd` 必须匹配 installer lock，`code-review` 必须是本仓库随包提供的唯一同名 skill；两种角色还必须显式使用 `--no-approve --no-skills --thinking high` 和样例所列的精确工具集合。原生 argv 只额外允许 `--provider/--model/--no-session`，因此 Pi session 复用、显式 extension、system prompt、预注入 prompt、缺失/替换 skill 或工具越权都不能启动。
 
 子审查器从父 Pi 获得当前工作目录、环境和未覆写的模型；`thinking=high` 被显式固定，因为该扩展没有通用的动态 thinking 继承。工具、skills、扩展和递归深度有意收窄，不能复制父 Pi 的写权限；`async=false` 保证 Herdr 观察到的顶层 Pi 生命周期覆盖整次审查。这里的“只读”仍由最小工具面、指令与 Harness 的 HEAD/clean-tree 复核共同保证，不把 shell 当作操作系统沙箱。
 
