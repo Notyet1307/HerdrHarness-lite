@@ -11,9 +11,25 @@ const config = {
     worktreeRoot: "/worktrees",
     maxReviewRounds: 3,
     maxAnalystTurns: 3,
-    workerArgv: ["pi", "--profile", "worker"],
-    reviewerArgv: ["pi", "--profile", "reviewer"],
+    workerArgv: [],
+    reviewerArgv: [],
 };
+test("config rejects non-string native Pi arguments", () => {
+    for (const field of ["workerArgv", "reviewerArgv"]) {
+        const invalidConfig = { ...config, [field]: [42] };
+        assert.throws(() => new HarnessController({
+            config: invalidConfig,
+            store: new MemoryStore(),
+            github: new FakeGitHub([]),
+            git: new FakeGit(),
+            herdr: new FakeHerdr([]),
+            analyst: new FakeAnalyst(),
+            evidence: new FakeEvidence(),
+            clock: new FakeClock(),
+            ids: new SequenceIds(),
+        }), new RegExp(`${field} must be an array of strings`));
+    }
+});
 test("happy path claims, starts Analyst, runs fresh Pi worker/reviewer, publishes, and archives", async () => {
     const store = new MemoryStore();
     const github = new FakeGitHub([issue({ number: 21, title: "Implement feature" })]);

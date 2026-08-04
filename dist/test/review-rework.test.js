@@ -11,8 +11,8 @@ const config = {
     worktreeRoot: "/worktrees",
     maxReviewRounds: 3,
     maxAnalystTurns: 3,
-    workerArgv: ["pi", "--profile", "worker"],
-    reviewerArgv: ["pi", "--profile", "reviewer"],
+    workerArgv: [],
+    reviewerArgv: [],
 };
 test("actionable review findings create a fresh worker and a fresh reviewer", async () => {
     const store = new MemoryStore();

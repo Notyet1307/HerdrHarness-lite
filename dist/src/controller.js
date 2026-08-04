@@ -807,8 +807,13 @@ function validateConfig(config) {
     if (!Number.isInteger(config.maxAnalystTurns) || config.maxAnalystTurns < 1 || config.maxAnalystTurns > 5) {
         throw new Error("maxAnalystTurns must be between 1 and 5");
     }
-    if (config.workerArgv.length === 0 || config.reviewerArgv.length === 0) {
-        throw new Error("workerArgv and reviewerArgv must not be empty");
+    for (const [name, value] of [
+        ["workerArgv", config.workerArgv],
+        ["reviewerArgv", config.reviewerArgv],
+    ]) {
+        if (!Array.isArray(value) || value.some((argument) => typeof argument !== "string")) {
+            throw new Error(`${name} must be an array of strings`);
+        }
     }
 }
 function result(ok, action, jobId, messageValue) {

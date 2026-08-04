@@ -24,8 +24,8 @@ const config: HarnessConfig = {
   worktreeRoot: "/worktrees",
   maxReviewRounds: 3,
   maxAnalystTurns: 3,
-  workerArgv: ["pi", "--profile", "worker"],
-  reviewerArgv: ["pi", "--profile", "reviewer"],
+  workerArgv: [],
+  reviewerArgv: [],
 };
 
 test("blocked work cannot resume before exact human approval and recovery always uses a fresh worker", async () => {

@@ -8,8 +8,8 @@
   "worktreeRoot": "/absolute/path/to/worktrees",
   "maxReviewRounds": 3,
   "maxAnalystTurns": 3,
-  "workerArgv": ["pi", "--profile", "worker"],
-  "reviewerArgv": ["pi", "--profile", "reviewer"],
+  "workerArgv": [],
+  "reviewerArgv": [],
   "herdr": {
     "bin": "herdr",
     "session": "herdr-harness"

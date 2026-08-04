@@ -23,8 +23,8 @@ const config: HarnessConfig = {
   worktreeRoot: "/worktrees",
   maxReviewRounds: 3,
   maxAnalystTurns: 3,
-  workerArgv: ["pi", "--profile", "worker"],
-  reviewerArgv: ["pi", "--profile", "reviewer"],
+  workerArgv: [],
+  reviewerArgv: [],
 };
 
 test("a durable claim intent recovers when GitHub label mutation succeeded before the process crashed", async () => {

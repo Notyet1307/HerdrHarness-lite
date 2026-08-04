@@ -8,6 +8,7 @@ export type HarnessConfig = {
     worktreeRoot: string;
     maxReviewRounds: number;
     maxAnalystTurns: number;
+    /** Native Pi arguments only; Herdr selects the `pi` executable. Empty arrays are valid. */
     workerArgv: string[];
     reviewerArgv: string[];
 };

@@ -126,9 +126,9 @@ export class HerdrCli {
             "pi",
             "--pane",
             input.handle.paneId,
-            "--",
-            ...input.argv,
         ];
+        if (input.argv.length > 0)
+            startArgs.push("--", ...input.argv);
         let startedValue = null;
         const retryAttempts = SHELL_READY_TIMEOUT_MS / SHELL_READY_RETRY_MS;
         for (let retryIndex = 0; retryIndex < retryAttempts; retryIndex += 1) {

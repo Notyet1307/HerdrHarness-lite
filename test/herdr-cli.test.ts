@@ -193,6 +193,34 @@ test("Herdr adapter follows the native 0.8 command and JSON response contract", 
   ]);
 });
 
+test("Herdr adapter starts Pi without a native-argument separator when argv is empty", async () => {
+  const calls: string[][] = [];
+  const runner: CommandRunner = {
+    run(_command, args) {
+      calls.push(args);
+      const plain = args.slice(2);
+      if (plain[0] === "agent" && plain[1] === "get") {
+        return fail(error("agent_not_found", "agent not found"));
+      }
+      if (plain[0] === "agent" && plain[1] === "start") {
+        return ok({ result: { type: "agent_started", agent: agent("hhw-contract", "idle") } });
+      }
+      return fail(`unexpected command: ${plain.join(" ")}`);
+    },
+  };
+  const herdr = new HerdrCli({ runner, session: "test-session" });
+
+  await herdr.startAgent({
+    handle: { agentName: "hhw-contract", paneId: "w1:p2", tabId: "w1:t2", workspaceId: "w1" },
+    argv: [],
+  });
+
+  assert.deepEqual(calls, [
+    ["--session", "test-session", "agent", "get", "hhw-contract"],
+    ["--session", "test-session", "agent", "start", "hhw-contract", "--kind", "pi", "--pane", "w1:p2"],
+  ]);
+});
+
 test("Herdr adapter recovers the unique pane created before its handle was persisted", async () => {
   const calls: string[][] = [];
   const runner: CommandRunner = {
