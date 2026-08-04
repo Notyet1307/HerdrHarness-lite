@@ -81,25 +81,35 @@ export class FakeGit {
 export class FakeHerdr {
     outcomes;
     prepared = [];
+    started = [];
     prompts = [];
     closed = [];
+    promptFailureAfterDispatch = null;
     constructor(outcomes) {
         this.outcomes = outcomes;
     }
     async createWorktree(input) {
         return { workspaceId: "ws-1", path: input.path, branch: input.branch };
     }
-    async prepareAttempt(input) {
+    async createAttemptPane(input) {
         const handle = {
             agentName: `agent-${input.attempt.id}`,
             paneId: `pane-${input.attempt.id}`,
+            tabId: `tab-${input.attempt.id}`,
             workspaceId: input.worktree.workspaceId,
         };
         this.prepared.push({ attemptId: input.attempt.id, lane: input.attempt.lane, handle });
         return handle;
     }
+    async startAgent(input) {
+        this.started.push(input.handle.agentName);
+    }
     async prompt(input) {
         this.prompts.push({ dispatchId: input.dispatchId, text: input.text });
+        const failure = this.promptFailureAfterDispatch;
+        this.promptFailureAfterDispatch = null;
+        if (failure)
+            throw failure;
     }
     async wait(input) {
         const outcome = this.outcomes.shift();
@@ -118,7 +128,7 @@ export class FakeHerdr {
                 headSha: outcome.status === "completed" ? (outcome.headSha ?? "b".repeat(40)) : null,
                 failedCommands: [],
             };
-            return { agentStatus: outcome.status === "blocked" ? "blocked" : "done", result };
+            return { agentStatus: outcome.agentStatus ?? (outcome.status === "blocked" ? "blocked" : "done"), result, diagnostic: null };
         }
         const job = currentJobId(input.expectedJobId);
         const result = {
@@ -131,7 +141,7 @@ export class FakeHerdr {
             reviewedHeadSha: outcome.status === "pass" || outcome.status === "changes" ? (outcome.reviewedHeadSha ?? "b".repeat(40)) : null,
             findings: outcome.findings ?? [],
         };
-        return { agentStatus: outcome.status === "blocked" ? "blocked" : "done", result };
+        return { agentStatus: outcome.agentStatus ?? (outcome.status === "blocked" ? "blocked" : "done"), result, diagnostic: null };
     }
     async close(handle) {
         this.closed.push(handle.agentName);

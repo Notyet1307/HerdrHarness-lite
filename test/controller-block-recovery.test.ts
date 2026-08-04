@@ -63,7 +63,7 @@ test("blocked work cannot resume before exact human approval and recovery always
     ids,
   });
 
-  for (let index = 0; index < 6; index += 1) await controller.tick();
+  for (let index = 0; index < 8; index += 1) await controller.tick();
   assert.equal(store.state.activeJob?.state, "blocked");
   const blockedAttemptId = store.state.activeJob?.activeAttempt?.id;
   assert.ok(blockedAttemptId);
@@ -112,7 +112,7 @@ test("blocked work cannot resume before exact human approval and recovery always
   const freshAttemptId = store.state.activeJob?.activeAttempt?.id;
   assert.ok(freshAttemptId);
   assert.ok(freshAttemptId !== blockedAttemptId);
-  await controller.tick();
+  for (let index = 0; index < 3; index += 1) await controller.tick();
   const recoveryPrompt = herdr.prompts.at(-1)?.text ?? "";
   assert.match(recoveryPrompt, /Keep the public interface unchanged/);
   assert.match(recoveryPrompt, new RegExp(freshAttemptId));
@@ -146,7 +146,7 @@ test("integrity incidents cannot be converted into retry authority by the Analys
     ids,
   });
 
-  for (let index = 0; index < 6; index += 1) await controller.tick();
+  for (let index = 0; index < 8; index += 1) await controller.tick();
   assert.equal(store.state.activeJob?.incident?.class, "integrity_violation");
   await controller.tick();
   const job = store.state.activeJob!;

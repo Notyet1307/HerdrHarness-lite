@@ -33,6 +33,9 @@ class RecordingRunner implements CommandRunner {
         },
       });
     }
+    if (plain[0] === "tab" && plain[1] === "list") {
+      return ok({ result: { type: "tab_list", tabs: [] } });
+    }
     if (plain[0] === "agent" && plain[1] === "get") {
       return this.started
         ? ok({ result: { type: "agent_info", agent: agent(this.agentName, "idle") } })
@@ -99,12 +102,13 @@ function pane(paneId: string, tabId: string): Record<string, unknown> {
     workspace_id: "w1",
     tab_id: tabId,
     focused: false,
+    cwd: "/tmp/worktree",
     agent_status: "unknown",
     revision: 0,
   };
 }
 
-function agent(name: string, status: "idle" | "done"): Record<string, unknown> {
+function agent(name: string, status: "idle" | "working" | "done" | "blocked"): Record<string, unknown> {
   return {
     name,
     pane_id: "w1:p2",
@@ -140,13 +144,13 @@ test("Herdr adapter follows the native 0.8 command and JSON response contract", 
     path: "/tmp/worktree",
     label: "issue #1",
   });
-  const handle = await herdr.prepareAttempt({
+  const handle = await herdr.createAttemptPane({
     worktree,
     attempt: { id: "worker-001", lane: "worker" },
-    argv: ["--model", "test-model"],
   });
   assert.match(handle.agentName, /^[a-z][a-z0-9_-]{0,31}$/);
   assert.ok(handle.agentName.length <= 32);
+  await herdr.startAgent({ handle, argv: ["--model", "test-model"] });
   await herdr.prompt({ handle, dispatchId: "worker-001", text: "do the work" });
 
   const resultPath = `${process.cwd()}/.herdr-cli-test-result.json`;
@@ -178,13 +182,125 @@ test("Herdr adapter follows the native 0.8 command and JSON response contract", 
   const session = ["--session", "test-session"];
   assert.deepEqual(runner.calls, [
     { command: "herdr", args: [...session, "worktree", "create", "--cwd", "/repo", "--branch", "agent/issue-1", "--base", "a".repeat(40), "--path", "/tmp/worktree", "--label", "issue #1", "--no-focus"] },
-    { command: "herdr", args: [...session, "agent", "get", handle.agentName] },
+    { command: "herdr", args: [...session, "tab", "list", "--workspace", "w1"] },
     { command: "herdr", args: [...session, "tab", "create", "--workspace", "w1", "--cwd", "/tmp/worktree", "--label", "worker worker-001", "--no-focus"] },
+    { command: "herdr", args: [...session, "agent", "get", handle.agentName] },
     { command: "herdr", args: [...session, "agent", "start", handle.agentName, "--kind", "pi", "--pane", "w1:p2", "--", "--model", "test-model"] },
     { command: "herdr", args: [...session, "agent", "start", handle.agentName, "--kind", "pi", "--pane", "w1:p2", "--", "--model", "test-model"] },
     { command: "herdr", args: [...session, "agent", "prompt", handle.agentName, "[harness-dispatch:worker-001]\ndo the work", "--wait"] },
     { command: "herdr", args: [...session, "agent", "wait", handle.agentName] },
     { command: "herdr", args: [...session, "pane", "close", "w1:p2"] },
+  ]);
+});
+
+test("Herdr adapter recovers the unique pane created before its handle was persisted", async () => {
+  const calls: string[][] = [];
+  const runner: CommandRunner = {
+    run(_command, args) {
+      calls.push(args);
+      const plain = args.slice(2);
+      if (plain[0] === "tab" && plain[1] === "list") {
+        return ok({ result: { type: "tab_list", tabs: [tab("w1:t2", "worker worker-001")] } });
+      }
+      if (plain[0] === "pane" && plain[1] === "list") {
+        return ok({ result: { type: "pane_list", panes: [pane("w1:p2", "w1:t2")] } });
+      }
+      return fail(`unexpected command: ${plain.join(" ")}`);
+    },
+  };
+  const herdr = new HerdrCli({ runner, session: "test-session" });
+
+  const handle = await herdr.createAttemptPane({
+    worktree: { workspaceId: "w1", path: "/tmp/worktree", branch: "agent/issue-1" },
+    attempt: { id: "worker-001", lane: "worker" },
+  });
+
+  assert.equal(handle.paneId, "w1:p2");
+  assert.equal(handle.tabId, "w1:t2");
+  assert.deepEqual(calls, [
+    ["--session", "test-session", "tab", "list", "--workspace", "w1"],
+    ["--session", "test-session", "pane", "list", "--workspace", "w1"],
+  ]);
+});
+
+test("Herdr adapter treats an already-closed owned pane as closed", async () => {
+  const runner: CommandRunner = {
+    run() {
+      return fail(error("pane_not_found", "pane not found"));
+    },
+  };
+  const herdr = new HerdrCli({ runner, session: "test-session" });
+
+  await herdr.close({ agentName: "hhw-contract", paneId: "w1:p2", tabId: "w1:t2", workspaceId: "w1" });
+});
+
+test("Herdr adapter still returns a durable result after its pane was closed", async () => {
+  const runner: CommandRunner = {
+    run() {
+      return fail(error("agent_not_running", "agent pane was closed"));
+    },
+  };
+  const herdr = new HerdrCli({ runner, session: "test-session" });
+  const resultPath = `${process.cwd()}/.herdr-cli-recovery-result.json`;
+  writeFileSync(resultPath, JSON.stringify({
+    version: 1,
+    jobId: "job-1",
+    attemptId: "worker-001",
+    lane: "worker",
+    status: "completed",
+    summary: "done",
+    headSha: "b".repeat(40),
+    failedCommands: [],
+  }));
+
+  try {
+    const observation = await herdr.wait({
+      handle: { agentName: "hhw-contract", paneId: "w1:p2", tabId: "w1:t2", workspaceId: "w1" },
+      resultPath,
+      expectedJobId: "job-1",
+      expectedAttemptId: "worker-001",
+      expectedLane: "worker",
+    });
+    assert.equal(observation.agentStatus, "unknown");
+    assert.equal(observation.result?.attemptId, "worker-001");
+  } finally {
+    rmSync(resultPath, { force: true });
+  }
+});
+
+test("Herdr adapter inspects a blocked agent with the official get/read commands", async () => {
+  const calls: string[][] = [];
+  const runner: CommandRunner = {
+    run(_command, args) {
+      calls.push(args);
+      const plain = args.slice(2);
+      if (plain[0] === "agent" && plain[1] === "wait") {
+        return ok({ result: { type: "agent_info", agent: agent("hhw-contract", "blocked") } });
+      }
+      if (plain[0] === "agent" && plain[1] === "get") {
+        return ok({ result: { type: "agent_info", agent: agent("hhw-contract", "blocked") } });
+      }
+      if (plain[0] === "agent" && plain[1] === "read") {
+        return ok({ result: { type: "agent_read", text: "Need approval" } });
+      }
+      return fail(`unexpected command: ${plain.join(" ")}`);
+    },
+  };
+  const herdr = new HerdrCli({ runner, session: "test-session" });
+
+  const observation = await herdr.wait({
+    handle: { agentName: "hhw-contract", paneId: "w1:p2", tabId: "w1:t2", workspaceId: "w1" },
+    resultPath: "/missing-result.json",
+    expectedJobId: "job-1",
+    expectedAttemptId: "worker-001",
+    expectedLane: "worker",
+  });
+
+  assert.match(observation.diagnostic ?? "", /Need approval/);
+  assert.deepEqual(calls, [
+    ["--session", "test-session", "agent", "wait", "hhw-contract"],
+    ["--session", "test-session", "agent", "get", "hhw-contract"],
+    ["--session", "test-session", "agent", "read", "hhw-contract", "--source", "recent-unwrapped", "--lines", "120"],
   ]);
 });
 
@@ -199,9 +315,8 @@ test("Herdr adapter does not treat server errors as an absent agent", async () =
   const herdr = new HerdrCli({ runner, session: "test-session" });
 
   await assert.rejects(
-    () => herdr.prepareAttempt({
-      worktree: { workspaceId: "w1", path: "/tmp/worktree", branch: "agent/issue-1" },
-      attempt: { id: "worker-001", lane: "worker" },
+    () => herdr.startAgent({
+      handle: { agentName: "hhw-contract", paneId: "w1:p2", tabId: "w1:t2", workspaceId: "w1" },
       argv: [],
     }),
     /protocol_mismatch/,
@@ -220,14 +335,30 @@ test("Herdr adapter rejects a malformed successful agent lookup", async () => {
   const herdr = new HerdrCli({ runner, session: "test-session" });
 
   await assert.rejects(
-    () => herdr.prepareAttempt({
-      worktree: { workspaceId: "w1", path: "/tmp/worktree", branch: "agent/issue-1" },
-      attempt: { id: "worker-001", lane: "worker" },
+    () => herdr.startAgent({
+      handle: { agentName: "hhw-contract", paneId: "w1:p2", tabId: "w1:t2", workspaceId: "w1" },
       argv: [],
     }),
     /incomplete identity/,
   );
   assert.equal(calls.length, 1);
+});
+
+test("Herdr adapter does not reuse an existing agent that is already working", async () => {
+  const runner: CommandRunner = {
+    run() {
+      return ok({ result: { type: "agent_info", agent: agent("hhw-contract", "working") } });
+    },
+  };
+  const herdr = new HerdrCli({ runner, session: "test-session" });
+
+  await assert.rejects(
+    () => herdr.startAgent({
+      handle: { agentName: "hhw-contract", paneId: "w1:p2", tabId: "w1:t2", workspaceId: "w1" },
+      argv: [],
+    }),
+    /not idle before dispatch/,
+  );
 });
 
 test("Herdr adapter rejects a wait response for a different pane", async () => {
@@ -245,7 +376,32 @@ test("Herdr adapter rejects a wait response for a different pane", async () => {
 
   await assert.rejects(
     () => herdr.wait({
-      handle: { agentName: "hhw-contract", paneId: "w1:p2", workspaceId: "w1" },
+      handle: { agentName: "hhw-contract", paneId: "w1:p2", tabId: "w1:t2", workspaceId: "w1" },
+      resultPath: "/tmp/missing-result.json",
+      expectedJobId: "job-1",
+      expectedAttemptId: "worker-001",
+      expectedLane: "worker",
+    }),
+    /different agent identity/,
+  );
+});
+
+test("Herdr adapter rejects a wait response for a different tab", async () => {
+  const runner: CommandRunner = {
+    run() {
+      return ok({
+        result: {
+          type: "agent_info",
+          agent: { ...agent("hhw-contract", "done"), tab_id: "w1:t9" },
+        },
+      });
+    },
+  };
+  const herdr = new HerdrCli({ runner, session: "test-session" });
+
+  await assert.rejects(
+    () => herdr.wait({
+      handle: { agentName: "hhw-contract", paneId: "w1:p2", tabId: "w1:t2", workspaceId: "w1" },
       resultPath: "/tmp/missing-result.json",
       expectedJobId: "job-1",
       expectedAttemptId: "worker-001",

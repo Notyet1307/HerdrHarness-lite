@@ -38,12 +38,13 @@ export type TaskSnapshot = {
 };
 
 export type Lane = "worker" | "reviewer";
-export type AttemptPhase = "prepared" | "running" | "settled";
+export type AttemptPhase = "prepared" | "pane_ready" | "agent_ready" | "running" | "settled";
 export type AgentStatus = "idle" | "done" | "blocked" | "unknown";
 
 export type AgentHandle = {
   agentName: string;
   paneId: string;
+  tabId: string;
   workspaceId: string;
 };
 

@@ -53,7 +53,7 @@ test("actionable review findings create a fresh worker and a fresh reviewer", as
     ids: new SequenceIds(),
   });
 
-  for (let index = 0; index < 15; index += 1) await controller.tick();
+  for (let index = 0; index < 23; index += 1) await controller.tick();
   assert.equal(store.state.activeJob?.state, "publish_ready");
   assert.equal(herdr.prepared.filter((entry) => entry.lane === "worker").length, 2);
   assert.equal(herdr.prepared.filter((entry) => entry.lane === "reviewer").length, 2);

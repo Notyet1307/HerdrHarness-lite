@@ -98,14 +98,17 @@ export class FakeGit implements GitPort {
   }
 }
 
-type Outcome =
+type Outcome = (
   | { lane: "worker"; status: "completed" | "blocked" | "failed"; summary?: string; headSha?: string }
-  | { lane: "reviewer"; status: "pass" | "changes" | "blocked" | "failed"; summary?: string; reviewedHeadSha?: string; findings?: Array<{ severity: "critical" | "major" | "minor"; summary: string; evidence: string }> };
+  | { lane: "reviewer"; status: "pass" | "changes" | "blocked" | "failed"; summary?: string; reviewedHeadSha?: string; findings?: Array<{ severity: "critical" | "major" | "minor"; summary: string; evidence: string }> }
+) & { agentStatus?: "idle" | "done" | "blocked" | "unknown" };
 
 export class FakeHerdr implements HerdrPort {
-  prepared: Array<{ attemptId: string; lane: string; handle: { agentName: string; paneId: string; workspaceId: string } }> = [];
+  prepared: Array<{ attemptId: string; lane: string; handle: { agentName: string; paneId: string; tabId: string; workspaceId: string } }> = [];
+  started: string[] = [];
   prompts: Array<{ dispatchId: string; text: string }> = [];
   closed: string[] = [];
+  promptFailureAfterDispatch: Error | null = null;
 
   constructor(private readonly outcomes: Outcome[]) {}
 
@@ -113,25 +116,33 @@ export class FakeHerdr implements HerdrPort {
     return { workspaceId: "ws-1", path: input.path, branch: input.branch };
   }
 
-  async prepareAttempt(input: { worktree: { workspaceId: string }; attempt: { id: string; lane: "worker" | "reviewer" }; argv: string[] }): Promise<{ agentName: string; paneId: string; workspaceId: string }> {
+  async createAttemptPane(input: { worktree: { workspaceId: string }; attempt: { id: string; lane: "worker" | "reviewer" } }): Promise<{ agentName: string; paneId: string; tabId: string; workspaceId: string }> {
     const handle = {
       agentName: `agent-${input.attempt.id}`,
       paneId: `pane-${input.attempt.id}`,
+      tabId: `tab-${input.attempt.id}`,
       workspaceId: input.worktree.workspaceId,
     };
     this.prepared.push({ attemptId: input.attempt.id, lane: input.attempt.lane, handle });
     return handle;
   }
 
+  async startAgent(input: { handle: { agentName: string } }): Promise<void> {
+    this.started.push(input.handle.agentName);
+  }
+
   async prompt(input: { dispatchId: string; text: string }): Promise<void> {
     this.prompts.push({ dispatchId: input.dispatchId, text: input.text });
+    const failure = this.promptFailureAfterDispatch;
+    this.promptFailureAfterDispatch = null;
+    if (failure) throw failure;
   }
 
   async wait(input: {
     expectedJobId: string;
     expectedAttemptId: string;
     expectedLane: "worker" | "reviewer";
-  }): Promise<{ agentStatus: "idle" | "done" | "blocked" | "unknown"; result: AttemptResult | null }> {
+  }): Promise<{ agentStatus: "idle" | "done" | "blocked" | "unknown"; result: AttemptResult | null; diagnostic: string | null }> {
     const outcome = this.outcomes.shift();
     if (!outcome) throw new Error("no fake outcome queued");
     if (outcome.lane !== input.expectedLane) throw new Error(`expected ${input.expectedLane}, got ${outcome.lane}`);
@@ -146,7 +157,7 @@ export class FakeHerdr implements HerdrPort {
         headSha: outcome.status === "completed" ? (outcome.headSha ?? "b".repeat(40)) : null,
         failedCommands: [],
       };
-      return { agentStatus: outcome.status === "blocked" ? "blocked" : "done", result };
+      return { agentStatus: outcome.agentStatus ?? (outcome.status === "blocked" ? "blocked" : "done"), result, diagnostic: null };
     }
     const job = currentJobId(input.expectedJobId);
     const result: AttemptResult = {
@@ -159,7 +170,7 @@ export class FakeHerdr implements HerdrPort {
       reviewedHeadSha: outcome.status === "pass" || outcome.status === "changes" ? (outcome.reviewedHeadSha ?? "b".repeat(40)) : null,
       findings: outcome.findings ?? [],
     };
-    return { agentStatus: outcome.status === "blocked" ? "blocked" : "done", result };
+    return { agentStatus: outcome.agentStatus ?? (outcome.status === "blocked" ? "blocked" : "done"), result, diagnostic: null };
   }
 
   async close(handle: { agentName: string }): Promise<void> {

@@ -21,14 +21,18 @@ export declare class HerdrCli implements HerdrPort {
         path: string;
         label: string;
     }): Promise<WorktreeHandle>;
-    prepareAttempt(input: {
+    createAttemptPane(input: {
         worktree: WorktreeHandle;
         attempt: {
             id: string;
             lane: "worker" | "reviewer";
         };
-        argv: string[];
     }): Promise<AgentHandle>;
+    private findAttemptPane;
+    startAgent(input: {
+        handle: AgentHandle;
+        argv: string[];
+    }): Promise<void>;
     prompt(input: {
         handle: AgentHandle;
         dispatchId: string;
@@ -43,10 +47,11 @@ export declare class HerdrCli implements HerdrPort {
     }): Promise<{
         agentStatus: AgentStatus;
         result: AttemptResult | null;
+        diagnostic: string | null;
     }>;
     close(handle: AgentHandle): Promise<void>;
     private tryGetAgent;
+    private inspectAgent;
     private invoke;
-    private invokeVoid;
     private args;
 }

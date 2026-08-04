@@ -96,11 +96,11 @@ export interface HerdrPort {
     path: string;
     label: string;
   }): Promise<WorktreeHandle>;
-  prepareAttempt(input: {
+  createAttemptPane(input: {
     worktree: WorktreeHandle;
     attempt: Attempt;
-    argv: string[];
   }): Promise<AgentHandle>;
+  startAgent(input: { handle: AgentHandle; argv: string[] }): Promise<void>;
   prompt(input: { handle: AgentHandle; dispatchId: string; text: string }): Promise<void>;
   wait(input: {
     handle: AgentHandle;
@@ -108,7 +108,7 @@ export interface HerdrPort {
     expectedJobId: string;
     expectedAttemptId: string;
     expectedLane: Attempt["lane"];
-  }): Promise<{ agentStatus: AgentStatus; result: AttemptResult | null }>;
+  }): Promise<{ agentStatus: AgentStatus; result: AttemptResult | null; diagnostic: string | null }>;
   close(handle: AgentHandle): Promise<void>;
 }
 

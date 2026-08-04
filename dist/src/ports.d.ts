@@ -79,11 +79,14 @@ export interface HerdrPort {
         path: string;
         label: string;
     }): Promise<WorktreeHandle>;
-    prepareAttempt(input: {
+    createAttemptPane(input: {
         worktree: WorktreeHandle;
         attempt: Attempt;
-        argv: string[];
     }): Promise<AgentHandle>;
+    startAgent(input: {
+        handle: AgentHandle;
+        argv: string[];
+    }): Promise<void>;
     prompt(input: {
         handle: AgentHandle;
         dispatchId: string;
@@ -98,6 +101,7 @@ export interface HerdrPort {
     }): Promise<{
         agentStatus: AgentStatus;
         result: AttemptResult | null;
+        diagnostic: string | null;
     }>;
     close(handle: AgentHandle): Promise<void>;
 }

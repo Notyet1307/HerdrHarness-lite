@@ -253,28 +253,64 @@ export class HarnessController {
         if (attempt.phase === "prepared") {
             let handle;
             try {
-                handle = await this.deps.herdr.prepareAttempt({
+                handle = await this.deps.herdr.createAttemptPane({
                     worktree: job.worktree,
                     attempt,
-                    argv: lane === "worker" ? this.deps.config.workerArgv : this.deps.config.reviewerArgv,
                 });
-                const prompt = lane === "worker" ? workerPrompt(job, attempt) : reviewerPrompt(job, attempt);
-                if (digest(prompt) !== attempt.promptDigest)
-                    throw new Error("prompt changed after attempt preparation");
-                await this.deps.herdr.prompt({ handle, dispatchId: attempt.id, text: prompt });
             }
             catch (error) {
                 return this.block(state, job, {
                     class: "infrastructure_exhausted",
                     lane,
-                    summary: `Herdr ${lane} dispatch failed: ${message(error)}`,
+                    summary: `Herdr ${lane} pane creation failed: ${message(error)}`,
                     attemptResult: null,
                 });
             }
-            const running = { ...attempt, phase: "running", handle };
+            const ready = { ...attempt, phase: "pane_ready", handle };
+            const next = evolveJob(job, this.deps.clock.now(), { activeAttempt: ready });
+            await this.saveJob(state, job, next);
+            return result(true, "attempt_pane_ready", job.id, `${lane} attempt ${attempt.id} has a durable owned pane`);
+        }
+        if (attempt.phase === "pane_ready" && attempt.handle) {
+            try {
+                await this.deps.herdr.startAgent({
+                    handle: attempt.handle,
+                    argv: lane === "worker" ? this.deps.config.workerArgv : this.deps.config.reviewerArgv,
+                });
+            }
+            catch (error) {
+                return this.block(state, job, {
+                    class: "infrastructure_exhausted",
+                    lane,
+                    summary: `Herdr ${lane} start failed: ${message(error)}`,
+                    attemptResult: null,
+                });
+            }
+            const ready = { ...attempt, phase: "agent_ready" };
+            const next = evolveJob(job, this.deps.clock.now(), { activeAttempt: ready });
+            await this.saveJob(state, job, next);
+            return result(true, "attempt_agent_ready", job.id, `${lane} attempt ${attempt.id} has a durable fresh Pi agent`);
+        }
+        if (attempt.phase === "agent_ready" && attempt.handle) {
+            const prompt = lane === "worker" ? workerPrompt(job, attempt) : reviewerPrompt(job, attempt);
+            if (digest(prompt) !== attempt.promptDigest) {
+                return this.block(state, job, {
+                    class: "integrity_violation",
+                    lane,
+                    summary: "prompt changed after attempt preparation",
+                    attemptResult: null,
+                });
+            }
+            const running = { ...attempt, phase: "running" };
             const next = evolveJob(job, this.deps.clock.now(), { activeAttempt: running });
             await this.saveJob(state, job, next);
-            return result(true, "attempt_dispatched", job.id, `${lane} attempt ${attempt.id} dispatched to a fresh Pi agent`);
+            try {
+                await this.deps.herdr.prompt({ handle: attempt.handle, dispatchId: attempt.id, text: prompt });
+            }
+            catch (error) {
+                return result(false, "attempt_dispatched", job.id, `Herdr ${lane} dispatch outcome is uncertain and will only be observed: ${message(error)}`);
+            }
+            return result(true, "attempt_dispatched", job.id, `${lane} attempt ${attempt.id} dispatched exactly once`);
         }
         if (attempt.phase !== "running" || !attempt.handle) {
             return this.block(state, job, {
@@ -302,33 +338,29 @@ export class HarnessController {
                 attemptResult: null,
             });
         }
-        if (observation.agentStatus === "unknown") {
-            return this.block(state, job, {
-                class: "infrastructure_exhausted",
-                lane,
-                summary: `${lane} agent identity became unknown`,
-                attemptResult: observation.result,
-            });
-        }
         const validated = validateAttemptResult(job.id, attempt, observation.result);
         if (!validated.ok) {
             return this.block(state, job, {
-                class: observation.agentStatus === "blocked" ? "agent_blocked" : "integrity_violation",
+                class: observation.agentStatus === "blocked"
+                    ? "agent_blocked"
+                    : observation.result === null
+                        ? "infrastructure_exhausted"
+                        : "integrity_violation",
                 lane,
-                summary: validated.reason,
+                summary: withHerdrDiagnostic(validated.reason, observation.diagnostic),
                 attemptResult: observation.result,
             });
         }
         if (lane === "worker")
-            return this.finishWorker(state, job, attempt, validated.result);
-        return this.finishReviewer(state, job, attempt, validated.result);
+            return this.finishWorker(state, job, attempt, validated.result, observation.diagnostic);
+        return this.finishReviewer(state, job, attempt, validated.result, observation.diagnostic);
     }
-    async finishWorker(state, job, attempt, worker) {
+    async finishWorker(state, job, attempt, worker, diagnostic) {
         if (worker.status === "blocked") {
             return this.block(state, job, {
                 class: "agent_decision",
                 lane: "worker",
-                summary: worker.summary,
+                summary: withHerdrDiagnostic(worker.summary, diagnostic),
                 attemptResult: worker,
             });
         }
@@ -336,7 +368,7 @@ export class HarnessController {
             return this.block(state, job, {
                 class: "agent_blocked",
                 lane: "worker",
-                summary: worker.summary,
+                summary: withHerdrDiagnostic(worker.summary, diagnostic),
                 attemptResult: worker,
             });
         }
@@ -362,6 +394,9 @@ export class HarnessController {
                 attemptResult: worker,
             });
         }
+        const cleanup = await this.closeCompletedAttempt(job, attempt);
+        if (cleanup)
+            return cleanup;
         const settled = settleAttempt(attempt, worker, this.deps.clock.now());
         const next = evolveJob(job, this.deps.clock.now(), {
             state: "reviewer_ready",
@@ -374,12 +409,12 @@ export class HarnessController {
         await this.saveJob(state, job, next);
         return result(true, "attempt_completed", job.id, `worker completed at ${verification.headSha}; fresh review required`);
     }
-    async finishReviewer(state, job, attempt, review) {
+    async finishReviewer(state, job, attempt, review, diagnostic) {
         if (review.status === "blocked" || review.status === "failed") {
             return this.block(state, job, {
                 class: "review_uncertain",
                 lane: "reviewer",
-                summary: review.summary,
+                summary: withHerdrDiagnostic(review.summary, diagnostic),
                 attemptResult: review,
             });
         }
@@ -406,6 +441,9 @@ export class HarnessController {
         }
         const settled = settleAttempt(attempt, review, this.deps.clock.now());
         if (review.status === "pass") {
+            const cleanup = await this.closeCompletedAttempt(job, attempt);
+            if (cleanup)
+                return cleanup;
             const next = evolveJob(job, this.deps.clock.now(), {
                 state: "publish_ready",
                 activeAttempt: null,
@@ -432,6 +470,9 @@ export class HarnessController {
                 attemptResult: review,
             });
         }
+        const cleanup = await this.closeCompletedAttempt(job, attempt);
+        if (cleanup)
+            return cleanup;
         const brief = review.findings
             .map((finding, index) => `${index + 1}. [${finding.severity}] ${finding.summary} — ${finding.evidence}`)
             .join("\n");
@@ -445,6 +486,18 @@ export class HarnessController {
         });
         await this.saveJob(state, job, next);
         return result(true, "attempt_completed", job.id, "review findings routed to a fresh worker attempt");
+    }
+    async closeCompletedAttempt(job, attempt) {
+        if (!attempt.handle) {
+            return result(false, "attempt_completed", job.id, `${attempt.lane} pane identity is missing; completion was not recorded`);
+        }
+        try {
+            await this.deps.herdr.close(attempt.handle);
+            return null;
+        }
+        catch (error) {
+            return result(false, "attempt_completed", job.id, `${attempt.lane} pane close is not confirmed: ${message(error)}`);
+        }
     }
     async publish(state, job) {
         if (!job.headSha) {
@@ -761,6 +814,9 @@ function safeToken(value) {
 }
 function trimSlash(value) {
     return value.replace(/\/+$/g, "");
+}
+function withHerdrDiagnostic(summary, diagnostic) {
+    return diagnostic ? `${summary}\nHerdr diagnostics (untrusted):\n${diagnostic}` : summary;
 }
 function message(error) {
     return error instanceof Error ? error.message : String(error);

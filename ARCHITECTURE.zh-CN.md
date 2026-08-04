@@ -60,7 +60,7 @@ Approval = f(job_id, job_revision, incident_id, analysis_id, action)
 4. **Herdr 只负责运行与观察**：workspace/tab/pane/agent 生命周期不是交付验收。
 5. **模型输出没有权限**：Pi/Codex 只能产出结果或建议，不能直接迁移 controller 状态。
 6. **恢复不复用旧上下文**：审批后关闭旧 pane，创建新的 worker attempt；旧 agent 不会收到新的控制指令。
-7. **不确定即停止**：stale revision、身份不一致、HEAD 变化、证据缺失、未知 agent 状态全部 fail closed。
+7. **不确定即停止**：stale revision、身份不一致、HEAD 变化、证据缺失、仅有未知 agent 状态时全部 fail closed；若 pane 关闭后仍有合法 result 与 Git 固定点，则交付事实可以独立收敛。
 
 ---
 
@@ -103,10 +103,13 @@ pane list
 
 ```text
 herdr worktree create
+herdr tab list / pane list（恢复未落账的自有 pane）
 herdr tab create
 herdr agent start --kind pi
-herdr agent prompt
+herdr agent prompt --wait
 herdr agent wait
+herdr agent get / read（wait 失败或 blocked 时只读诊断）
+herdr pane close（成功验收后）
 ```
 
 Harness 只记录 Herdr 返回的 workspace/pane/agent identity。
@@ -205,6 +208,14 @@ stateDiagram-v2
 ```
 
 每个 `tick` 最多完成一次持久状态迁移。外部调用失败时，不假设成功；下一轮根据 ledger 和外部身份重新协调。
+
+每个 attempt 还具有内部阶段：
+
+```text
+prepared -> pane_ready -> agent_ready -> running -> settled
+```
+
+pane identity 与 agent identity 分阶段落账；`running` 在 prompt 前落账，因此 prompt 返回丢失或进程崩溃都不会触发同一 dispatch 重放。成功结果经 Git 验证后关闭该 attempt 自有 pane；若关闭后、状态保存前崩溃，下一轮允许用 durable result 继续验收，并把 `pane_not_found` 视为幂等关闭。blocked、failed 或不确定的 pane 留到精确人工恢复时再关闭。本阶段不自动删除 worktree。
 
 ---
 
@@ -439,7 +450,7 @@ tracked worktree clean
 
 - 原生 worktree workspace；
 - 每个 attempt 一个 tab/pane/agent；
-- `agent start / prompt / wait / close`；
+- `agent start / prompt --wait / wait / get / read / pane close`；
 - agent status 作为生命周期观测；
 - JSON identity 作为外部句柄。
 
@@ -533,7 +544,7 @@ npm run verify
 
 ```text
 TypeScript strict typecheck: PASS
-Tests: 14 passed, 0 failed
+Tests: 22 passed, 0 failed
 ```
 
 覆盖：
@@ -548,9 +559,12 @@ Tests: 14 passed, 0 failed
 8. stale approval 拒绝；
 9. integrity block 强制 hold；
 10. approval 后关闭旧 agent、创建新 attempt；
-11. Herdr 0.8 原生命令、响应 identity、错误分类与 pane-ready 竞态，不使用 `pane run` 模拟 agent。
+11. Herdr 0.8 原生命令、响应 identity、错误分类与 pane-ready 竞态，不使用 `pane run` 模拟 agent；
+12. prompt at-most-once、关闭后崩溃恢复、成功 pane 关闭与官方 `agent get/read` 诊断。
 
-限制：Herdr 0.8 adapter 已通过独立命名 session 的 disposable canary，但 Pi profile、Codex wrapper 和 GitHub issue 到 PR/merge 的完整链路仍未验收。代码已经将这些风险隔离在 adapters，不影响状态机验证结论。
+真实验证：在 `Notyet1307/harness-sandbox@fd9defa` 上，以 Herdr 0.8.0、Pi 0.83.0、Pi integration v8 完成独立命名 session canary；Pi 到达 `done`、写出预期 durable result、tracked tree 未改，自有 attempt pane 关闭后已从 workspace 消失。
+
+限制：Codex wrapper 与 GitHub issue 到 PR/merge 的完整链路仍未验收；worktree 自动删除明确不在本阶段范围内。代码已经将这些风险隔离在 adapters，不影响本次生命周期结论。
 
 ---
 

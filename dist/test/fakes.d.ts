@@ -69,7 +69,7 @@ export declare class FakeGit implements GitPort {
         reason: string;
     }>;
 }
-type Outcome = {
+type Outcome = ({
     lane: "worker";
     status: "completed" | "blocked" | "failed";
     summary?: string;
@@ -84,6 +84,8 @@ type Outcome = {
         summary: string;
         evidence: string;
     }>;
+}) & {
+    agentStatus?: "idle" | "done" | "blocked" | "unknown";
 };
 export declare class FakeHerdr implements HerdrPort {
     private readonly outcomes;
@@ -93,14 +95,17 @@ export declare class FakeHerdr implements HerdrPort {
         handle: {
             agentName: string;
             paneId: string;
+            tabId: string;
             workspaceId: string;
         };
     }>;
+    started: string[];
     prompts: Array<{
         dispatchId: string;
         text: string;
     }>;
     closed: string[];
+    promptFailureAfterDispatch: Error | null;
     constructor(outcomes: Outcome[]);
     createWorktree(input: {
         branch: string;
@@ -110,7 +115,7 @@ export declare class FakeHerdr implements HerdrPort {
         path: string;
         branch: string;
     }>;
-    prepareAttempt(input: {
+    createAttemptPane(input: {
         worktree: {
             workspaceId: string;
         };
@@ -118,12 +123,17 @@ export declare class FakeHerdr implements HerdrPort {
             id: string;
             lane: "worker" | "reviewer";
         };
-        argv: string[];
     }): Promise<{
         agentName: string;
         paneId: string;
+        tabId: string;
         workspaceId: string;
     }>;
+    startAgent(input: {
+        handle: {
+            agentName: string;
+        };
+    }): Promise<void>;
     prompt(input: {
         dispatchId: string;
         text: string;
@@ -135,6 +145,7 @@ export declare class FakeHerdr implements HerdrPort {
     }): Promise<{
         agentStatus: "idle" | "done" | "blocked" | "unknown";
         result: AttemptResult | null;
+        diagnostic: string | null;
     }>;
     close(handle: {
         agentName: string;

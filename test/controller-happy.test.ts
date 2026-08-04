@@ -48,7 +48,7 @@ test("happy path claims, starts Analyst, runs fresh Pi worker/reviewer, publishe
   });
 
   const actions: string[] = [];
-  for (let index = 0; index < 10; index += 1) actions.push((await controller.tick()).action);
+  for (let index = 0; index < 14; index += 1) actions.push((await controller.tick()).action);
   github.mergeStatus = "open";
   actions.push((await controller.tick()).action);
   github.mergeStatus = "merged";
@@ -60,9 +60,13 @@ test("happy path claims, starts Analyst, runs fresh Pi worker/reviewer, publishe
     "claimed",
     "worktree_created",
     "attempt_prepared",
+    "attempt_pane_ready",
+    "attempt_agent_ready",
     "attempt_dispatched",
     "attempt_completed",
     "attempt_prepared",
+    "attempt_pane_ready",
+    "attempt_agent_ready",
     "attempt_dispatched",
     "attempt_completed",
     "published",
@@ -77,7 +81,73 @@ test("happy path claims, starts Analyst, runs fresh Pi worker/reviewer, publishe
   assert.equal(herdr.prepared[0]?.lane, "worker");
   assert.equal(herdr.prepared[1]?.lane, "reviewer");
   assert.ok(herdr.prepared[0]?.attemptId !== herdr.prepared[1]?.attemptId);
+  assert.deepEqual(herdr.closed, [
+    herdr.prepared[0]!.handle.agentName,
+    herdr.prepared[1]!.handle.agentName,
+  ]);
   assert.equal(github.published[0]?.headSha, "b".repeat(40));
   assert.equal(store.state.activeJob, null);
   assert.equal(store.state.terminalJobs[0]?.state, "done");
+});
+
+test("an ambiguous prompt failure never replays the same dispatch", async () => {
+  const store = new MemoryStore();
+  const herdr = new FakeHerdr([
+    { lane: "worker", status: "completed", headSha: "b".repeat(40) },
+  ]);
+  herdr.promptFailureAfterDispatch = new Error("connection closed after submission");
+  const controller = new HarnessController({
+    config,
+    store,
+    github: new FakeGitHub([issue({ number: 22, title: "At-most-once dispatch" })]),
+    git: new FakeGit(),
+    herdr,
+    analyst: new FakeAnalyst(),
+    evidence: new FakeEvidence(),
+    clock: new FakeClock(),
+    ids: new SequenceIds(),
+  });
+
+  for (let index = 0; index < 4; index += 1) await controller.tick();
+  const paneReady = await controller.tick();
+  assert.equal(paneReady.action, "attempt_pane_ready");
+  assert.equal(store.state.activeJob?.activeAttempt?.phase, "pane_ready");
+  assert.equal(herdr.started.length, 0);
+
+  await controller.tick();
+  assert.equal(store.state.activeJob?.activeAttempt?.phase, "agent_ready");
+  assert.equal(herdr.started.length, 1);
+
+  const ambiguous = await controller.tick();
+  assert.equal(ambiguous.action, "attempt_dispatched");
+  assert.equal(ambiguous.ok, false);
+  assert.equal(store.state.activeJob?.activeAttempt?.phase, "running");
+  assert.equal(herdr.prompts.length, 1);
+
+  await controller.tick();
+  assert.equal(herdr.prompts.length, 1);
+  assert.equal(store.state.activeJob?.state, "reviewer_ready");
+});
+
+test("a durable valid result completes even when the closed agent is no longer known", async () => {
+  const store = new MemoryStore();
+  const herdr = new FakeHerdr([
+    { lane: "worker", status: "completed", headSha: "b".repeat(40), agentStatus: "unknown" },
+  ]);
+  const controller = new HarnessController({
+    config,
+    store,
+    github: new FakeGitHub([issue({ number: 23, title: "Recover closed pane" })]),
+    git: new FakeGit(),
+    herdr,
+    analyst: new FakeAnalyst(),
+    evidence: new FakeEvidence(),
+    clock: new FakeClock(),
+    ids: new SequenceIds(),
+  });
+
+  for (let index = 0; index < 8; index += 1) await controller.tick();
+
+  assert.equal(store.state.activeJob?.state, "reviewer_ready");
+  assert.equal(herdr.closed.length, 1);
 });
