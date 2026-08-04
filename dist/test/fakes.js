@@ -1,17 +1,19 @@
+import { resolve } from "node:path";
 import { digest } from "../src/model.js";
+export const validCodeReviewSkillPath = resolve("pi/skills/code-review");
 export const validWorkerArgv = [
     "--no-approve",
     "--no-skills",
     "--skill", "/skills/implement",
     "--skill", "/skills/tdd",
-    "--skill", "/skills/code-review",
+    "--skill", validCodeReviewSkillPath,
     "--tools", "read,bash,edit,write,grep,find,ls,subagent",
     "--thinking", "high",
 ];
 export const validReviewerArgv = [
     "--no-approve",
     "--no-skills",
-    "--skill", "/skills/code-review",
+    "--skill", validCodeReviewSkillPath,
     "--tools", "read,bash,grep,find,ls,subagent",
     "--thinking", "high",
 ];

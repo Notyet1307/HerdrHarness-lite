@@ -1,12 +1,15 @@
+import { resolve } from "node:path";
 import { digest, type AnalystSession, type AnalystTurn, type AttemptResult, type EvidenceItem, type EvidenceRequest, type HarnessState, type IssueSnapshot, type Job, type PullRequestRef, type SelectedTask } from "../src/model.js";
 import type { AnalystPort, Clock, EvidencePort, GitHubPort, GitPort, HerdrPort, IdGenerator, StateStore } from "../src/ports.js";
+
+export const validCodeReviewSkillPath = resolve("pi/skills/code-review");
 
 export const validWorkerArgv = [
   "--no-approve",
   "--no-skills",
   "--skill", "/skills/implement",
   "--skill", "/skills/tdd",
-  "--skill", "/skills/code-review",
+  "--skill", validCodeReviewSkillPath,
   "--tools", "read,bash,edit,write,grep,find,ls,subagent",
   "--thinking", "high",
 ];
@@ -14,7 +17,7 @@ export const validWorkerArgv = [
 export const validReviewerArgv = [
   "--no-approve",
   "--no-skills",
-  "--skill", "/skills/code-review",
+  "--skill", validCodeReviewSkillPath,
   "--tools", "read,bash,grep,find,ls,subagent",
   "--thinking", "high",
 ];

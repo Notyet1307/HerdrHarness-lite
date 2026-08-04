@@ -12,6 +12,7 @@ import {
   MemoryStore,
   SequenceIds,
   issue,
+  validCodeReviewSkillPath,
   validReviewerArgv,
   validWorkerArgv,
 } from "./fakes.js";
@@ -53,6 +54,11 @@ test("config rejects incomplete Pi role contracts", () => {
     { ...config, workerArgv: [...validWorkerArgv.slice(0, 2), ...validWorkerArgv.slice(4)] },
     { ...config, workerArgv: validWorkerArgv.map((value) => value === "high" ? "low" : value) },
     { ...config, reviewerArgv: [...validReviewerArgv, "--no-extensions"] },
+    { ...config, reviewerArgv: [...validReviewerArgv, "--continue"] },
+    {
+      ...config,
+      reviewerArgv: validReviewerArgv.map((value) => value === validCodeReviewSkillPath ? "/tmp/code-review" : value),
+    },
     {
       ...config,
       reviewerArgv: validReviewerArgv.map((value) => (

@@ -1,7 +1,9 @@
+import { basename, dirname, isAbsolute, resolve } from "node:path";
 import { selectNextTask } from "./eligibility.js";
 import { assertJobInvariant, digest, evolveJob, taskFromSelection, } from "./model.js";
 import { buildEvidencePack, makeIncident, validateAttemptResult } from "./policy.js";
 import { reviewerPrompt, workerPrompt } from "./prompts.js";
+const BUNDLED_CODE_REVIEW_SKILL = resolve(import.meta.dirname, "../../pi/skills/code-review");
 /**
  * One controller owns all writes. Each tick performs at most one durable state
  * transition, so restarts resume from the ledger instead of replaying a whole
@@ -841,9 +843,19 @@ function validatePiRoleArgv(name, argv, skills, tools) {
     if (argv.some((argument) => ["--skill=", "--tools=", "--thinking="].some((prefix) => argument.startsWith(prefix)))) {
         fail("role options must use separate flag and value arguments");
     }
-    const loadedSkills = new Set(flagValues(argv, "--skill").map(piSkillName));
+    const sessionReuseFlags = ["--continue", "-c", "--resume", "-r", "--session", "--session-id", "--fork"];
+    if (argv.some((argument) => sessionReuseFlags.some((flag) => argument === flag || argument.startsWith(`${flag}=`)))) {
+        fail("session reuse flags are not allowed");
+    }
+    const skillPaths = flagValues(argv, "--skill");
+    if (skillPaths.some((path) => !isAbsolute(path)))
+        fail("skill paths must be absolute");
+    const loadedSkills = new Set(skillPaths.map(piSkillName));
     if (skills.some((skill) => !loadedSkills.has(skill)))
         fail(`required skills: ${skills.join(",")}`);
+    if (!skillPaths.some((path) => piSkillName(path) === "code-review" && piSkillDirectory(path) === BUNDLED_CODE_REVIEW_SKILL)) {
+        fail("code-review must resolve to the bundled Harness skill");
+    }
     const toolValues = flagValues(argv, "--tools");
     if (toolValues.length !== 1 || !sameSet(toolValues[0].split(",").map((tool) => tool.trim()), tools)) {
         fail(`tools must be exactly: ${tools.join(",")}`);
@@ -858,6 +870,10 @@ function flagValues(argv, flag) {
 function piSkillName(path) {
     const parts = path.replace(/[\\/]+$/, "").split(/[\\/]/);
     return parts.at(-1) === "SKILL.md" ? (parts.at(-2) ?? "") : (parts.at(-1) ?? "");
+}
+function piSkillDirectory(path) {
+    const absolute = resolve(path);
+    return basename(absolute) === "SKILL.md" ? dirname(absolute) : absolute;
 }
 function sameSet(actual, expected) {
     const values = new Set(actual);

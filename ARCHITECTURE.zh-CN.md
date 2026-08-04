@@ -440,6 +440,8 @@ tracked worktree clean
 
 Herdr 只管理顶层 Worker/Reviewer Pi。子审查器由顶层 Pi 在同一 foreground turn 内拥有；它们继承父 Pi 的工作目录、环境和未覆写模型，但 `thinking=high` 显式固定，工具、skills、扩展和递归深度按只读职责收窄。禁止 async child，避免顶层 Pi 提前完成而留下未被 Harness 生命周期覆盖的后台执行。
 
+Controller 直接校验原生 role argv：必需 skill、bundled `code-review` 身份、精确工具集合与 `thinking=high` 缺一不可，并拒绝 `continue/resume/session/session-id/fork`，因此 fresh attempt 不能被配置降级。该校验没有引入另一套 profile DSL。
+
 结果：
 
 - `pass`：进入 publish；

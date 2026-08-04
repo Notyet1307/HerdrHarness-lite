@@ -12,6 +12,10 @@ declare const console: {
   error(...values: unknown[]): void;
 };
 
+interface ImportMeta {
+  dirname: string;
+}
+
 declare module "node:crypto" {
   export function randomUUID(): string;
   export function createHash(name: string): {
@@ -61,7 +65,9 @@ declare module "node:fs" {
 }
 
 declare module "node:path" {
+  export function basename(path: string): string;
   export function dirname(path: string): string;
+  export function isAbsolute(path: string): boolean;
   export function join(...parts: string[]): string;
   export function resolve(...parts: string[]): string;
 }
