@@ -30,10 +30,11 @@ BLOCKED
 执行：
 
 ```bash
+npm ci
 npm run verify
 ```
 
-在提供 TypeScript 5.8.3 编译器的环境中，严格类型检查通过，22 项测试通过。测试覆盖：
+仓库固定使用 TypeScript 5.8.3；严格类型检查通过，22 项测试通过。测试覆盖：
 
 - `ready-for-agent`、OPEN、assignee、OPEN blocker 的领取条件；
 - Map 容器不领取、严格首个 OPEN 子任务前沿；
@@ -47,7 +48,7 @@ npm run verify
 - 成功 attempt 在结果与 Git 验证后关闭自有 pane，关闭后崩溃可凭 durable result 收敛；
 - Herdr 适配器使用原生 `worktree / tab / agent` 命令，并在 blocked/wait 失败时使用官方 `agent get/read` 诊断，不再通过 `pane split + pane run` 模拟 agent 启动。
 
-默认测试使用 fake GitHub/Git/Herdr/Analyst。本次另在 `Notyet1307/harness-sandbox@fd9defa` 上使用 Herdr 0.8.0、Pi 0.83.0 与 Pi integration v8 完成了独立命名 session canary：Pi 写出预期 result、tracked tree 未改，自有 attempt pane 已关闭。这仍不代表 GitHub issue 到 PR/merge 的完整端到端已经跑通。worktree 自动删除不在本次实现范围内。仓库尚未声明 TypeScript 编译器依赖，因此裸执行 `npm run verify` 的可复现性需要单独修复。
+默认测试使用 fake GitHub/Git/Herdr/Analyst。本次另在 `Notyet1307/harness-sandbox@fd9defa` 上使用 Herdr 0.8.0、Pi 0.83.0 与 Pi integration v8 完成了独立命名 session canary：Pi 写出预期 result、tracked tree 未改，自有 attempt pane 已关闭。这仍不代表 GitHub issue 到 PR/merge 的完整端到端已经跑通。worktree 自动删除不在本次实现范围内。
 
 ## 最小命令面
 
