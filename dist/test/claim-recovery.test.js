@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { HarnessController } from "../src/controller.js";
-import { FakeAnalyst, FakeClock, FakeEvidence, FakeGit, FakeGitHub, FakeHerdr, MemoryStore, SequenceIds, issue, } from "./fakes.js";
+import { FakeAnalyst, FakeClock, FakeEvidence, FakeGit, FakeGitHub, FakeHerdr, MemoryStore, SequenceIds, issue, validReviewerArgv, validWorkerArgv, } from "./fakes.js";
 const config = {
     repo: "owner/repo",
     localPath: "/repo",
@@ -11,8 +11,8 @@ const config = {
     worktreeRoot: "/worktrees",
     maxReviewRounds: 3,
     maxAnalystTurns: 3,
-    workerArgv: [],
-    reviewerArgv: [],
+    workerArgv: validWorkerArgv,
+    reviewerArgv: validReviewerArgv,
 };
 test("a durable claim intent recovers when GitHub label mutation succeeded before the process crashed", async () => {
     const store = new MemoryStore();

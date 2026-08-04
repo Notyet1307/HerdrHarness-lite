@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { HarnessController } from "../src/controller.js";
 import { approveRecovery } from "../src/recovery.js";
-import { FakeAnalyst, FakeClock, FakeEvidence, FakeGit, FakeGitHub, FakeHerdr, MemoryStore, SequenceIds, issue, } from "./fakes.js";
+import { FakeAnalyst, FakeClock, FakeEvidence, FakeGit, FakeGitHub, FakeHerdr, MemoryStore, SequenceIds, issue, validReviewerArgv, validWorkerArgv, } from "./fakes.js";
 const config = {
     repo: "owner/repo",
     localPath: "/repo",
@@ -12,8 +12,8 @@ const config = {
     worktreeRoot: "/worktrees",
     maxReviewRounds: 3,
     maxAnalystTurns: 3,
-    workerArgv: [],
-    reviewerArgv: [],
+    workerArgv: validWorkerArgv,
+    reviewerArgv: validReviewerArgv,
 };
 test("blocked work cannot resume before exact human approval and recovery always uses a fresh worker", async () => {
     const store = new MemoryStore();

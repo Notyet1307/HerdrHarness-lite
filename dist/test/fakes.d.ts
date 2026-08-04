@@ -1,5 +1,7 @@
 import { type AnalystSession, type AnalystTurn, type AttemptResult, type EvidenceItem, type EvidenceRequest, type HarnessState, type IssueSnapshot, type Job, type PullRequestRef, type SelectedTask } from "../src/model.js";
 import type { AnalystPort, Clock, EvidencePort, GitHubPort, GitPort, HerdrPort, IdGenerator, StateStore } from "../src/ports.js";
+export declare const validWorkerArgv: string[];
+export declare const validReviewerArgv: string[];
 export declare class FakeClock implements Clock {
     private tick;
     now(): string;

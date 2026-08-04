@@ -34,7 +34,7 @@ npm ci
 npm run verify
 ```
 
-仓库固定使用 TypeScript 5.8.3；严格类型检查通过，41 项测试通过。测试覆盖：
+仓库固定使用 TypeScript 5.8.3；严格类型检查通过，42 项测试通过。测试覆盖：
 
 - `ready-for-agent`、OPEN、assignee、OPEN blocker 的领取条件；
 - Map 容器不领取、严格首个 OPEN 子任务前沿；
@@ -86,6 +86,8 @@ pi install /absolute/path/to/HerdrHarness-lite
 - Worker 显式加载 Matt Pocock `implement`、`tdd` 和本仓库的 `code-review`，拥有完成任务所需的写工具；dispatch 以 `/skill:implement` 开头，完成实现 checkpoint 后必须执行 `code-review` 自审。
 - Reviewer 只显式加载本仓库的 `code-review`，没有 `edit/write` 工具；dispatch 以 `/skill:code-review` 开头。
 - `code-review` 通过 `pi-subagents` 在父 Pi 当前 turn 内并行运行两个 fresh、foreground、只读子审查器，分别检查 Standards 与 Spec。任一轴缺失或失败都不能判定通过。
+
+Controller 启动时会 fail fast：两种角色都必须显式使用 `--no-approve --no-skills --thinking high`，加载各自必需的 skill，并使用样例所列的精确工具集合；缺失 skill、写权限越界或冲突的 Pi tool/extension flags 都会拒绝配置。
 
 子审查器从父 Pi 获得当前工作目录、环境和未覆写的模型；`thinking=high` 被显式固定，因为该扩展没有通用的动态 thinking 继承。工具、skills、扩展和递归深度有意收窄，不能复制父 Pi 的写权限；`async=false` 保证 Herdr 观察到的顶层 Pi 生命周期覆盖整次审查。这里的“只读”仍由最小工具面、指令与 Harness 的 HEAD/clean-tree 复核共同保证，不把 shell 当作操作系统沙箱。
 

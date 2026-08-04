@@ -552,7 +552,7 @@ npm run verify
 
 ```text
 TypeScript strict typecheck: PASS
-Tests: 41 passed, 0 failed
+Tests: 42 passed, 0 failed
 ```
 
 覆盖：
@@ -569,7 +569,7 @@ Tests: 41 passed, 0 failed
 10. approval 后关闭旧 agent、创建新 attempt；
 11. Herdr 0.8 原生命令、响应 identity、错误分类与 pane-ready 竞态，不使用 `pane run` 模拟 agent；
 12. prompt at-most-once、关闭后崩溃恢复、成功 pane 关闭与官方 `agent get/read` 诊断。
-13. Worker/Reviewer 强制 skill dispatch、Pi package 资源、role argv 与 foreground 双轴 child reviewer 契约。
+13. Worker/Reviewer 强制 skill dispatch、Pi package 资源、fail-fast role argv 与 foreground 双轴 child reviewer 契约。
 
 真实验证：在 `Notyet1307/harness-sandbox@fd9defa` 上，以 Herdr 0.8.0、Pi 0.83.0、Pi integration v8 完成独立命名 session canary；Pi 到达 `done`、写出预期 durable result、tracked tree 未改，自有 attempt pane 关闭后已从 workspace 消失。另以 issue #12 从基线 `b0fd0b0` 运行角色 canary：强制 `implement` 的 Worker 生成本地 `1285f52` 并完成 `2/2` foreground 双轴自审，fresh Reviewer 再完成独立 `2/2` 双轴审查并返回 `pass`；两条结果均绑定精确 SHA，四条指定验证退出 0，两个自有 pane 已关闭，worktree clean，分支未 push。
 

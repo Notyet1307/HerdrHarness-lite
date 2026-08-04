@@ -1,6 +1,24 @@
 import { digest, type AnalystSession, type AnalystTurn, type AttemptResult, type EvidenceItem, type EvidenceRequest, type HarnessState, type IssueSnapshot, type Job, type PullRequestRef, type SelectedTask } from "../src/model.js";
 import type { AnalystPort, Clock, EvidencePort, GitHubPort, GitPort, HerdrPort, IdGenerator, StateStore } from "../src/ports.js";
 
+export const validWorkerArgv = [
+  "--no-approve",
+  "--no-skills",
+  "--skill", "/skills/implement",
+  "--skill", "/skills/tdd",
+  "--skill", "/skills/code-review",
+  "--tools", "read,bash,edit,write,grep,find,ls,subagent",
+  "--thinking", "high",
+];
+
+export const validReviewerArgv = [
+  "--no-approve",
+  "--no-skills",
+  "--skill", "/skills/code-review",
+  "--tools", "read,bash,grep,find,ls,subagent",
+  "--thinking", "high",
+];
+
 export class FakeClock implements Clock {
   private tick = 0;
   now(): string {

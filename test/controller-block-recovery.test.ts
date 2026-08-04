@@ -13,6 +13,8 @@ import {
   MemoryStore,
   SequenceIds,
   issue,
+  validReviewerArgv,
+  validWorkerArgv,
 } from "./fakes.js";
 
 const config: HarnessConfig = {
@@ -24,8 +26,8 @@ const config: HarnessConfig = {
   worktreeRoot: "/worktrees",
   maxReviewRounds: 3,
   maxAnalystTurns: 3,
-  workerArgv: [],
-  reviewerArgv: [],
+  workerArgv: validWorkerArgv,
+  reviewerArgv: validReviewerArgv,
 };
 
 test("blocked work cannot resume before exact human approval and recovery always uses a fresh worker", async () => {

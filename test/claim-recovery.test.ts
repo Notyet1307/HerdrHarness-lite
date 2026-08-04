@@ -12,6 +12,8 @@ import {
   MemoryStore,
   SequenceIds,
   issue,
+  validReviewerArgv,
+  validWorkerArgv,
 } from "./fakes.js";
 
 const config: HarnessConfig = {
@@ -23,8 +25,8 @@ const config: HarnessConfig = {
   worktreeRoot: "/worktrees",
   maxReviewRounds: 3,
   maxAnalystTurns: 3,
-  workerArgv: [],
-  reviewerArgv: [],
+  workerArgv: validWorkerArgv,
+  reviewerArgv: validReviewerArgv,
 };
 
 test("a durable claim intent recovers when GitHub label mutation succeeded before the process crashed", async () => {

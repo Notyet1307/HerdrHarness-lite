@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { HarnessController } from "../src/controller.js";
-import { FakeAnalyst, FakeClock, FakeEvidence, FakeGit, FakeGitHub, FakeHerdr, MemoryStore, SequenceIds, issue, } from "./fakes.js";
+import { FakeAnalyst, FakeClock, FakeEvidence, FakeGit, FakeGitHub, FakeHerdr, MemoryStore, SequenceIds, issue, validReviewerArgv, validWorkerArgv, } from "./fakes.js";
 const config = {
     repo: "owner/repo",
     localPath: "/repo",
@@ -11,8 +11,8 @@ const config = {
     worktreeRoot: "/worktrees",
     maxReviewRounds: 3,
     maxAnalystTurns: 3,
-    workerArgv: [],
-    reviewerArgv: [],
+    workerArgv: validWorkerArgv,
+    reviewerArgv: validReviewerArgv,
 };
 test("config rejects non-string native Pi arguments", () => {
     for (const field of ["workerArgv", "reviewerArgv"]) {
@@ -28,6 +28,31 @@ test("config rejects non-string native Pi arguments", () => {
             clock: new FakeClock(),
             ids: new SequenceIds(),
         }), new RegExp(`${field} must be an array of strings`));
+    }
+});
+test("config rejects incomplete Pi role contracts", () => {
+    for (const invalidConfig of [
+        { ...config, workerArgv: [] },
+        { ...config, reviewerArgv: [] },
+        { ...config, workerArgv: [...validWorkerArgv.slice(0, 2), ...validWorkerArgv.slice(4)] },
+        { ...config, workerArgv: validWorkerArgv.map((value) => value === "high" ? "low" : value) },
+        { ...config, reviewerArgv: [...validReviewerArgv, "--no-extensions"] },
+        {
+            ...config,
+            reviewerArgv: validReviewerArgv.map((value) => (value === "read,bash,grep,find,ls,subagent" ? `${value},write` : value)),
+        },
+    ]) {
+        assert.throws(() => new HarnessController({
+            config: invalidConfig,
+            store: new MemoryStore(),
+            github: new FakeGitHub([]),
+            git: new FakeGit(),
+            herdr: new FakeHerdr([]),
+            analyst: new FakeAnalyst(),
+            evidence: new FakeEvidence(),
+            clock: new FakeClock(),
+            ids: new SequenceIds(),
+        }), /(?:workerArgv|reviewerArgv) must enforce the Pi role contract/);
     }
 });
 test("happy path claims, starts Analyst, runs fresh Pi worker/reviewer, publishes, and archives", async () => {

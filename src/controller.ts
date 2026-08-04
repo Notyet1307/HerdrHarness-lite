@@ -934,6 +934,64 @@ function validateConfig(config: HarnessConfig): void {
       throw new Error(`${name} must be an array of strings`);
     }
   }
+  validatePiRoleArgv(
+    "workerArgv",
+    config.workerArgv,
+    ["implement", "tdd", "code-review"],
+    ["read", "bash", "edit", "write", "grep", "find", "ls", "subagent"],
+  );
+  validatePiRoleArgv(
+    "reviewerArgv",
+    config.reviewerArgv,
+    ["code-review"],
+    ["read", "bash", "grep", "find", "ls", "subagent"],
+  );
+}
+
+function validatePiRoleArgv(
+  name: "workerArgv" | "reviewerArgv",
+  argv: string[],
+  skills: string[],
+  tools: string[],
+): void {
+  const fail = (reason: string): never => {
+    throw new Error(`${name} must enforce the Pi role contract: ${reason}`);
+  };
+  if (!argv.includes("--no-approve") || argv.includes("--approve") || argv.includes("-a")) {
+    fail("--no-approve is required");
+  }
+  if (!argv.includes("--no-skills")) fail("--no-skills is required");
+  const conflictingFlags = [
+    "--no-extensions", "-ne", "--no-tools", "-nt", "--no-builtin-tools", "-nbt", "--exclude-tools", "-xt", "-t",
+  ];
+  if (argv.some((argument) => conflictingFlags.some((flag) => argument === flag || argument.startsWith(`${flag}=`)))) {
+    fail("conflicting extension or tool flags are not allowed");
+  }
+  if (argv.some((argument) => ["--skill=", "--tools=", "--thinking="].some((prefix) => argument.startsWith(prefix)))) {
+    fail("role options must use separate flag and value arguments");
+  }
+  const loadedSkills = new Set(flagValues(argv, "--skill").map(piSkillName));
+  if (skills.some((skill) => !loadedSkills.has(skill))) fail(`required skills: ${skills.join(",")}`);
+  const toolValues = flagValues(argv, "--tools");
+  if (toolValues.length !== 1 || !sameSet(toolValues[0]!.split(",").map((tool) => tool.trim()), tools)) {
+    fail(`tools must be exactly: ${tools.join(",")}`);
+  }
+  const thinking = flagValues(argv, "--thinking");
+  if (thinking.length !== 1 || thinking[0] !== "high") fail("--thinking high is required");
+}
+
+function flagValues(argv: string[], flag: string): string[] {
+  return argv.flatMap((value, index) => value === flag && argv[index + 1] ? [argv[index + 1]!] : []);
+}
+
+function piSkillName(path: string): string {
+  const parts = path.replace(/[\\/]+$/, "").split(/[\\/]/);
+  return parts.at(-1) === "SKILL.md" ? (parts.at(-2) ?? "") : (parts.at(-1) ?? "");
+}
+
+function sameSet(actual: string[], expected: string[]): boolean {
+  const values = new Set(actual);
+  return values.size === expected.length && expected.every((value) => values.has(value));
 }
 
 function result(ok: boolean, action: TickAction, jobId: string | null, messageValue: string): TickResult {

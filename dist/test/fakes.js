@@ -1,4 +1,20 @@
 import { digest } from "../src/model.js";
+export const validWorkerArgv = [
+    "--no-approve",
+    "--no-skills",
+    "--skill", "/skills/implement",
+    "--skill", "/skills/tdd",
+    "--skill", "/skills/code-review",
+    "--tools", "read,bash,edit,write,grep,find,ls,subagent",
+    "--thinking", "high",
+];
+export const validReviewerArgv = [
+    "--no-approve",
+    "--no-skills",
+    "--skill", "/skills/code-review",
+    "--tools", "read,bash,grep,find,ls,subagent",
+    "--thinking", "high",
+];
 export class FakeClock {
     tick = 0;
     now() {

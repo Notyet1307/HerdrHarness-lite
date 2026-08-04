@@ -12,6 +12,8 @@ import {
   MemoryStore,
   SequenceIds,
   issue,
+  validReviewerArgv,
+  validWorkerArgv,
 } from "./fakes.js";
 
 const config: HarnessConfig = {
@@ -23,8 +25,8 @@ const config: HarnessConfig = {
   worktreeRoot: "/worktrees",
   maxReviewRounds: 3,
   maxAnalystTurns: 3,
-  workerArgv: [],
-  reviewerArgv: [],
+  workerArgv: validWorkerArgv,
+  reviewerArgv: validReviewerArgv,
 };
 
 test("config rejects non-string native Pi arguments", () => {
@@ -41,6 +43,34 @@ test("config rejects non-string native Pi arguments", () => {
       clock: new FakeClock(),
       ids: new SequenceIds(),
     }), new RegExp(`${field} must be an array of strings`));
+  }
+});
+
+test("config rejects incomplete Pi role contracts", () => {
+  for (const invalidConfig of [
+    { ...config, workerArgv: [] },
+    { ...config, reviewerArgv: [] },
+    { ...config, workerArgv: [...validWorkerArgv.slice(0, 2), ...validWorkerArgv.slice(4)] },
+    { ...config, workerArgv: validWorkerArgv.map((value) => value === "high" ? "low" : value) },
+    { ...config, reviewerArgv: [...validReviewerArgv, "--no-extensions"] },
+    {
+      ...config,
+      reviewerArgv: validReviewerArgv.map((value) => (
+        value === "read,bash,grep,find,ls,subagent" ? `${value},write` : value
+      )),
+    },
+  ]) {
+    assert.throws(() => new HarnessController({
+      config: invalidConfig,
+      store: new MemoryStore(),
+      github: new FakeGitHub([]),
+      git: new FakeGit(),
+      herdr: new FakeHerdr([]),
+      analyst: new FakeAnalyst(),
+      evidence: new FakeEvidence(),
+      clock: new FakeClock(),
+      ids: new SequenceIds(),
+    }), /(?:workerArgv|reviewerArgv) must enforce the Pi role contract/);
   }
 });
 

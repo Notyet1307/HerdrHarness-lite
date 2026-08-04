@@ -17,7 +17,7 @@ export function workerPrompt(job, attempt) {
 }
 export function reviewerPrompt(job, attempt) {
     return [
-        "You are a fresh, read-only Pi reviewer. Do not modify files, commit, push, or reuse the worker's conclusion.",
+        "You are a fresh, read-only Pi reviewer. Do not modify product files, commit, push, or reuse the worker's conclusion; writing the designated result JSON is required.",
         `Repository: ${job.task.repo}`,
         `Issue: #${job.task.issueNumber}`,
         `Task digest: ${job.task.digest}`,
