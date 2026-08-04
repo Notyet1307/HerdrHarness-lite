@@ -107,6 +107,7 @@ export class FakeHerdr {
     prompts = [];
     closed = [];
     promptFailureAfterDispatch = null;
+    waitFailure = null;
     constructor(outcomes) {
         this.outcomes = outcomes;
     }
@@ -134,6 +135,10 @@ export class FakeHerdr {
             throw failure;
     }
     async wait(input) {
+        const failure = this.waitFailure;
+        this.waitFailure = null;
+        if (failure)
+            throw failure;
         const outcome = this.outcomes.shift();
         if (!outcome)
             throw new Error("no fake outcome queued");

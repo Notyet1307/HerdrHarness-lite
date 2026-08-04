@@ -134,6 +134,7 @@ export class FakeHerdr implements HerdrPort {
   prompts: Array<{ dispatchId: string; skill: "implement" | "code-review"; text: string }> = [];
   closed: string[] = [];
   promptFailureAfterDispatch: Error | null = null;
+  waitFailure: Error | null = null;
 
   constructor(private readonly outcomes: Outcome[]) {}
 
@@ -168,6 +169,9 @@ export class FakeHerdr implements HerdrPort {
     expectedAttemptId: string;
     expectedLane: "worker" | "reviewer";
   }): Promise<{ agentStatus: "idle" | "done" | "blocked" | "unknown"; result: AttemptResult | null; diagnostic: string | null }> {
+    const failure = this.waitFailure;
+    this.waitFailure = null;
+    if (failure) throw failure;
     const outcome = this.outcomes.shift();
     if (!outcome) throw new Error("no fake outcome queued");
     if (outcome.lane !== input.expectedLane) throw new Error(`expected ${input.expectedLane}, got ${outcome.lane}`);

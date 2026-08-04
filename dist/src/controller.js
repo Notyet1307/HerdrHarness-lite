@@ -339,6 +339,11 @@ export class HarnessController {
             });
         }
         catch (error) {
+            if (lane === "reviewer") {
+                const integrityBlock = await this.verifyReviewerIntegrity(state, job, attempt, null, null);
+                if (integrityBlock)
+                    return integrityBlock;
+            }
             return this.block(state, job, {
                 class: "infrastructure_exhausted",
                 lane,
@@ -347,31 +352,12 @@ export class HarnessController {
             });
         }
         if (lane === "reviewer") {
-            if (!job.headSha) {
-                return this.block(state, job, {
-                    class: "integrity_violation",
-                    lane,
-                    summary: "reviewer lane lost its expected implementation HEAD",
-                    attemptResult: observation.result,
-                });
-            }
             const reportedHeadSha = observation.result?.lane === "reviewer"
                 ? (observation.result.reviewedHeadSha ?? null)
                 : null;
-            const verification = await this.deps.git.verifyReviewer({
-                worktree: job.worktree,
-                expectedHeadSha: job.headSha,
-                reportedHeadSha,
-                allowedResultPaths: [...job.attempts.map((settled) => settled.resultPath), attempt.resultPath],
-            });
-            if (!verification.ok) {
-                return this.block(state, job, {
-                    class: verification.class,
-                    lane,
-                    summary: verification.reason,
-                    attemptResult: observation.result,
-                });
-            }
+            const integrityBlock = await this.verifyReviewerIntegrity(state, job, attempt, reportedHeadSha, observation.result);
+            if (integrityBlock)
+                return integrityBlock;
         }
         const validated = validateAttemptResult(job.id, attempt, observation.result);
         if (!validated.ok) {
@@ -389,6 +375,30 @@ export class HarnessController {
         if (lane === "worker")
             return this.finishWorker(state, job, attempt, validated.result, observation.diagnostic);
         return this.finishReviewer(state, job, attempt, validated.result, observation.diagnostic);
+    }
+    async verifyReviewerIntegrity(state, job, attempt, reportedHeadSha, attemptResult) {
+        if (!job.worktree || !job.headSha) {
+            return this.block(state, job, {
+                class: "integrity_violation",
+                lane: "reviewer",
+                summary: "reviewer lane lost its expected worktree or implementation HEAD",
+                attemptResult,
+            });
+        }
+        const verification = await this.deps.git.verifyReviewer({
+            worktree: job.worktree,
+            expectedHeadSha: job.headSha,
+            reportedHeadSha,
+            allowedResultPaths: [...job.attempts.map((settled) => settled.resultPath), attempt.resultPath],
+        });
+        if (verification.ok)
+            return null;
+        return this.block(state, job, {
+            class: verification.class,
+            lane: "reviewer",
+            summary: verification.reason,
+            attemptResult,
+        });
     }
     async finishWorker(state, job, attempt, worker, diagnostic) {
         if (worker.status === "blocked") {

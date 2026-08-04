@@ -555,7 +555,7 @@ npm run verify
 
 ```text
 TypeScript strict typecheck: PASS
-Tests: 44 passed, 0 failed
+Tests: 45 passed, 0 failed
 ```
 
 覆盖：

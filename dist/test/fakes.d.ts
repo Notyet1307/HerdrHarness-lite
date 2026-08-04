@@ -114,6 +114,7 @@ export declare class FakeHerdr implements HerdrPort {
     }>;
     closed: string[];
     promptFailureAfterDispatch: Error | null;
+    waitFailure: Error | null;
     constructor(outcomes: Outcome[]);
     createWorktree(input: {
         branch: string;

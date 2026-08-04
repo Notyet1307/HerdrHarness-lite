@@ -114,6 +114,32 @@ test("blocked Reviewer cannot bypass worktree verification", async () => {
   assert.match(store.state.activeJob?.incident?.summary ?? "", /untracked product file/);
 });
 
+test("Reviewer wait failure cannot bypass worktree verification", async () => {
+  const store = new MemoryStore();
+  const git = new FakeGit();
+  git.reviewerFailure = "reviewer changed the worktree before wait failed";
+  const herdr = new FakeHerdr([
+    { lane: "worker", status: "completed", headSha: "b".repeat(40) },
+  ]);
+  const controller = new HarnessController({
+    config,
+    store,
+    github: new FakeGitHub([issue({ number: 23, title: "Verify failed review wait" })]),
+    git,
+    herdr,
+    analyst: new FakeAnalyst(),
+    evidence: new FakeEvidence(),
+    clock: new FakeClock(),
+    ids: new SequenceIds(),
+  });
+
+  for (let index = 0; index < 12; index += 1) await controller.tick();
+  herdr.waitFailure = new Error("Herdr wait unavailable");
+  await controller.tick();
+  assert.equal(store.state.activeJob?.incident?.class, "integrity_violation");
+  assert.match(store.state.activeJob?.incident?.summary ?? "", /changed the worktree/);
+});
+
 test("happy path claims, starts Analyst, runs fresh Pi worker/reviewer, publishes, and archives", async () => {
   const store = new MemoryStore();
   const github = new FakeGitHub([issue({ number: 21, title: "Implement feature" })]);

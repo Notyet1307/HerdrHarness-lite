@@ -30,6 +30,7 @@ export declare class HarnessController {
     private advanceClaim;
     private prepareAttempt;
     private driveAttempt;
+    private verifyReviewerIntegrity;
     private finishWorker;
     private finishReviewer;
     private closeCompletedAttempt;
