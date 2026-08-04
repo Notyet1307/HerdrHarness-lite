@@ -9,9 +9,9 @@ export declare class HerdrCli implements HerdrPort {
     private readonly runner;
     private readonly bin;
     private readonly session;
-    constructor(options?: {
+    constructor(options: {
         bin?: string;
-        session?: string;
+        session: string;
         runner?: CommandRunner;
     });
     createWorktree(input: {

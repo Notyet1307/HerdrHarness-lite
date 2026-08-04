@@ -533,7 +533,7 @@ npm run verify
 
 ```text
 TypeScript strict typecheck: PASS
-Tests: 10 passed, 0 failed
+Tests: 14 passed, 0 failed
 ```
 
 覆盖：
@@ -548,9 +548,9 @@ Tests: 10 passed, 0 failed
 8. stale approval 拒绝；
 9. integrity block 强制 hold；
 10. approval 后关闭旧 agent、创建新 attempt；
-11. Herdr 原生命令组合，不使用 `pane run` 模拟 agent。
+11. Herdr 0.8 原生命令、响应 identity、错误分类与 pane-ready 竞态，不使用 `pane run` 模拟 agent。
 
-限制：本环境没有你的 GitHub 凭据、`gh`、Herdr、Pi profile 和 Codex wrapper，因此真实端到端仍需在你的 Mac 上执行一轮验收。代码已经将这部分风险隔离在 adapters，不影响状态机验证结论。
+限制：Herdr 0.8 adapter 已通过独立命名 session 的 disposable canary，但 Pi profile、Codex wrapper 和 GitHub issue 到 PR/merge 的完整链路仍未验收。代码已经将这些风险隔离在 adapters，不影响状态机验证结论。
 
 ---
 

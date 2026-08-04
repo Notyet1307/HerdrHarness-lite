@@ -33,7 +33,7 @@ BLOCKED
 npm run verify
 ```
 
-当前结果：TypeScript 严格类型检查通过，10 项测试通过。测试覆盖：
+在提供 TypeScript 5.8.3 编译器的环境中，严格类型检查通过，14 项测试通过。测试覆盖：
 
 - `ready-for-agent`、OPEN、assignee、OPEN blocker 的领取条件；
 - Map 容器不领取、严格首个 OPEN 子任务前沿；
@@ -45,7 +45,7 @@ npm run verify
 - 审批后关闭旧 pane，并强制创建新的 worker attempt；
 - Herdr 适配器使用原生 `worktree / tab / agent` 命令，不再通过 `pane split + pane run` 模拟 agent 启动。
 
-这里的“通过”是指本地类型检查和使用 fake GitHub/Git/Herdr/Analyst 的集成测试通过。当前执行环境没有 `gh`、Herdr 二进制和你的本机认证，因此没有声称真实 GitHub + Herdr + Pi + Codex 端到端已经跑通。
+默认测试使用 fake GitHub/Git/Herdr/Analyst。本次另使用 Herdr 0.8.0 的独立命名 session 完成了 disposable adapter canary；这仍不代表 GitHub issue 到 PR/merge 的完整端到端已经跑通。仓库尚未声明 TypeScript 编译器依赖，因此裸执行 `npm run verify` 的可复现性需要单独修复。
 
 ## 最小命令面
 

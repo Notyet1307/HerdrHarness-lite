@@ -21,7 +21,7 @@ const usage = `Usage:
 
 type FileConfig = HarnessConfig & {
   stateDir: string;
-  herdr?: { bin?: string; session?: string };
+  herdr: { bin?: string; session: string };
   analyst: { command: string; argv?: string[] };
 };
 
@@ -103,8 +103,8 @@ async function main(argv: string[]): Promise<number> {
 function loadConfig(path: string): FileConfig {
   const absolute = resolve(path);
   const parsed = JSON.parse(readFileSync(absolute, "utf8")) as FileConfig;
-  if (!parsed || typeof parsed !== "object" || !parsed.stateDir || !parsed.analyst?.command) {
-    throw new Error("invalid Harness config: stateDir and analyst.command are required");
+  if (!parsed || typeof parsed !== "object" || !parsed.stateDir || !parsed.herdr?.session?.trim() || !parsed.analyst?.command) {
+    throw new Error("invalid Harness config: stateDir, herdr.session and analyst.command are required");
   }
   return parsed;
 }
