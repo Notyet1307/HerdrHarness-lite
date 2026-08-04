@@ -106,7 +106,7 @@ type Outcome = (
 export class FakeHerdr implements HerdrPort {
   prepared: Array<{ attemptId: string; lane: string; handle: { agentName: string; paneId: string; tabId: string; workspaceId: string } }> = [];
   started: string[] = [];
-  prompts: Array<{ dispatchId: string; text: string }> = [];
+  prompts: Array<{ dispatchId: string; skill: "implement" | "code-review"; text: string }> = [];
   closed: string[] = [];
   promptFailureAfterDispatch: Error | null = null;
 
@@ -131,8 +131,8 @@ export class FakeHerdr implements HerdrPort {
     this.started.push(input.handle.agentName);
   }
 
-  async prompt(input: { dispatchId: string; text: string }): Promise<void> {
-    this.prompts.push({ dispatchId: input.dispatchId, text: input.text });
+  async prompt(input: { dispatchId: string; skill: "implement" | "code-review"; text: string }): Promise<void> {
+    this.prompts.push({ dispatchId: input.dispatchId, skill: input.skill, text: input.text });
     const failure = this.promptFailureAfterDispatch;
     this.promptFailureAfterDispatch = null;
     if (failure) throw failure;

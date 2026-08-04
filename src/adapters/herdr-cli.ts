@@ -176,8 +176,13 @@ export class HerdrCli implements HerdrPort {
     if (object(startedValue.agent).interactive_ready !== true) throw new Error("Herdr agent is not ready for interactive input");
   }
 
-  async prompt(input: { handle: AgentHandle; dispatchId: string; text: string }): Promise<void> {
-    const body = `[harness-dispatch:${input.dispatchId}]\n${input.text}`;
+  async prompt(input: {
+    handle: AgentHandle;
+    dispatchId: string;
+    skill: "implement" | "code-review";
+    text: string;
+  }): Promise<void> {
+    const body = `/skill:${input.skill} [harness-dispatch:${input.dispatchId}]\n${input.text}`;
     const value = this.invoke(["agent", "prompt", input.handle.agentName, body, "--wait"]);
     expectType(value, "agent_prompted");
     const agent = agentIdentity(value.agent, input.handle.agentName);

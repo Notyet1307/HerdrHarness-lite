@@ -7,8 +7,8 @@ GitHub ready issue
   -> durable claim intent
   -> GitHub claim + task-bound Codex Analyst
   -> Herdr worktree
-  -> fresh Pi worker
-  -> fresh read-only Pi reviewer
+  -> fresh Pi worker with forced implement
+  -> fresh Pi reviewer with forced code-review
   -> PR
   -> observe merge
 ```
@@ -34,7 +34,7 @@ npm ci
 npm run verify
 ```
 
-仓库固定使用 TypeScript 5.8.3；严格类型检查通过，35 项测试通过。测试覆盖：
+仓库固定使用 TypeScript 5.8.3；严格类型检查通过，41 项测试通过。测试覆盖：
 
 - `ready-for-agent`、OPEN、assignee、OPEN blocker 的领取条件；
 - Map 容器不领取、严格首个 OPEN 子任务前沿；
@@ -47,9 +47,12 @@ npm run verify
 - attempt 在 `prepared -> pane_ready -> agent_ready -> running` 各阶段先持久化再推进；prompt 结果不确定时不重放；
 - 成功 attempt 在结果与 Git 验证后关闭自有 pane，关闭后崩溃可凭 durable result 收敛；
 - Herdr 适配器使用原生 `worktree / tab / agent` 命令，并在 blocked/wait 失败时使用官方 `agent get/read` 诊断，不再通过 `pane split + pane run` 模拟 agent 启动。
+- Worker/Reviewer 的强制 skill dispatch、Pi package 资源、foreground 双轴审查与收窄后的 child agent 契约。
 - Codex Analyst wrapper 的 start/turn effect receipt、崩溃后禁止重复 dispatch、完成结果重放、证据漂移拒绝、精确 UUID close，以及 close 失败时保留终态 Job。
 
-默认测试使用 fake GitHub/Git/Herdr/Analyst。本次另在 `Notyet1307/harness-sandbox@fd9defa` 上使用 Herdr 0.8.0、Pi 0.83.0 与 Pi integration v8 完成了独立命名 session canary：Pi 写出预期 result、tracked tree 未改，自有 attempt pane 已关闭；又从 `harness-sandbox@2b9ebce` 验证了 Codex CLI 0.145.0 的真实 `exec -> resume -> delete` 生命周期、完成 turn 的 receipt 重放、同 digest payload 漂移拒绝和目标 tracked tree 零改动。Analyst 实际运行目录是私有 state dir，不接触目标仓库。这仍不代表 GitHub issue 到 PR/merge 的完整端到端已经跑通。worktree 自动删除不在本次实现范围内。
+默认测试使用 fake GitHub/Git/Herdr/Analyst。本次另在 `Notyet1307/harness-sandbox@fd9defa` 上使用 Herdr 0.8.0、Pi 0.83.0 与 Pi integration v8 完成了独立命名 session canary：Pi 写出预期 result、tracked tree 未改，自有 attempt pane 已关闭；又从 `harness-sandbox@2b9ebce` 验证了 Codex CLI 0.145.0 的真实 `exec -> resume -> delete` 生命周期、完成 turn 的 receipt 重放、同 digest payload 漂移拒绝和目标 tracked tree 零改动。Analyst 实际运行目录是私有 state dir，不接触目标仓库。
+
+角色契约还在 `harness-sandbox` 的 Herdr 隔离 worktree 中以 issue #12 做了真实 canary：Worker 从实现前基线 `b0fd0b0` 启动，强制加载 `implement`，生成本地 commit `1285f52`，随后完成 `2/2` foreground 双轴自审；fresh Reviewer 再次完成独立 `2/2` 双轴审查并返回 `pass`。两条 durable result 均绑定精确 SHA，`lint/test/typecheck/build` 全部退出 0，两个自有 pane 均已关闭，最终 worktree clean，分支未 push。该 canary 验证的是角色运行时与生命周期，不代表 GitHub issue 到 PR/merge 的完整 controller 端到端。worktree 自动删除不在本次实现范围内。
 
 ## 最小命令面
 
@@ -68,6 +71,23 @@ node dist/src/cli.js approve \
 ```
 
 配置样例见 `harness.config.example.json`。
+
+## Pi 角色运行时
+
+先安装 `pi-subagents`，再把本仓库注册为 Pi package：
+
+```bash
+pi install npm:pi-subagents
+pi install /absolute/path/to/HerdrHarness-lite
+```
+
+将 `harness.config.example.json` 中的 skill 路径替换为本机绝对路径。Harness 继续直接透传 Pi 原生 argv，不增加第二套 profile 配置：
+
+- Worker 显式加载 Matt Pocock `implement`、`tdd` 和本仓库的 `code-review`，拥有完成任务所需的写工具；dispatch 以 `/skill:implement` 开头，完成实现 checkpoint 后必须执行 `code-review` 自审。
+- Reviewer 只显式加载本仓库的 `code-review`，没有 `edit/write` 工具；dispatch 以 `/skill:code-review` 开头。
+- `code-review` 通过 `pi-subagents` 在父 Pi 当前 turn 内并行运行两个 fresh、foreground、只读子审查器，分别检查 Standards 与 Spec。任一轴缺失或失败都不能判定通过。
+
+子审查器从父 Pi 获得当前工作目录、环境和未覆写的模型；`thinking=high` 被显式固定，因为该扩展没有通用的动态 thinking 继承。工具、skills、扩展和递归深度有意收窄，不能复制父 Pi 的写权限；`async=false` 保证 Herdr 观察到的顶层 Pi 生命周期覆盖整次审查。这里的“只读”仍由最小工具面、指令与 Harness 的 HEAD/clean-tree 复核共同保证，不把 shell 当作操作系统沙箱。
 
 ## 代码边界
 

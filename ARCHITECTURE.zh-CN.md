@@ -401,10 +401,13 @@ reason
 Worker 使用 Pi，拥有 worktree 写权限，但必须遵守：
 
 ```text
+dispatch 强制从 /skill:implement 开始
+显式加载 Matt Pocock implement、tdd 与 Harness code-review
 只处理一个 issue
 不 push
 不创建 PR
 运行验证
+提交 implementation checkpoint 后执行双轴 code-review 自审
 提交改动
 写入 exact attempt result JSON
 ```
@@ -427,10 +430,15 @@ tracked worktree clean
 每轮 reviewer 都是 fresh Pi agent，且只读：
 
 ```text
+dispatch 强制从 /skill:code-review 开始
+在当前 turn 内用 pi-subagents 前台并行检查 Standards 与 Spec
+两个 child 均为 fresh、无写工具、无 skills、无递归 subagent
 reviewedHeadSha == 当前 head
 review 后 HEAD 不变
 tracked worktree clean
 ```
+
+Herdr 只管理顶层 Worker/Reviewer Pi。子审查器由顶层 Pi 在同一 foreground turn 内拥有；它们继承父 Pi 的工作目录、环境和未覆写模型，但 `thinking=high` 显式固定，工具、skills、扩展和递归深度按只读职责收窄。禁止 async child，避免顶层 Pi 提前完成而留下未被 Harness 生命周期覆盖的后台执行。
 
 结果：
 
@@ -544,7 +552,7 @@ npm run verify
 
 ```text
 TypeScript strict typecheck: PASS
-Tests: 22 passed, 0 failed
+Tests: 41 passed, 0 failed
 ```
 
 覆盖：
@@ -561,10 +569,11 @@ Tests: 22 passed, 0 failed
 10. approval 后关闭旧 agent、创建新 attempt；
 11. Herdr 0.8 原生命令、响应 identity、错误分类与 pane-ready 竞态，不使用 `pane run` 模拟 agent；
 12. prompt at-most-once、关闭后崩溃恢复、成功 pane 关闭与官方 `agent get/read` 诊断。
+13. Worker/Reviewer 强制 skill dispatch、Pi package 资源、role argv 与 foreground 双轴 child reviewer 契约。
 
-真实验证：在 `Notyet1307/harness-sandbox@fd9defa` 上，以 Herdr 0.8.0、Pi 0.83.0、Pi integration v8 完成独立命名 session canary；Pi 到达 `done`、写出预期 durable result、tracked tree 未改，自有 attempt pane 关闭后已从 workspace 消失。
+真实验证：在 `Notyet1307/harness-sandbox@fd9defa` 上，以 Herdr 0.8.0、Pi 0.83.0、Pi integration v8 完成独立命名 session canary；Pi 到达 `done`、写出预期 durable result、tracked tree 未改，自有 attempt pane 关闭后已从 workspace 消失。另以 issue #12 从基线 `b0fd0b0` 运行角色 canary：强制 `implement` 的 Worker 生成本地 `1285f52` 并完成 `2/2` foreground 双轴自审，fresh Reviewer 再完成独立 `2/2` 双轴审查并返回 `pass`；两条结果均绑定精确 SHA，四条指定验证退出 0，两个自有 pane 已关闭，worktree clean，分支未 push。
 
-限制：Codex wrapper 与 GitHub issue 到 PR/merge 的完整链路仍未验收；worktree 自动删除明确不在本阶段范围内。代码已经将这些风险隔离在 adapters，不影响本次生命周期结论。
+限制：角色 canary 是受控的 Herdr/Pi 运行态验证，不是 GitHub issue 到 PR/merge 的完整 controller 链路；后者仍未验收。worktree 自动删除明确不在本阶段范围内。代码已经将这些风险隔离在 adapters，不影响本次生命周期结论。
 
 ---
 
@@ -587,7 +596,7 @@ SQLite StateStore
 -> GitHubGh
 -> GitCli
 -> HerdrCli
--> Pi worker/reviewer profiles
+-> Pi worker/reviewer 原生 argv、强制 skill dispatch 与 foreground subagents
 -> existing Codex Analyst adapter
 ```
 

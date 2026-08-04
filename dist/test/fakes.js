@@ -105,7 +105,7 @@ export class FakeHerdr {
         this.started.push(input.handle.agentName);
     }
     async prompt(input) {
-        this.prompts.push({ dispatchId: input.dispatchId, text: input.text });
+        this.prompts.push({ dispatchId: input.dispatchId, skill: input.skill, text: input.text });
         const failure = this.promptFailureAfterDispatch;
         this.promptFailureAfterDispatch = null;
         if (failure)

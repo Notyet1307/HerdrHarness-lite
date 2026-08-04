@@ -8,8 +8,30 @@
   "worktreeRoot": "/absolute/path/to/worktrees",
   "maxReviewRounds": 3,
   "maxAnalystTurns": 3,
-  "workerArgv": [],
-  "reviewerArgv": [],
+  "workerArgv": [
+    "--no-approve",
+    "--no-skills",
+    "--skill",
+    "/absolute/path/to/.agents/skills/implement",
+    "--skill",
+    "/absolute/path/to/.agents/skills/tdd",
+    "--skill",
+    "/absolute/path/to/HerdrHarness-lite/pi/skills/code-review",
+    "--tools",
+    "read,bash,edit,write,grep,find,ls,subagent",
+    "--thinking",
+    "high"
+  ],
+  "reviewerArgv": [
+    "--no-approve",
+    "--no-skills",
+    "--skill",
+    "/absolute/path/to/HerdrHarness-lite/pi/skills/code-review",
+    "--tools",
+    "read,bash,grep,find,ls,subagent",
+    "--thinking",
+    "high"
+  ],
   "herdr": {
     "bin": "herdr",
     "session": "herdr-harness"

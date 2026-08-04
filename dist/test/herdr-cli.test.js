@@ -142,7 +142,8 @@ test("Herdr adapter follows the native 0.8 command and JSON response contract", 
     assert.match(handle.agentName, /^[a-z][a-z0-9_-]{0,31}$/);
     assert.ok(handle.agentName.length <= 32);
     await herdr.startAgent({ handle, argv: ["--model", "test-model"] });
-    await herdr.prompt({ handle, dispatchId: "worker-001", text: "do the work" });
+    const dispatch = { handle, dispatchId: "worker-001", skill: "implement", text: "do the work" };
+    await herdr.prompt(dispatch);
     const resultPath = `${process.cwd()}/.herdr-cli-test-result.json`;
     writeFileSync(resultPath, JSON.stringify({
         version: 1,
@@ -177,7 +178,7 @@ test("Herdr adapter follows the native 0.8 command and JSON response contract", 
         { command: "herdr", args: [...session, "agent", "get", handle.agentName] },
         { command: "herdr", args: [...session, "agent", "start", handle.agentName, "--kind", "pi", "--pane", "w1:p2", "--", "--model", "test-model"] },
         { command: "herdr", args: [...session, "agent", "start", handle.agentName, "--kind", "pi", "--pane", "w1:p2", "--", "--model", "test-model"] },
-        { command: "herdr", args: [...session, "agent", "prompt", handle.agentName, "[harness-dispatch:worker-001]\ndo the work", "--wait"] },
+        { command: "herdr", args: [...session, "agent", "prompt", handle.agentName, "/skill:implement [harness-dispatch:worker-001]\ndo the work", "--wait"] },
         { command: "herdr", args: [...session, "agent", "wait", handle.agentName] },
         { command: "herdr", args: [...session, "pane", "close", "w1:p2"] },
     ]);

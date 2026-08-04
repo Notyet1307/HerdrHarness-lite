@@ -156,7 +156,7 @@ export class HerdrCli {
             throw new Error("Herdr agent is not ready for interactive input");
     }
     async prompt(input) {
-        const body = `[harness-dispatch:${input.dispatchId}]\n${input.text}`;
+        const body = `/skill:${input.skill} [harness-dispatch:${input.dispatchId}]\n${input.text}`;
         const value = this.invoke(["agent", "prompt", input.handle.agentName, body, "--wait"]);
         expectType(value, "agent_prompted");
         const agent = agentIdentity(value.agent, input.handle.agentName);

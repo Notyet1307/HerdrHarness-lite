@@ -377,7 +377,12 @@ export class HarnessController {
       const next = evolveJob(job, this.deps.clock.now(), { activeAttempt: running });
       await this.saveJob(state, job, next);
       try {
-        await this.deps.herdr.prompt({ handle: attempt.handle, dispatchId: attempt.id, text: prompt });
+        await this.deps.herdr.prompt({
+          handle: attempt.handle,
+          dispatchId: attempt.id,
+          skill: lane === "worker" ? "implement" : "code-review",
+          text: prompt,
+        });
       } catch (error) {
         return result(
           false,

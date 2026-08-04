@@ -11,7 +11,8 @@ export function workerPrompt(job: Job, attempt: Attempt): string {
     `Branch: ${job.branch}`,
     `Objective:\n${job.task.objective}`,
     job.pendingBrief ? `Approved bounded recovery/rework brief:\n${job.pendingBrief}` : "No recovery brief is attached.",
-    "Implement only this issue. Run appropriate validation. Commit all intended changes. Do not push or create a PR.",
+    "Follow the loaded implement skill. Implement only this issue, run appropriate validation, and do not push or create a PR.",
+    "Create an implementation checkpoint commit, then load and follow the available code-review skill so the fixed-point diff is non-empty; apply accepted review fixes and commit the final clean state.",
     "When human input is required, return status=blocked instead of guessing.",
     resultInstruction(job, attempt),
   ].join("\n\n");
@@ -26,7 +27,8 @@ export function reviewerPrompt(job: Job, attempt: Attempt): string {
     `Base SHA: ${job.baseSha}`,
     `Head SHA to review: ${job.headSha ?? "missing"}`,
     `Objective:\n${job.task.objective}`,
-    "Review correctness and verification independently. Use status=changes only with actionable findings; use status=blocked when evidence is insufficient.",
+    "Follow the loaded code-review skill with Base SHA as the fixed point and independently review the exact Head SHA.",
+    "Use status=changes only with actionable findings; use status=blocked when either review axis or required evidence is incomplete.",
     resultInstruction(job, attempt),
   ].join("\n\n");
 }

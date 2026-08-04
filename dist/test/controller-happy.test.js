@@ -88,6 +88,7 @@ test("happy path claims, starts Analyst, runs fresh Pi worker/reviewer, publishe
     assert.equal(herdr.prepared[0]?.lane, "worker");
     assert.equal(herdr.prepared[1]?.lane, "reviewer");
     assert.ok(herdr.prepared[0]?.attemptId !== herdr.prepared[1]?.attemptId);
+    assert.deepEqual(herdr.prompts.map((prompt) => prompt.skill), ["implement", "code-review"]);
     assert.deepEqual(herdr.closed, [
         herdr.prepared[0].handle.agentName,
         herdr.prepared[1].handle.agentName,

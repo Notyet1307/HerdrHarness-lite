@@ -36,6 +36,7 @@ export declare class HerdrCli implements HerdrPort {
     prompt(input: {
         handle: AgentHandle;
         dispatchId: string;
+        skill: "implement" | "code-review";
         text: string;
     }): Promise<void>;
     wait(input: {

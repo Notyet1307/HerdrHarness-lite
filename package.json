@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
+  "keywords": [
+    "pi-package"
+  ],
   "engines": {
     "node": ">=22.16.0"
   },
@@ -15,6 +18,16 @@
   "bin": {
     "herdr-harness-lite": "./dist/src/cli.js",
     "codex-analyst-wrapper": "./dist/src/codex-analyst-wrapper.js"
+  },
+  "pi": {
+    "skills": [
+      "./pi/skills"
+    ],
+    "subagents": {
+      "agents": [
+        "./pi/agents"
+      ]
+    }
   },
   "devDependencies": {
     "typescript": "5.8.3"

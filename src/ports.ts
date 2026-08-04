@@ -102,7 +102,12 @@ export interface HerdrPort {
     attempt: Attempt;
   }): Promise<AgentHandle>;
   startAgent(input: { handle: AgentHandle; argv: string[] }): Promise<void>;
-  prompt(input: { handle: AgentHandle; dispatchId: string; text: string }): Promise<void>;
+  prompt(input: {
+    handle: AgentHandle;
+    dispatchId: string;
+    skill: "implement" | "code-review";
+    text: string;
+  }): Promise<void>;
   wait(input: {
     handle: AgentHandle;
     resultPath: string;

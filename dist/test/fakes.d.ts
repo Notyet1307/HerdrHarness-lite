@@ -102,6 +102,7 @@ export declare class FakeHerdr implements HerdrPort {
     started: string[];
     prompts: Array<{
         dispatchId: string;
+        skill: "implement" | "code-review";
         text: string;
     }>;
     closed: string[];
@@ -136,6 +137,7 @@ export declare class FakeHerdr implements HerdrPort {
     }): Promise<void>;
     prompt(input: {
         dispatchId: string;
+        skill: "implement" | "code-review";
         text: string;
     }): Promise<void>;
     wait(input: {
