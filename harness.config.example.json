@@ -31,7 +31,7 @@
     "--tools",
     "read,bash,grep,find,ls,subagent",
     "--thinking",
-    "high"
+    "max"
   ],
   "herdr": {
     "bin": "herdr",

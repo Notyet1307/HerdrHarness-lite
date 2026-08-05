@@ -23,7 +23,7 @@ test("Pi child reviewer has a strict non-writing, non-recursive tool list", () =
     const tools = agent.match(/^tools:\s*(.+)$/m)?.[1]?.split(",").map((tool) => tool.trim()) ?? [];
     assert.deepEqual(tools, ["read", "grep", "find", "ls", "bash"]);
     assert.equal(/^tools:.*\b(?:edit|write|subagent)\b/m.test(agent), false);
-    assert.match(agent, /^thinking:\s*high$/m);
+    assert.match(agent, /^thinking:\s*max$/m);
     assert.match(agent, /^inheritProjectContext:\s*true$/m);
     assert.match(agent, /^inheritSkills:\s*false$/m);
     assert.match(agent, /^defaultContext:\s*fresh$/m);
@@ -40,7 +40,7 @@ test("example config pins the Worker and Reviewer Pi role contracts", () => {
     assert.deepEqual(flagValues(exampleConfig.workerArgv, "--tools"), ["read,bash,edit,write,grep,find,ls,subagent"]);
     assert.deepEqual(flagValues(exampleConfig.reviewerArgv, "--tools"), ["read,bash,grep,find,ls,subagent"]);
     assert.deepEqual(flagValues(exampleConfig.workerArgv, "--thinking"), ["high"]);
-    assert.deepEqual(flagValues(exampleConfig.reviewerArgv, "--thinking"), ["high"]);
+    assert.deepEqual(flagValues(exampleConfig.reviewerArgv, "--thinking"), ["max"]);
 });
 function flagValues(argv, flag) {
     return argv.flatMap((value, index) => value === flag && argv[index + 1] ? [argv[index + 1]] : []);

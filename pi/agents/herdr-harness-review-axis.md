@@ -2,7 +2,7 @@
 name: herdr-harness-review-axis
 description: Fresh evidence-only reviewer for one explicit Standards or Spec axis
 tools: read, grep, find, ls, bash
-thinking: high
+thinking: max
 systemPromptMode: replace
 inheritProjectContext: true
 inheritSkills: false

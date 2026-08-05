@@ -19,7 +19,7 @@ export const validReviewerArgv = [
     "--no-skills",
     "--skill", validCodeReviewSkillPath,
     "--tools", "read,bash,grep,find,ls,subagent",
-    "--thinking", "high",
+    "--thinking", "max",
 ];
 export class FakeClock {
     tick = 0;
