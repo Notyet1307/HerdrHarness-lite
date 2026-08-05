@@ -576,7 +576,9 @@ Tests: 45 passed, 0 failed
 
 真实验证：在 `Notyet1307/harness-sandbox@fd9defa` 上，以 Herdr 0.8.0、Pi 0.83.0、Pi integration v8 完成独立命名 session canary；Pi 到达 `done`、写出预期 durable result、tracked tree 未改，自有 attempt pane 关闭后已从 workspace 消失。另以 issue #12 从基线 `b0fd0b0` 运行角色 canary：强制 `implement` 的 Worker 生成本地 `1285f52` 并完成 `2/2` foreground 双轴自审，fresh Reviewer 再完成独立 `2/2` 双轴审查并返回 `pass`；两条结果均绑定精确 SHA，四条指定验证退出 0，两个自有 pane 已关闭，worktree clean，分支未 push。
 
-限制：角色 canary 是受控的 Herdr/Pi 运行态验证，不是 GitHub issue 到 PR/merge 的完整 controller 链路；后者仍未验收。worktree 自动删除明确不在本阶段范围内。代码已经将这些风险隔离在 adapters，不影响本次生命周期结论。
+完整 controller 随后以 issue #14 做了真实端到端 canary。第一次运行因 Reviewer 的 `.pi-subagents` 产物进入 worktree 而 fail closed；产物目录与 gate 绑定修复后，从 `fd9defa` 重跑，Worker 生成 `b0c0f7e`，fresh Reviewer 对同一 SHA 返回 `pass`，Controller 发布 PR #15、观察到 merge commit `7454feb`，再迁移到 `done` 并归档；Codex Analyst receipt 最终为 `closed`。最终 tracked tree clean，仅保留该 Job 已知的 `.harness` result JSON。GitHub issue、claim、Analyst、Herdr worktree、Worker、Reviewer、PR、merge observation 与 archive 的完整主链路已经验收。
+
+限制：worktree 自动删除明确不在本阶段范围内。代码已经将该缺口隔离在 adapter 生命周期之外，不影响本次 controller 主链路结论。
 
 ---
 

@@ -53,7 +53,9 @@ npm run verify
 
 默认测试使用 fake GitHub/Git/Herdr/Analyst。本次另在 `Notyet1307/harness-sandbox@fd9defa` 上使用 Herdr 0.8.0、Pi 0.83.0 与 Pi integration v8 完成了独立命名 session canary：Pi 写出预期 result、tracked tree 未改，自有 attempt pane 已关闭；又从 `harness-sandbox@2b9ebce` 验证了 Codex CLI 0.145.0 的真实 `exec -> resume -> delete` 生命周期、完成 turn 的 receipt 重放、同 digest payload 漂移拒绝和目标 tracked tree 零改动。Analyst 实际运行目录是私有 state dir，不接触目标仓库。
 
-角色契约还在 `harness-sandbox` 的 Herdr 隔离 worktree 中以 issue #12 做了真实 canary：Worker 从实现前基线 `b0fd0b0` 启动，强制加载 `implement`，生成本地 commit `1285f52`，随后完成 `2/2` foreground 双轴自审；fresh Reviewer 再次完成独立 `2/2` 双轴审查并返回 `pass`。两条 durable result 均绑定精确 SHA，`lint/test/typecheck/build` 全部退出 0，两个自有 pane 均已关闭，最终 worktree clean，分支未 push。该 canary 验证的是角色运行时与生命周期，不代表 GitHub issue 到 PR/merge 的完整 controller 端到端。worktree 自动删除不在本次实现范围内。
+角色契约还在 `harness-sandbox` 的 Herdr 隔离 worktree 中以 issue #12 做了真实 canary：Worker 从实现前基线 `b0fd0b0` 启动，强制加载 `implement`，生成本地 commit `1285f52`，随后完成 `2/2` foreground 双轴自审；fresh Reviewer 再次完成独立 `2/2` 双轴审查并返回 `pass`。两条 durable result 均绑定精确 SHA，`lint/test/typecheck/build` 全部退出 0，两个自有 pane 均已关闭，最终 worktree clean，分支未 push。
+
+完整 controller 又以 `harness-sandbox` issue #14 做了真实端到端 canary。第一次运行因 Reviewer 的 `.pi-subagents` 产物进入 worktree 而正确触发 `integrity_violation`；修复产物目录与 gate 绑定后，从基线 `fd9defa` 重跑，Worker 生成 `b0c0f7e`，fresh Reviewer 对同一 SHA 返回 `pass`，Controller 发布 PR #15、观察到 merge commit `7454feb`，随后把 Job 迁移到 `done` 并归档，精确 Codex Analyst receipt 也记录为 `closed`。最终 tracked tree clean，仅保留该 Job 已知的 `.harness` result JSON。该 canary 已验证 GitHub issue、claim、Analyst、Herdr worktree、Worker、Reviewer、PR、merge observation 与 archive 的完整主链路。worktree 自动删除仍不在本次实现范围内。
 
 ## 最小命令面
 
