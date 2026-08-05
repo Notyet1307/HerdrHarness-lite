@@ -21,7 +21,10 @@ const ISSUE_FIELDS = "number,title,body,state,updatedAt,labels,assignees,blocked
 
 /** GitHub adapter built only on `gh` and `git`; mutations are idempotent. */
 export class GitHubGh implements GitHubPort {
-  constructor(private readonly runner: CommandRunner = new SyncCommandRunner()) {}
+  constructor(
+    private readonly runner: CommandRunner = new SyncCommandRunner(),
+    private readonly autoMerge = false,
+  ) {}
 
   async listIssueGraph(repo: string, readyLabel: string): Promise<IssueSnapshot[]> {
     const stdout = requireSuccess(
@@ -164,12 +167,56 @@ export class GitHubGh implements GitHubPort {
     }
 
     const viewRaw = requireSuccess(
-      this.runner.run("gh", ["pr", "view", String(number), "--repo", input.repo, "--json", "number,url,headRefOid"]),
+      this.runner.run("gh", [
+        "pr",
+        "view",
+        String(number),
+        "--repo",
+        input.repo,
+        "--json",
+        "number,url,headRefOid,baseRefName,mergedAt,autoMergeRequest",
+      ]),
       `gh pr view #${number}`,
     );
-    const view = JSON.parse(viewRaw) as { number?: unknown; url?: unknown; headRefOid?: unknown };
-    if (typeof view.number !== "number" || typeof view.url !== "string" || typeof view.headRefOid !== "string") {
+    const view = JSON.parse(viewRaw) as {
+      number?: unknown;
+      url?: unknown;
+      headRefOid?: unknown;
+      baseRefName?: unknown;
+      mergedAt?: unknown;
+      autoMergeRequest?: unknown;
+    };
+    if (
+      typeof view.number !== "number" ||
+      typeof view.url !== "string" ||
+      typeof view.headRefOid !== "string" ||
+      typeof view.baseRefName !== "string"
+    ) {
       throw new Error("GitHub PR response has incomplete identity");
+    }
+    if (view.baseRefName !== input.baseRef) {
+      throw new Error(`PR base ${view.baseRefName} differs from expected base ${input.baseRef}`);
+    }
+    if (
+      this.autoMerge &&
+      view.headRefOid === input.headSha &&
+      !(typeof view.mergedAt === "string" && view.mergedAt) &&
+      !view.autoMergeRequest
+    ) {
+      requireSuccess(
+        this.runner.run("gh", [
+          "pr",
+          "merge",
+          String(view.number),
+          "--repo",
+          input.repo,
+          "--auto",
+          "--match-head-commit",
+          input.headSha,
+          "--merge",
+        ]),
+        `enable auto-merge for PR #${view.number}`,
+      );
     }
     return { number: view.number, url: view.url, headSha: view.headRefOid };
   }
@@ -186,12 +233,30 @@ export class GitHubGh implements GitHubPort {
         "--repo",
         repo,
         "--json",
-        "state,mergedAt,headRefOid",
+        "state,mergedAt,headRefOid,autoMergeRequest",
       ]),
       `gh pr view #${pullRequest.number}`,
     );
-    const view = JSON.parse(stdout) as { state?: unknown; mergedAt?: unknown; headRefOid?: unknown };
+    const view = JSON.parse(stdout) as {
+      state?: unknown;
+      mergedAt?: unknown;
+      headRefOid?: unknown;
+      autoMergeRequest?: unknown;
+    };
     if (view.headRefOid !== pullRequest.headSha) {
+      if (this.autoMerge && view.state === "OPEN" && view.autoMergeRequest) {
+        requireSuccess(
+          this.runner.run("gh", [
+            "pr",
+            "merge",
+            String(pullRequest.number),
+            "--repo",
+            repo,
+            "--disable-auto",
+          ]),
+          `disable auto-merge for drifted PR #${pullRequest.number}`,
+        );
+      }
       throw new Error(`PR head changed after review: expected ${pullRequest.headSha}, got ${String(view.headRefOid)}`);
     }
     if (typeof view.mergedAt === "string" && view.mergedAt) return "merged";

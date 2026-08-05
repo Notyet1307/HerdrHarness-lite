@@ -10,6 +10,7 @@ GitHub ready issue
   -> fresh Pi worker with forced implement
   -> fresh Pi reviewer with forced code-review
   -> PR
+  -> optional GitHub native auto-merge bound to the reviewed SHA
   -> observe merge
 ```
 
@@ -49,6 +50,7 @@ npm run verify
 - Herdr 适配器使用原生 `worktree / tab / agent` 命令，并在 blocked/wait 失败时使用官方 `agent get/read` 诊断，不再通过 `pane split + pane run` 模拟 agent 启动。
 - Worker/Reviewer 的强制 skill dispatch、Pi package 资源、foreground 双轴审查与收窄后的 child agent 契约。
 - Reviewer 无论返回 `pass/changes/blocked/failed` 还是缺失结果，都会先经过 Git gate；tracked 改动和除该 Job 已知 result JSON 外的任何 untracked 文件都不能进入 recovery/publish。
+- 可选 `autoMerge: true` 只在 PR HEAD 与 Reviewer 通过的 SHA 一致时请求 GitHub native auto-merge；观察到 HEAD 漂移时先撤销 auto-merge，再拒绝继续。
 - Codex Analyst wrapper 的 start/turn effect receipt、崩溃后禁止重复 dispatch、完成结果重放、证据漂移拒绝、精确 UUID close，以及 close 失败时保留终态 Job。
 
 默认测试使用 fake GitHub/Git/Herdr/Analyst。本次另在 `Notyet1307/harness-sandbox@fd9defa` 上使用 Herdr 0.8.0、Pi 0.83.0 与 Pi integration v8 完成了独立命名 session canary：Pi 写出预期 result、tracked tree 未改，自有 attempt pane 已关闭；又从 `harness-sandbox@2b9ebce` 验证了 Codex CLI 0.145.0 的真实 `exec -> resume -> delete` 生命周期、完成 turn 的 receipt 重放、同 digest payload 漂移拒绝和目标 tracked tree 零改动。Analyst 实际运行目录是私有 state dir，不接触目标仓库。
@@ -74,6 +76,8 @@ node dist/src/cli.js approve \
 ```
 
 配置样例见 `harness.config.example.json`。
+
+`autoMerge` 默认关闭。设为 `true` 时，Harness 使用 `gh pr merge --auto --match-head-commit <reviewed-sha> --merge`；required checks 和最终合并仍由 GitHub ruleset 决定。
 
 ## Pi 角色运行时
 

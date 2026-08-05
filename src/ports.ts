@@ -21,6 +21,7 @@ export type HarnessConfig = {
   repo: string;
   localPath: string;
   baseRef: string;
+  autoMerge?: boolean;
   readyLabel: string;
   claimLabel: string;
   worktreeRoot: string;

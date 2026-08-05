@@ -2,6 +2,7 @@
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { SyncCommandRunner } from "./adapters/command.js";
 import { GitCli } from "./adapters/git-cli.js";
 import { GitHubGh } from "./adapters/github-gh.js";
 import { HerdrCli } from "./adapters/herdr-cli.js";
@@ -58,7 +59,7 @@ async function main(argv) {
     const controller = new HarnessController({
         config,
         store,
-        github: new GitHubGh(),
+        github: new GitHubGh(new SyncCommandRunner(), config.autoMerge === true),
         git: new GitCli(),
         herdr: new HerdrCli(config.herdr),
         analyst: new JsonCommandAnalyst(config.analyst.command, config.analyst.argv ?? []),
@@ -90,6 +91,9 @@ function loadConfig(path) {
     const parsed = JSON.parse(readFileSync(absolute, "utf8"));
     if (!parsed || typeof parsed !== "object" || !parsed.stateDir || !parsed.herdr?.session?.trim() || !parsed.analyst?.command) {
         throw new Error("invalid Harness config: stateDir, herdr.session and analyst.command are required");
+    }
+    if (parsed.autoMerge !== undefined && typeof parsed.autoMerge !== "boolean") {
+        throw new Error("invalid Harness config: autoMerge must be boolean");
     }
     return parsed;
 }

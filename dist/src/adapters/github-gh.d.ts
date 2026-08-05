@@ -4,7 +4,8 @@ import { type CommandRunner } from "./command.js";
 /** GitHub adapter built only on `gh` and `git`; mutations are idempotent. */
 export declare class GitHubGh implements GitHubPort {
     private readonly runner;
-    constructor(runner?: CommandRunner);
+    private readonly autoMerge;
+    constructor(runner?: CommandRunner, autoMerge?: boolean);
     listIssueGraph(repo: string, readyLabel: string): Promise<IssueSnapshot[]>;
     getIssue(repo: string, issueNumber: number): Promise<IssueSnapshot>;
     claimIssue(input: {

@@ -2,6 +2,7 @@
   "repo": "owner/repository",
   "localPath": "/absolute/path/to/repository",
   "baseRef": "main",
+  "autoMerge": false,
   "readyLabel": "ready-for-agent",
   "claimLabel": "agent:claimed",
   "stateDir": "/absolute/path/to/.herdr-harness-lite",

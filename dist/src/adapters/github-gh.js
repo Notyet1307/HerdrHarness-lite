@@ -3,8 +3,10 @@ const ISSUE_FIELDS = "number,title,body,state,updatedAt,labels,assignees,blocked
 /** GitHub adapter built only on `gh` and `git`; mutations are idempotent. */
 export class GitHubGh {
     runner;
-    constructor(runner = new SyncCommandRunner()) {
+    autoMerge;
+    constructor(runner = new SyncCommandRunner(), autoMerge = false) {
         this.runner = runner;
+        this.autoMerge = autoMerge;
     }
     async listIssueGraph(repo, readyLabel) {
         const stdout = requireSuccess(this.runner.run("gh", [
@@ -108,10 +110,40 @@ export class GitHubGh {
                 throw new Error(`cannot parse created PR URL: ${created.trim()}`);
             number = Number(match[1]);
         }
-        const viewRaw = requireSuccess(this.runner.run("gh", ["pr", "view", String(number), "--repo", input.repo, "--json", "number,url,headRefOid"]), `gh pr view #${number}`);
+        const viewRaw = requireSuccess(this.runner.run("gh", [
+            "pr",
+            "view",
+            String(number),
+            "--repo",
+            input.repo,
+            "--json",
+            "number,url,headRefOid,baseRefName,mergedAt,autoMergeRequest",
+        ]), `gh pr view #${number}`);
         const view = JSON.parse(viewRaw);
-        if (typeof view.number !== "number" || typeof view.url !== "string" || typeof view.headRefOid !== "string") {
+        if (typeof view.number !== "number" ||
+            typeof view.url !== "string" ||
+            typeof view.headRefOid !== "string" ||
+            typeof view.baseRefName !== "string") {
             throw new Error("GitHub PR response has incomplete identity");
+        }
+        if (view.baseRefName !== input.baseRef) {
+            throw new Error(`PR base ${view.baseRefName} differs from expected base ${input.baseRef}`);
+        }
+        if (this.autoMerge &&
+            view.headRefOid === input.headSha &&
+            !(typeof view.mergedAt === "string" && view.mergedAt) &&
+            !view.autoMergeRequest) {
+            requireSuccess(this.runner.run("gh", [
+                "pr",
+                "merge",
+                String(view.number),
+                "--repo",
+                input.repo,
+                "--auto",
+                "--match-head-commit",
+                input.headSha,
+                "--merge",
+            ]), `enable auto-merge for PR #${view.number}`);
         }
         return { number: view.number, url: view.url, headSha: view.headRefOid };
     }
@@ -123,10 +155,20 @@ export class GitHubGh {
             "--repo",
             repo,
             "--json",
-            "state,mergedAt,headRefOid",
+            "state,mergedAt,headRefOid,autoMergeRequest",
         ]), `gh pr view #${pullRequest.number}`);
         const view = JSON.parse(stdout);
         if (view.headRefOid !== pullRequest.headSha) {
+            if (this.autoMerge && view.state === "OPEN" && view.autoMergeRequest) {
+                requireSuccess(this.runner.run("gh", [
+                    "pr",
+                    "merge",
+                    String(pullRequest.number),
+                    "--repo",
+                    repo,
+                    "--disable-auto",
+                ]), `disable auto-merge for drifted PR #${pullRequest.number}`);
+            }
             throw new Error(`PR head changed after review: expected ${pullRequest.headSha}, got ${String(view.headRefOid)}`);
         }
         if (typeof view.mergedAt === "string" && view.mergedAt)

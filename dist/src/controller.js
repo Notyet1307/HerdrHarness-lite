@@ -569,7 +569,9 @@ export class HarnessController {
             lastError: null,
         });
         await this.saveJob(state, job, next);
-        return result(true, "published", job.id, `PR #${pullRequest.number} published; merge remains external`);
+        return result(true, "published", job.id, this.deps.config.autoMerge
+            ? `PR #${pullRequest.number} published with native auto-merge requested`
+            : `PR #${pullRequest.number} published; merge remains external`);
     }
     async observeMerge(state, job) {
         if (!job.pullRequest) {
