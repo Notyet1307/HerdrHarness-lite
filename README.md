@@ -66,6 +66,13 @@ npm run build
 node dist/src/cli.js status --config /absolute/harness.config.json
 node dist/src/cli.js tick --config /absolute/harness.config.json
 node dist/src/cli.js run --config /absolute/harness.config.json --poll-ms 15000
+node dist/src/cli.js reassess \
+  --config /absolute/harness.config.json \
+  --revision 12 \
+  --incident incident-id \
+  --analysis analysis-id \
+  --actor yet \
+  --reason "Reviewer provider 已切换且只读健康探测通过"
 node dist/src/cli.js approve \
   --config /absolute/harness.config.json \
   --revision 12 \
@@ -175,6 +182,7 @@ start 和 resume 都使用同一 restricted profile：strict config、忽略用�
 
 Analyst 不会获得 controller write、任意 shell recovery 或直接向旧 worker 发消息的能力。
 Reviewer 因基础设施故障且未产生 durable result 时，Analyst 可建议 `retry_fresh_reviewer`；人工批准后 Controller 会复核同一 HEAD 与 clean tree，再关闭旧 Reviewer 并启动 fresh Reviewer，不重跑 Worker、也不消耗 rework 轮次。
+若 Analyst 因基础设施仍未恢复而建议 `hold`，环境发生可核对变化后可用精确 revision/incident/analysis 调用 `reassess`。该命令只记录 bounded operator statement、生成 successor incident 并请求新的 Analyst 判断，不授予 retry 权限，也不接触旧 agent 或 Git。
 
 关闭请求由 Controller 在归档前发送：
 

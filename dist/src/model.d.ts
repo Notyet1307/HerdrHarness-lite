@@ -159,6 +159,16 @@ export type Approval = {
     createdAt: string;
     consumedAt: string | null;
 };
+export type Reassessment = {
+    id: string;
+    jobRevision: number;
+    incidentId: string;
+    analysisId: string;
+    replacementIncidentId: string;
+    actor: string;
+    reason: string;
+    createdAt: string;
+};
 export type PullRequestRef = {
     number: number;
     url: string;
@@ -184,6 +194,7 @@ export type Job = {
     incident: Incident | null;
     analysis: AnalystAdvice | null;
     approval: Approval | null;
+    reassessments?: Reassessment[];
     pullRequest: PullRequestRef | null;
     lastError: string | null;
     createdAt: string;
@@ -195,6 +206,7 @@ export type TerminalJob = {
     issueNumber: number;
     state: "done" | "cancelled";
     finishedAt: string;
+    reassessments?: Reassessment[];
 };
 export type HarnessState = {
     version: 1;
@@ -206,3 +218,4 @@ export declare function digest(value: unknown): string;
 export declare function stableStringify(value: unknown): string;
 export declare function evolveJob(job: Job, now: string, patch: Partial<Omit<Job, "id" | "revision" | "createdAt">>): Job;
 export declare function assertJobInvariant(job: Job): void;
+export declare function isBoundedText(value: unknown, max: number): value is string;

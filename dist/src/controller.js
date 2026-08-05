@@ -79,6 +79,7 @@ export class HarnessController {
             incident: null,
             analysis: null,
             approval: null,
+            reassessments: [],
             pullRequest: null,
             lastError: null,
             createdAt: now,
@@ -780,6 +781,7 @@ export class HarnessController {
             issueNumber: job.task.issueNumber,
             state: job.state,
             finishedAt: job.updatedAt,
+            reassessments: job.reassessments ?? [],
         };
         const terminalJobs = state.terminalJobs.some((entry) => entry.id === job.id)
             ? state.terminalJobs

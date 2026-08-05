@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { HarnessController } from "../src/controller.js";
 import { assertJobInvariant } from "../src/model.js";
-import { approveRecovery } from "../src/recovery.js";
+import { approveRecovery, reassessIncident } from "../src/recovery.js";
 import type { HarnessConfig } from "../src/ports.js";
 import {
   FakeAnalyst,
@@ -208,6 +208,122 @@ test("Reviewer infrastructure failure resumes with a fresh Reviewer on the same 
   assert.ok(herdr.prepared.at(-1)?.attemptId !== failedReviewerId);
 });
 
+test("held Reviewer infrastructure incident can be reassessed without granting retry authority", async () => {
+  const store = new MemoryStore();
+  const clock = new FakeClock();
+  const ids = new SequenceIds();
+  const herdr = new FakeHerdr([
+    { lane: "worker", status: "completed", headSha: "b".repeat(40) },
+    { lane: "reviewer", status: "pass" },
+  ]);
+  const github = new FakeGitHub([issue({ number: 34, title: "Reassess held review infrastructure" })]);
+  const analyst = new FakeAnalyst([
+    {
+      kind: "advice",
+      action: "hold",
+      summary: "Wait until Reviewer provider capacity changes",
+      resolutionBrief: "",
+      evidenceRefs: ["task"],
+      unknowns: ["Reviewer provider health"],
+    },
+    {
+      kind: "advice",
+      action: "retry_fresh_reviewer",
+      summary: "A different Reviewer provider passed a bounded health probe",
+      resolutionBrief: "Retry independent review against the unchanged HEAD.",
+      evidenceRefs: ["task"],
+      unknowns: [],
+    },
+  ]);
+  const controller = new HarnessController({
+    config,
+    store,
+    github,
+    git: new FakeGit(),
+    herdr,
+    analyst,
+    evidence: new FakeEvidence(),
+    clock,
+    ids,
+  });
+
+  for (let index = 0; index < 12; index += 1) await controller.tick();
+  herdr.settleWithoutResult = { agentStatus: "idle", diagnostic: "provider sessions are full" };
+  await controller.tick();
+  await controller.tick();
+  const held = store.state.activeJob!;
+  const oldIncidentId = held.incident!.id;
+  const oldAnalysisId = held.analysis!.id;
+  const oldAttemptId = held.activeAttempt!.id;
+  assert.equal(held.analysis?.action, "hold");
+
+  await assert.rejects(
+    () => reassessIncident(
+      store,
+      {
+        expectedRevision: held.revision - 1,
+        incidentId: oldIncidentId,
+        analysisId: oldAnalysisId,
+        actor: "human@example.test",
+        reason: "Reviewer switched to baizhi-chat/deepseek-v4-flash; bounded read-tool probe passed.",
+      },
+      { clock, ids },
+    ),
+    /stale job revision/,
+  );
+
+  const reassessment = await reassessIncident(
+    store,
+    {
+      expectedRevision: held.revision,
+      incidentId: oldIncidentId,
+      analysisId: oldAnalysisId,
+      actor: "human@example.test",
+      reason: "Reviewer switched to baizhi-chat/deepseek-v4-flash; bounded read-tool probe passed.",
+    },
+    { clock, ids },
+  );
+  const reassessed = store.state.activeJob!;
+  assert.equal(reassessment.incidentId, oldIncidentId);
+  assert.equal(reassessment.analysisId, oldAnalysisId);
+  assert.equal(reassessed.state, "blocked");
+  assert.equal(reassessed.analysis, null);
+  assert.ok(reassessed.incident?.id !== oldIncidentId);
+  assert.equal(reassessed.activeAttempt?.id, oldAttemptId);
+  assert.match(reassessed.incident?.summary ?? "", /baizhi-chat\/deepseek-v4-flash/);
+  assert.equal(reassessed.reassessments?.length, 1);
+  assert.equal(herdr.closed.length, 1);
+
+  const diagnosis = await controller.tick();
+  assert.equal(diagnosis.action, "analysis_recorded");
+  assert.equal(store.state.activeJob?.analysis?.action, "retry_fresh_reviewer");
+  assert.equal(store.state.activeJob?.state, "blocked");
+  assert.equal(herdr.prepared.filter((entry) => entry.lane === "reviewer").length, 1);
+
+  await approveRecovery(
+    store,
+    {
+      expectedRevision: store.state.activeJob!.revision,
+      incidentId: store.state.activeJob!.incident!.id,
+      analysisId: store.state.activeJob!.analysis!.id,
+      actor: "human@example.test",
+      reason: "approve the newly assessed Reviewer retry",
+    },
+    { clock, ids },
+  );
+  assert.equal((await controller.tick()).action, "recovery_applied");
+  assert.equal((await controller.tick()).action, "attempt_prepared");
+  assert.equal((await controller.tick()).action, "attempt_pane_ready");
+  assert.equal((await controller.tick()).action, "attempt_agent_ready");
+  assert.equal((await controller.tick()).action, "attempt_dispatched");
+  assert.equal((await controller.tick()).action, "attempt_completed");
+  assert.equal((await controller.tick()).action, "published");
+  github.mergeStatus = "merged";
+  assert.equal((await controller.tick()).action, "merged");
+  assert.equal((await controller.tick()).action, "archived");
+  assert.deepEqual(store.state.terminalJobs[0]?.reassessments, [reassessment]);
+});
+
 test("integrity incidents cannot be converted into retry authority by the Analyst", async () => {
   const store = new MemoryStore();
   const clock = new FakeClock();
@@ -241,6 +357,20 @@ test("integrity incidents cannot be converted into retry authority by the Analys
   await controller.tick();
   const job = store.state.activeJob!;
   assert.equal(job.analysis?.action, "hold");
+  await assert.rejects(
+    () => reassessIncident(
+      store,
+      {
+        expectedRevision: job.revision,
+        incidentId: job.incident!.id,
+        analysisId: job.analysis!.id,
+        actor: "human@example.test",
+        reason: "attempted reassessment outside Reviewer infrastructure",
+      },
+      { clock, ids },
+    ),
+    /only an exact held Reviewer infrastructure incident/,
+  );
   await assert.rejects(
     () => approveRecovery(
       store,

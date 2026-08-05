@@ -4,7 +4,7 @@ import { chmodSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readF
 import { dirname, join, resolve } from "node:path";
 import { SyncCommandRunner } from "./adapters/command.js";
 import { parseAnalystTurn } from "./adapters/json-command-analyst.js";
-import { digest } from "./model.js";
+import { digest, isBoundedText as safeText } from "./model.js";
 const runner = new SyncCommandRunner();
 function main() {
     const options = parseArgs(process.argv.slice(2));
@@ -438,9 +438,6 @@ function commandError(result) {
 function boundedError(value) {
     const normalized = value.replace(/\u0000/g, "�").trim() || "unknown Codex Analyst failure";
     return normalized.length <= 512 ? normalized : `${normalized.slice(0, 511)}…`;
-}
-function safeText(value, max) {
-    return typeof value === "string" && value.trim().length > 0 && value.length <= max && !value.includes("\u0000");
 }
 function uuid(value) {
     return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);

@@ -1,3 +1,4 @@
+import { isBoundedText as boundedText } from "../model.js";
 import { requireSuccess, SyncCommandRunner } from "./command.js";
 /**
  * Adapter boundary for a persistent Codex wrapper.
@@ -119,9 +120,6 @@ export function parseAnalystTurn(value) {
         evidenceRefs: object.evidenceRefs,
         unknowns: object.unknowns,
     };
-}
-function boundedText(value, max) {
-    return typeof value === "string" && value.trim().length > 0 && value.length <= max && !value.includes("\u0000");
 }
 function codexUuid(value) {
     return typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);

@@ -1,4 +1,4 @@
-import type { AnalystSession, AnalystTurn, TaskSnapshot } from "../model.js";
+import { isBoundedText as boundedText, type AnalystSession, type AnalystTurn, type TaskSnapshot } from "../model.js";
 import type { AnalystPort } from "../ports.js";
 import { type CommandRunner, requireSuccess, SyncCommandRunner } from "./command.js";
 
@@ -132,10 +132,6 @@ export function parseAnalystTurn(value: unknown): AnalystTurn {
     evidenceRefs: object.evidenceRefs as string[],
     unknowns: object.unknowns as string[],
   };
-}
-
-function boundedText(value: unknown, max: number): value is string {
-  return typeof value === "string" && value.trim().length > 0 && value.length <= max && !value.includes("\u0000");
 }
 
 function codexUuid(value: unknown): value is string {

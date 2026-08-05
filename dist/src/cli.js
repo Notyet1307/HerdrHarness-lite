@@ -10,12 +10,13 @@ import { JsonCommandAnalyst } from "./adapters/json-command-analyst.js";
 import { JsonStateStore } from "./adapters/json-store.js";
 import { LocalEvidence } from "./adapters/local-evidence.js";
 import { HarnessController } from "./controller.js";
-import { approveRecovery } from "./recovery.js";
+import { approveRecovery, reassessIncident } from "./recovery.js";
 const usage = `Usage:
   herdr-harness-lite tick --config /absolute/harness.config.json
   herdr-harness-lite run --config /absolute/harness.config.json [--poll-ms 15000] [--max-cycles N]
   herdr-harness-lite status --config /absolute/harness.config.json
   herdr-harness-lite approve --config /absolute/harness.config.json --revision N --incident ID --analysis ID --actor TEXT --reason TEXT
+  herdr-harness-lite reassess --config /absolute/harness.config.json --revision N --incident ID --analysis ID --actor TEXT --reason TEXT
 `;
 class SystemClock {
     now() {
@@ -44,14 +45,18 @@ async function main(argv) {
         process.stdout.write(`${JSON.stringify(await store.load(), null, 2)}\n`);
         return 0;
     }
-    if (command === "approve") {
-        const revision = integerFlag(argv, "--revision");
-        const incidentId = requiredFlag(argv, "--incident");
-        const analysisId = requiredFlag(argv, "--analysis");
-        const actor = requiredFlag(argv, "--actor");
-        const reason = requiredFlag(argv, "--reason");
-        const approval = await approveRecovery(store, { expectedRevision: revision, incidentId, analysisId, actor, reason }, { clock, ids });
-        process.stdout.write(`${JSON.stringify(approval, null, 2)}\n`);
+    if (command === "approve" || command === "reassess") {
+        const request = {
+            expectedRevision: integerFlag(argv, "--revision"),
+            incidentId: requiredFlag(argv, "--incident"),
+            analysisId: requiredFlag(argv, "--analysis"),
+            actor: requiredFlag(argv, "--actor"),
+            reason: requiredFlag(argv, "--reason"),
+        };
+        const record = command === "approve"
+            ? await approveRecovery(store, request, { clock, ids })
+            : await reassessIncident(store, request, { clock, ids });
+        process.stdout.write(`${JSON.stringify(record, null, 2)}\n`);
         return 0;
     }
     if (command !== "tick" && command !== "run")

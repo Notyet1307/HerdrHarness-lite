@@ -75,7 +75,8 @@ Approval = f(job_id, job_revision, incident_id, analysis_id, action)
 ```text
 run / tick     controller 唯一推进入口
 status         只读
-approve        唯一恢复授权入口
+reassess       只刷新 held incident 的证据与 Analyst 判断，不授权恢复
+approve        唯一重试授权入口
 cancel         可选的显式终止入口
 ```
 
@@ -201,6 +202,7 @@ stateDiagram-v2
     awaiting_merge --> blocked: PR closed unmerged / head drift
 
     blocked --> blocked: bounded Analyst evidence turns
+    blocked --> blocked: exact hold reassessment creates successor incident
     blocked --> recovery_approved: exact human approval
     recovery_approved --> worker_ready: approved fresh Worker retry
     recovery_approved --> reviewer_ready: approved Reviewer infrastructure retry
@@ -356,6 +358,8 @@ file_excerpt
 ```
 
 Harness 负责路径限制、长度限制和读取；Analyst 不能提交 shell 命令。
+
+Analyst 返回 `hold` 后，Controller 不会自动重试。只有 Reviewer `infrastructure_exhausted` 的运行环境发生变化时，人才能用精确 revision/incident/analysis 和 bounded reason 请求 `reassess`。Harness 将旧 incident/analysis 绑定写入审计记录，把 operator statement 标为 untrusted，创建 successor incident 后重新调用 Analyst；该动作本身不包含 retry 权限。
 
 ### 7.4 人工 Gate
 

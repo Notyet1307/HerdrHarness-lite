@@ -203,6 +203,17 @@ export type Approval = {
   consumedAt: string | null;
 };
 
+export type Reassessment = {
+  id: string;
+  jobRevision: number;
+  incidentId: string;
+  analysisId: string;
+  replacementIncidentId: string;
+  actor: string;
+  reason: string;
+  createdAt: string;
+};
+
 export type PullRequestRef = {
   number: number;
   url: string;
@@ -241,6 +252,7 @@ export type Job = {
   incident: Incident | null;
   analysis: AnalystAdvice | null;
   approval: Approval | null;
+  reassessments?: Reassessment[];
   pullRequest: PullRequestRef | null;
   lastError: string | null;
   createdAt: string;
@@ -253,6 +265,7 @@ export type TerminalJob = {
   issueNumber: number;
   state: "done" | "cancelled";
   finishedAt: string;
+  reassessments?: Reassessment[];
 };
 
 export type HarnessState = {
@@ -329,6 +342,23 @@ export function assertJobInvariant(job: Job): void {
   if (job.approval && !isRetryAction(job.approval.action)) {
     throw new Error("approval has an invalid recovery action");
   }
+  if (
+    job.reassessments !== undefined &&
+    (!Array.isArray(job.reassessments) || job.reassessments.some((entry) => (
+      !entry ||
+      !Number.isInteger(entry.jobRevision) ||
+      entry.jobRevision < 0 ||
+      !isBoundedText(entry.id, 512) ||
+      !isBoundedText(entry.incidentId, 512) ||
+      !isBoundedText(entry.analysisId, 512) ||
+      !isBoundedText(entry.replacementIncidentId, 512) ||
+      !isBoundedText(entry.actor, 512) ||
+      !isBoundedText(entry.reason, 2_000) ||
+      !Number.isFinite(Date.parse(entry.createdAt))
+    )))
+  ) {
+    throw new Error("job has an invalid reassessment record");
+  }
   if ((job.state === "worker_running" || job.state === "reviewer_running") && !job.activeAttempt) {
     throw new Error(`${job.state} requires an active attempt`);
   }
@@ -352,4 +382,8 @@ export function assertJobInvariant(job: Job): void {
   if (job.analyst && job.analyst.taskDigest !== job.task.digest) {
     throw new Error("analyst is bound to a different task digest");
   }
+}
+
+export function isBoundedText(value: unknown, max: number): value is string {
+  return typeof value === "string" && value.trim().length > 0 && value.length <= max && !value.includes("\u0000");
 }
