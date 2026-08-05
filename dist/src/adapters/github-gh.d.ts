@@ -25,4 +25,5 @@ export declare class GitHubGh implements GitHubPort {
         worktreePath: string;
     }): Promise<PullRequestRef>;
     observePullRequest(repo: string, pullRequest: PullRequestRef): Promise<"open" | "merged" | "closed_unmerged">;
+    private disableAutoMerge;
 }

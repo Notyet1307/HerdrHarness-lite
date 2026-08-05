@@ -199,6 +199,14 @@ export class GitHubGh implements GitHubPort {
     }
     if (
       this.autoMerge &&
+      view.headRefOid !== input.headSha &&
+      !(typeof view.mergedAt === "string" && view.mergedAt) &&
+      view.autoMergeRequest
+    ) {
+      this.disableAutoMerge(input.repo, view.number);
+    }
+    if (
+      this.autoMerge &&
       view.headRefOid === input.headSha &&
       !(typeof view.mergedAt === "string" && view.mergedAt) &&
       !view.autoMergeRequest
@@ -245,22 +253,19 @@ export class GitHubGh implements GitHubPort {
     };
     if (view.headRefOid !== pullRequest.headSha) {
       if (this.autoMerge && view.state === "OPEN" && view.autoMergeRequest) {
-        requireSuccess(
-          this.runner.run("gh", [
-            "pr",
-            "merge",
-            String(pullRequest.number),
-            "--repo",
-            repo,
-            "--disable-auto",
-          ]),
-          `disable auto-merge for drifted PR #${pullRequest.number}`,
-        );
+        this.disableAutoMerge(repo, pullRequest.number);
       }
       throw new Error(`PR head changed after review: expected ${pullRequest.headSha}, got ${String(view.headRefOid)}`);
     }
     if (typeof view.mergedAt === "string" && view.mergedAt) return "merged";
     return view.state === "OPEN" ? "open" : "closed_unmerged";
+  }
+
+  private disableAutoMerge(repo: string, number: number): void {
+    requireSuccess(
+      this.runner.run("gh", ["pr", "merge", String(number), "--repo", repo, "--disable-auto"]),
+      `disable auto-merge for drifted PR #${number}`,
+    );
   }
 }
 

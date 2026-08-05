@@ -58,6 +58,27 @@ test("observing a changed PR head disables auto-merge before rejecting it", asyn
   });
 });
 
+test("publish recovery disables an existing auto-merge request after head drift", async () => {
+  const runner = new PublishDriftRunner();
+  const github = new GitHubGh(runner, true);
+
+  const pullRequest = await github.publish({
+    repo: "owner/repo",
+    issueNumber: 39,
+    branch: "agent/issue-39",
+    baseRef: "main",
+    headSha,
+    title: "Implement issue 39",
+    worktreePath: "/worktree",
+  });
+
+  assert.equal(pullRequest.headSha, "c".repeat(40));
+  assert.deepEqual(runner.calls.at(-1), {
+    command: "gh",
+    args: ["pr", "merge", "42", "--repo", "owner/repo", "--disable-auto"],
+  });
+});
+
 class PublishRunner implements CommandRunner {
   calls: Array<{ command: string; args: string[] }> = [];
 
@@ -91,6 +112,36 @@ class DriftRunner implements CommandRunner {
         state: "OPEN",
         mergedAt: null,
         headRefOid: "c".repeat(40),
+        autoMergeRequest: { enabledAt: "2026-08-05T00:00:00Z" },
+      }));
+    }
+    if (args[0] === "pr" && args[1] === "merge" && args.includes("--disable-auto")) return ok("");
+    return fail(`unexpected command: ${command} ${args.join(" ")}`);
+  }
+}
+
+class PublishDriftRunner implements CommandRunner {
+  calls: Array<{ command: string; args: string[] }> = [];
+
+  run(command: string, args: string[]): CommandResult {
+    this.calls.push({ command, args: [...args] });
+    if (command === "git") return ok("");
+    if (args[0] === "pr" && args[1] === "list") {
+      return ok(JSON.stringify([{
+        number: 42,
+        url: "https://github.com/owner/repo/pull/42",
+        state: "OPEN",
+        mergedAt: null,
+        headRefOid: "c".repeat(40),
+      }]));
+    }
+    if (args[0] === "pr" && args[1] === "view") {
+      return ok(JSON.stringify({
+        number: 42,
+        url: "https://github.com/owner/repo/pull/42",
+        headRefOid: "c".repeat(40),
+        baseRefName: "main",
+        mergedAt: null,
         autoMergeRequest: { enabledAt: "2026-08-05T00:00:00Z" },
       }));
     }

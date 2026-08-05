@@ -35,7 +35,7 @@ npm ci
 npm run verify
 ```
 
-仓库固定使用 TypeScript 5.8.3；严格类型检查通过，45 项测试通过。测试覆盖：
+仓库固定使用 TypeScript 5.8.3；严格类型检查通过，测试覆盖：
 
 - `ready-for-agent`、OPEN、assignee、OPEN blocker 的领取条件；
 - Map 容器不领取、严格首个 OPEN 子任务前沿；
