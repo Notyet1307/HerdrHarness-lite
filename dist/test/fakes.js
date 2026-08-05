@@ -108,6 +108,7 @@ export class FakeHerdr {
     closed = [];
     promptFailureAfterDispatch = null;
     waitFailure = null;
+    settleWithoutResult = null;
     constructor(outcomes) {
         this.outcomes = outcomes;
     }
@@ -135,6 +136,11 @@ export class FakeHerdr {
             throw failure;
     }
     async wait(input) {
+        if (this.settleWithoutResult) {
+            const settled = this.settleWithoutResult;
+            this.settleWithoutResult = null;
+            return { ...settled, result: null };
+        }
         const failure = this.waitFailure;
         this.waitFailure = null;
         if (failure)

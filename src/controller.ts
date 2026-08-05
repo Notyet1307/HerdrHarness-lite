@@ -5,6 +5,7 @@ import {
   assertJobInvariant,
   digest,
   evolveJob,
+  isRetryAction,
   taskFromSelection,
   type AnalystAdvice,
   type Attempt,
@@ -16,7 +17,7 @@ import {
   type ReviewerResult,
   type WorkerResult,
 } from "./model.js";
-import { buildEvidencePack, makeIncident, validateAttemptResult } from "./policy.js";
+import { allowedActionsFor, buildEvidencePack, makeIncident, validateAttemptResult } from "./policy.js";
 import type {
   AnalystPort,
   Clock,
@@ -772,7 +773,7 @@ export class HarnessController {
         unknowns.push(`action ${action} is forbidden for incident class ${incident.class}`);
         action = "hold";
       }
-      if (action === "retry_fresh_worker" && !output.resolutionBrief.trim()) {
+      if (action !== "hold" && !output.resolutionBrief.trim()) {
         unknowns.push("retry recommendation has no bounded resolution brief");
         action = "hold";
       }
@@ -788,7 +789,7 @@ export class HarnessController {
         evidenceDigest: pack.digest,
         action,
         summary: output.summary,
-        resolutionBrief: action === "retry_fresh_worker" ? output.resolutionBrief : "",
+        resolutionBrief: action === "hold" ? "" : output.resolutionBrief,
         evidenceRefs: output.evidenceRefs.filter((ref) => knownRefs.has(ref)),
         unknowns,
         createdAt,
@@ -824,8 +825,10 @@ export class HarnessController {
       approval.jobRevision >= job.revision ||
       approval.incidentId !== incident.id ||
       approval.analysisId !== analysis.id ||
-      approval.action !== "retry_fresh_worker" ||
-      analysis.action !== "retry_fresh_worker"
+      !isRetryAction(approval.action) ||
+      approval.action !== analysis.action ||
+      !incident.allowedActions.includes(approval.action) ||
+      !allowedActionsFor(incident.class, incident.lane).includes(approval.action)
     ) {
       return this.block(state, job, {
         class: "integrity_violation",
@@ -833,6 +836,30 @@ export class HarnessController {
         summary: "approval binding is stale or inconsistent",
         attemptResult: null,
       });
+    }
+
+    if (approval.action === "retry_fresh_reviewer") {
+      if (
+        incident.class !== "infrastructure_exhausted" ||
+        incident.lane !== "reviewer" ||
+        job.activeAttempt?.lane !== "reviewer" ||
+        incident.attemptId !== job.activeAttempt.id
+      ) {
+        return this.block(state, job, {
+          class: "integrity_violation",
+          lane: "controller",
+          summary: "fresh Reviewer recovery lost its exact incident or Git binding",
+          attemptResult: job.activeAttempt?.result ?? null,
+        });
+      }
+      const integrityBlock = await this.verifyReviewerIntegrity(
+        state,
+        job,
+        job.activeAttempt,
+        job.headSha,
+        job.activeAttempt.result,
+      );
+      if (integrityBlock) return integrityBlock;
     }
 
     if (job.activeAttempt?.handle) {
@@ -848,17 +875,18 @@ export class HarnessController {
       : job.attempts;
     const consumed = { ...approval, consumedAt: now };
     const next = evolveJob(job, now, {
-      state: "worker_ready",
+      state: approval.action === "retry_fresh_reviewer" ? "reviewer_ready" : "worker_ready",
       activeAttempt: null,
       attempts,
-      pendingBrief: analysis.resolutionBrief,
+      pendingBrief: approval.action === "retry_fresh_worker" ? analysis.resolutionBrief : null,
       incident: null,
       analysis: null,
       approval: consumed,
       lastError: null,
     });
     await this.saveJob(state, job, next);
-    return result(true, "recovery_applied", job.id, "approval consumed; a fresh worker attempt is now required");
+    const lane = approval.action === "retry_fresh_reviewer" ? "Reviewer" : "Worker";
+    return result(true, "recovery_applied", job.id, `approval consumed; a fresh ${lane} attempt is now required`);
   }
 
   private async archive(state: HarnessState, job: Job): Promise<TickResult> {

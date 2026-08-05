@@ -113,7 +113,9 @@ export type EvidencePack = {
     missing: string[];
 };
 export type BlockClass = "agent_decision" | "agent_blocked" | "review_uncertain" | "infrastructure_exhausted" | "integrity_violation" | "stale_task" | "analyst_unavailable";
-export type RecoveryAction = "retry_fresh_worker" | "hold";
+export type RecoveryAction = "retry_fresh_worker" | "retry_fresh_reviewer" | "hold";
+export declare function isRecoveryAction(value: unknown): value is RecoveryAction;
+export declare function isRetryAction(value: unknown): value is Exclude<RecoveryAction, "hold">;
 export type Incident = {
     id: string;
     class: BlockClass;
@@ -151,7 +153,7 @@ export type Approval = {
     jobRevision: number;
     incidentId: string;
     analysisId: string;
-    action: "retry_fresh_worker";
+    action: Exclude<RecoveryAction, "hold">;
     actor: string;
     reason: string;
     createdAt: string;

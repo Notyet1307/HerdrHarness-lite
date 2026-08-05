@@ -1,5 +1,6 @@
 import type { Approval, HarnessState } from "./model.js";
-import { evolveJob } from "./model.js";
+import { evolveJob, isRetryAction } from "./model.js";
+import { allowedActionsFor } from "./policy.js";
 import type { Clock, IdGenerator, StateStore } from "./ports.js";
 
 export type ApprovalRequest = {
@@ -30,9 +31,12 @@ export async function approveRecovery(
   if (!job.analysis) throw new Error("no ready analyst advice");
   if (job.analysis.id !== request.analysisId) throw new Error("analysis changed before approval");
   if (job.analysis.incidentId !== job.incident.id) throw new Error("analysis is not bound to the active incident");
-  if (job.analysis.action !== "retry_fresh_worker") throw new Error("analyst did not recommend retry");
-  if (!job.incident.allowedActions.includes("retry_fresh_worker")) {
-    throw new Error(`incident class ${job.incident.class} forbids automatic retry`);
+  if (!isRetryAction(job.analysis.action)) throw new Error("analyst did not recommend retry");
+  if (
+    !job.incident.allowedActions.includes(job.analysis.action) ||
+    !allowedActionsFor(job.incident.class, job.incident.lane).includes(job.analysis.action)
+  ) {
+    throw new Error(`incident class ${job.incident.class} forbids ${job.analysis.action}`);
   }
 
   const now = dependencies.clock.now();
@@ -41,7 +45,7 @@ export async function approveRecovery(
     jobRevision: job.revision,
     incidentId: job.incident.id,
     analysisId: job.analysis.id,
-    action: "retry_fresh_worker",
+    action: job.analysis.action,
     actor: request.actor,
     reason: request.reason,
     createdAt: now,

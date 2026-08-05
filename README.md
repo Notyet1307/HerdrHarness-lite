@@ -44,7 +44,7 @@ npm run verify
 - block 后 Analyst 补充证据；
 - 过期审批拒绝；
 - integrity block 禁止被模型转换为 retry；
-- 审批后关闭旧 pane，并强制创建新的 worker attempt；
+- 审批后关闭旧 pane，并按获批动作强制创建新的 Worker 或 Reviewer attempt；
 - attempt 在 `prepared -> pane_ready -> agent_ready -> running` 各阶段先持久化再推进；prompt 结果不确定时不重放；
 - 成功 attempt 在结果与 Git 验证后关闭自有 pane，关闭后崩溃可凭 durable result 收敛；
 - Herdr 适配器使用原生 `worktree / tab / agent` 命令，并在 blocked/wait 失败时使用官方 `agent get/read` 诊断，不再通过 `pane split + pane run` 模拟 agent 启动。
@@ -174,6 +174,7 @@ start 和 resume 都使用同一 restricted profile：strict config、忽略用�
 ```
 
 Analyst 不会获得 controller write、任意 shell recovery 或直接向旧 worker 发消息的能力。
+Reviewer 因基础设施故障且未产生 durable result 时，Analyst 可建议 `retry_fresh_reviewer`；人工批准后 Controller 会复核同一 HEAD 与 clean tree，再关闭旧 Reviewer 并启动 fresh Reviewer，不重跑 Worker、也不消耗 rework 轮次。
 
 关闭请求由 Controller 在归档前发送：
 

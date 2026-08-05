@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { HarnessController } from "../src/controller.js";
+import { assertJobInvariant } from "../src/model.js";
 import { approveRecovery } from "../src/recovery.js";
 import type { HarnessConfig } from "../src/ports.js";
 import {
@@ -118,6 +119,93 @@ test("blocked work cannot resume before exact human approval and recovery always
   const recoveryPrompt = herdr.prompts.at(-1)?.text ?? "";
   assert.match(recoveryPrompt, /Keep the public interface unchanged/);
   assert.match(recoveryPrompt, new RegExp(freshAttemptId));
+});
+
+test("Reviewer infrastructure failure resumes with a fresh Reviewer on the same HEAD", async () => {
+  const store = new MemoryStore();
+  const clock = new FakeClock();
+  const ids = new SequenceIds();
+  const herdr = new FakeHerdr([
+    { lane: "worker", status: "completed", headSha: "b".repeat(40) },
+    { lane: "reviewer", status: "pass", reviewedHeadSha: "b".repeat(40) },
+  ]);
+  const analyst = new FakeAnalyst([{
+    kind: "advice",
+    action: "retry_fresh_reviewer",
+    summary: "The Reviewer provider failed before producing a durable result",
+    resolutionBrief: "Retry the independent review against the unchanged implementation HEAD.",
+    evidenceRefs: ["task"],
+    unknowns: [],
+  }]);
+  const controller = new HarnessController({
+    config,
+    store,
+    github: new FakeGitHub([issue({ number: 33, title: "Retry failed review infrastructure" })]),
+    git: new FakeGit(),
+    herdr,
+    analyst,
+    evidence: new FakeEvidence(),
+    clock,
+    ids,
+  });
+
+  for (let index = 0; index < 12; index += 1) await controller.tick();
+  const failedReviewerId = store.state.activeJob?.activeAttempt?.id;
+  herdr.settleWithoutResult = {
+    agentStatus: "idle",
+    diagnostic: "provider sessions are full",
+  };
+  await controller.tick();
+
+  assert.equal(store.state.activeJob?.state, "blocked");
+  assert.equal(store.state.activeJob?.incident?.class, "infrastructure_exhausted");
+  assert.equal(store.state.activeJob?.incident?.lane, "reviewer");
+  assert.deepEqual(store.state.activeJob?.incident?.allowedActions, ["retry_fresh_reviewer", "hold"]);
+  assert.match(store.state.activeJob?.incident?.summary ?? "", /provider sessions are full/);
+
+  await controller.tick();
+  const blocked = store.state.activeJob!;
+  assert.equal(blocked.analysis?.action, "retry_fresh_reviewer");
+  await approveRecovery(
+    store,
+    {
+      expectedRevision: blocked.revision,
+      incidentId: blocked.incident!.id,
+      analysisId: blocked.analysis!.id,
+      actor: "human@example.test",
+      reason: "Provider failure is isolated from the unchanged reviewed HEAD",
+    },
+    { clock, ids },
+  );
+
+  const approved = store.state.activeJob!;
+  assert.throws(
+    () => assertJobInvariant({
+      ...approved,
+      approval: { ...approved.approval!, action: "hold" as never },
+    }),
+    /recovery action/,
+  );
+  assert.throws(
+    () => assertJobInvariant({
+      ...approved,
+      analysis: { ...approved.analysis!, action: "retry_fresh_reviewer_typo" as never },
+    }),
+    /recovery action/,
+  );
+
+  const recovery = await controller.tick();
+  assert.match(recovery.message, /fresh Reviewer/);
+  assert.equal(store.state.activeJob?.state, "reviewer_ready");
+  assert.equal(store.state.activeJob?.headSha, "b".repeat(40));
+  assert.equal(store.state.activeJob?.reviewRound, 0);
+  assert.equal(herdr.closed.length, 2);
+
+  for (let index = 0; index < 5; index += 1) await controller.tick();
+  assert.equal(store.state.activeJob?.state, "publish_ready");
+  assert.equal(herdr.prepared.filter((entry) => entry.lane === "worker").length, 1);
+  assert.equal(herdr.prepared.filter((entry) => entry.lane === "reviewer").length, 2);
+  assert.ok(herdr.prepared.at(-1)?.attemptId !== failedReviewerId);
 });
 
 test("integrity incidents cannot be converted into retry authority by the Analyst", async () => {

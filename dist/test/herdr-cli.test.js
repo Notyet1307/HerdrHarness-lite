@@ -310,6 +310,41 @@ test("Herdr adapter inspects a blocked agent with the official get/read commands
         ["--session", "test-session", "agent", "read", "hhw-contract", "--source", "recent-unwrapped", "--lines", "120"],
     ]);
 });
+test("Herdr adapter inspects a settled agent that produced no durable result", async () => {
+    const calls = [];
+    const runner = {
+        run(_command, args) {
+            calls.push(args);
+            const plain = args.slice(2);
+            if (plain[0] === "agent" && plain[1] === "wait") {
+                return ok({ result: { type: "agent_info", agent: agent("hhr-contract", "idle") } });
+            }
+            if (plain[0] === "agent" && plain[1] === "get") {
+                return ok({ result: { type: "agent_info", agent: agent("hhr-contract", "idle") } });
+            }
+            if (plain[0] === "agent" && plain[1] === "read") {
+                return ok({ result: { type: "agent_read", text: "provider sessions are full" } });
+            }
+            return fail(`unexpected command: ${plain.join(" ")}`);
+        },
+    };
+    const herdr = new HerdrCli({ runner, session: "test-session" });
+    const observation = await herdr.wait({
+        handle: { agentName: "hhr-contract", paneId: "w1:p2", tabId: "w1:t2", workspaceId: "w1" },
+        resultPath: "/missing-result.json",
+        expectedJobId: "job-1",
+        expectedAttemptId: "reviewer-001",
+        expectedLane: "reviewer",
+    });
+    assert.equal(observation.agentStatus, "idle");
+    assert.equal(observation.result, null);
+    assert.match(observation.diagnostic ?? "", /provider sessions are full/);
+    assert.deepEqual(calls, [
+        ["--session", "test-session", "agent", "wait", "hhr-contract"],
+        ["--session", "test-session", "agent", "get", "hhr-contract"],
+        ["--session", "test-session", "agent", "read", "hhr-contract", "--source", "recent-unwrapped", "--lines", "120"],
+    ]);
+});
 test("Herdr adapter does not treat server errors as an absent agent", async () => {
     const calls = [];
     const runner = {

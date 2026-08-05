@@ -9,13 +9,14 @@ import type {
 import { digest } from "./model.js";
 import type { Clock, IdGenerator } from "./ports.js";
 
-export function allowedActionsFor(blockClass: BlockClass): RecoveryAction[] {
+export function allowedActionsFor(blockClass: BlockClass, lane: Incident["lane"]): RecoveryAction[] {
   switch (blockClass) {
     case "agent_decision":
     case "agent_blocked":
     case "review_uncertain":
-    case "infrastructure_exhausted":
       return ["retry_fresh_worker", "hold"];
+    case "infrastructure_exhausted":
+      return lane === "reviewer" ? ["retry_fresh_reviewer", "hold"] : ["retry_fresh_worker", "hold"];
     case "integrity_violation":
     case "stale_task":
     case "analyst_unavailable":
@@ -50,7 +51,7 @@ export function makeIncident(input: {
     attemptId: input.attemptId,
     summary: input.summary,
     evidenceDigest: digest(core),
-    allowedActions: allowedActionsFor(input.blockClass),
+    allowedActions: allowedActionsFor(input.blockClass, input.lane),
     createdAt,
   };
 }

@@ -202,7 +202,7 @@ export class HerdrCli {
         if (!status || !["idle", "done", "blocked"].includes(status)) {
             throw new Error(`Herdr returned invalid agent status: ${status ?? "missing"}`);
         }
-        if (status === "blocked")
+        if (status === "blocked" || attemptResult === null)
             diagnostic = this.inspectAgent(input.handle.agentName);
         return { agentStatus: status, result: attemptResult, diagnostic };
     }

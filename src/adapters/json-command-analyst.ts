@@ -53,7 +53,7 @@ export class JsonCommandAnalyst implements AnalystPort {
       turn: input.turn,
       allowedOutput: {
         need_evidence: ["issue_context", "git_status", "git_diff", "test_output", "attempt_result", "file_excerpt"],
-        advice: ["retry_fresh_worker", "hold"],
+        advice: ["retry_fresh_worker", "retry_fresh_reviewer", "hold"],
       },
     });
     return parseAnalystTurn(response);
@@ -112,7 +112,7 @@ export function parseAnalystTurn(value: unknown): AnalystTurn {
   }
   if (object.kind !== "advice") throw new Error("Analyst turn kind is invalid");
   if (
-    (object.action !== "retry_fresh_worker" && object.action !== "hold") ||
+    (object.action !== "retry_fresh_worker" && object.action !== "retry_fresh_reviewer" && object.action !== "hold") ||
     !boundedText(object.summary, 2_000) ||
     typeof object.resolutionBrief !== "string" || object.resolutionBrief.length > 2_000 || object.resolutionBrief.includes("\u0000") ||
     !Array.isArray(object.evidenceRefs) ||

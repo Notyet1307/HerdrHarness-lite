@@ -1,6 +1,6 @@
 import type { Attempt, AttemptResult, BlockClass, EvidencePack, Incident, RecoveryAction } from "./model.js";
 import type { Clock, IdGenerator } from "./ports.js";
-export declare function allowedActionsFor(blockClass: BlockClass): RecoveryAction[];
+export declare function allowedActionsFor(blockClass: BlockClass, lane: Incident["lane"]): RecoveryAction[];
 export declare function makeIncident(input: {
     jobId: string;
     jobRevision: number;

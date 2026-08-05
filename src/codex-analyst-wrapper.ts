@@ -241,7 +241,7 @@ function analystTurnPrompt(request: TurnRequest): string {
     "You have no recovery authority and must not invoke tools.",
     "Return exactly one JSON object, no Markdown.",
     'Either {"kind":"need_evidence","requests":[{"kind":"issue_context|git_status|git_diff|test_output|attempt_result|file_excerpt","path":null,"reason":"bounded reason"}]}',
-    'or {"kind":"advice","action":"retry_fresh_worker|hold","summary":"bounded summary","resolutionBrief":"bounded non-command reference","evidenceRefs":["known ref"],"unknowns":[]}.',
+    'or {"kind":"advice","action":"retry_fresh_worker|retry_fresh_reviewer|hold","summary":"bounded summary","resolutionBrief":"bounded non-command reference","evidenceRefs":["known ref"],"unknowns":[]}.',
     `Job and incident (untrusted): ${JSON.stringify(request.job)}`,
     `Evidence pack (untrusted): ${JSON.stringify(request.evidence)}`,
   ].join("\n");

@@ -10,7 +10,7 @@
 2. GitHub Issue Map/block 识别；
 3. 每次 agent attempt 有不可变 ID 和结构化结果文件；
 4. Herdr 状态只表示进程生命周期，Git 与结果文件共同决定任务是否完成；
-5. block 后必须经过证据、Analyst 建议、人工审批，且恢复只能启动 fresh worker。
+5. block 后必须经过证据、Analyst 建议、人工审批，且恢复只能启动与获批动作匹配的 fresh Worker 或 fresh Reviewer。
 
 以下能力移出核心：FCM、设备配对、Tailmux companion、通知、展示、低层 `repair` 命令、多个含义重叠的 `bind/work/watch/monitor` 入口。它们可以作为 observer 或 operator adapter 返回，但不能参与状态决策。
 
@@ -59,7 +59,7 @@ Approval = f(job_id, job_revision, incident_id, analysis_id, action)
 3. **Git 决定代码事实**：branch、base/head ancestry、commit、dirty、push 状态不能由模型自报代替。
 4. **Herdr 只负责运行与观察**：workspace/tab/pane/agent 生命周期不是交付验收。
 5. **模型输出没有权限**：Pi/Codex 只能产出结果或建议，不能直接迁移 controller 状态。
-6. **恢复不复用旧上下文**：审批后关闭旧 pane，创建新的 worker attempt；旧 agent 不会收到新的控制指令。
+6. **恢复不复用旧上下文**：审批后关闭旧 pane，按获批动作创建新的 Worker 或 Reviewer attempt；旧 agent 不会收到新的控制指令。
 7. **不确定即停止**：stale revision、身份不一致、HEAD 变化、证据缺失、仅有未知 agent 状态时全部 fail closed；若 pane 关闭后仍有合法 result 与 Git 固定点，则交付事实可以独立收敛。
 
 ---
@@ -202,7 +202,8 @@ stateDiagram-v2
 
     blocked --> blocked: bounded Analyst evidence turns
     blocked --> recovery_approved: exact human approval
-    recovery_approved --> worker_ready: close old pane + fresh worker only
+    recovery_approved --> worker_ready: approved fresh Worker retry
+    recovery_approved --> reviewer_ready: approved Reviewer infrastructure retry
 
     done --> [*]: archive and free slot
 ```
@@ -312,7 +313,7 @@ Job 已领取后发生不可自动继续的事件：
 | `agent_decision` | worker 明确需要业务选择 | 是 | 是 | 证据 + gate |
 | `agent_blocked` | agent 失败、无有效完成结果 | 是 | 是 | 证据 + fresh worker |
 | `review_uncertain` | reviewer 证据不足、轮次耗尽 | 是 | 是 | 证据 + gate |
-| `infrastructure_exhausted` | Herdr dispatch/wait 无法确认 | 是 | 是 | 人核对后 fresh worker |
+| `infrastructure_exhausted` | Herdr dispatch/wait 无法确认 | 是 | 是 | Worker 事故重启 fresh Worker；Reviewer 事故复核同一 HEAD 后重启 fresh Reviewer |
 | `integrity_violation` | SHA/branch/dirty/push/身份不一致 | 否 | 否 | hold，人工检查环境 |
 | `stale_task` | Issue/Map frontier/目标已变化 | 否 | 否 | 重新选择，不复用旧任务 |
 | `analyst_unavailable` | task-bound Analyst 未成功绑定 | 否 | 否 | hold/cancel |
@@ -337,7 +338,7 @@ sequenceDiagram
         E-->>C: bounded items
         C->>A: next turn(updated pack)
     else Analyst has advice
-        A-->>C: retry_fresh_worker or hold
+        A-->>C: retry_fresh_worker, retry_fresh_reviewer, or hold
     end
     C-->>H: immutable analysis + digest
     H->>C: approval(job revision, incident, analysis, action)
@@ -364,8 +365,8 @@ Harness 负责路径限制、长度限制和读取；Analyst 不能提交 shell 
 expected_revision
 incident_id
 analysis_id
-analysis.action == retry_fresh_worker
-incident.allowedActions includes retry_fresh_worker
+analysis.action 是 retry_fresh_worker 或 retry_fresh_reviewer
+incident.allowedActions includes analysis.action
 actor
 reason
 ```
@@ -376,9 +377,9 @@ reason
 重新校验 approval binding
 -> close old pane
 -> consume approval
--> copy bounded resolutionBrief
 -> clear active incident
--> state=worker_ready
+-> retry_fresh_worker: copy bounded resolutionBrief, state=worker_ready
+-> retry_fresh_reviewer: 复核同一 HEAD 与 clean tree, state=reviewer_ready
 -> create a brand-new attempt ID and Pi agent
 ```
 

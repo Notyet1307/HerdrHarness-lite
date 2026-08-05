@@ -238,7 +238,7 @@ export class HerdrCli implements HerdrPort {
     if (!status || !["idle", "done", "blocked"].includes(status)) {
       throw new Error(`Herdr returned invalid agent status: ${status ?? "missing"}`);
     }
-    if (status === "blocked") diagnostic = this.inspectAgent(input.handle.agentName);
+    if (status === "blocked" || attemptResult === null) diagnostic = this.inspectAgent(input.handle.agentName);
     return { agentStatus: status as AgentStatus, result: attemptResult, diagnostic };
   }
 

@@ -318,7 +318,7 @@ function turnRequest(
     turn: 1,
     allowedOutput: {
       need_evidence: ["issue_context", "git_status", "git_diff", "test_output", "attempt_result", "file_excerpt"],
-      advice: ["retry_fresh_worker", "hold"],
+      advice: ["retry_fresh_worker", "retry_fresh_reviewer", "hold"],
     },
   };
 }

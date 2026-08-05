@@ -54,6 +54,23 @@ test("JSON Analyst protocol rejects unbounded advice", () => {
         unknowns: [],
     }), /Analyst advice is invalid/);
 });
+test("JSON Analyst protocol accepts a bounded fresh Reviewer retry", () => {
+    assert.deepEqual(parseAnalystTurn({
+        kind: "advice",
+        action: "retry_fresh_reviewer",
+        summary: "Reviewer infrastructure failed before producing a result",
+        resolutionBrief: "Retry review against the unchanged implementation HEAD.",
+        evidenceRefs: ["incident", "git-status"],
+        unknowns: [],
+    }), {
+        kind: "advice",
+        action: "retry_fresh_reviewer",
+        summary: "Reviewer infrastructure failed before producing a result",
+        resolutionBrief: "Retry review against the unchanged implementation HEAD.",
+        evidenceRefs: ["incident", "git-status"],
+        unknowns: [],
+    });
+});
 test("JSON Analyst protocol rejects malformed evidence paths", () => {
     assert.throws(() => parseAnalystTurn({
         kind: "need_evidence",

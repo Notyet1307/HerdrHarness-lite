@@ -1,4 +1,10 @@
 import { createHash } from "node:crypto";
+export function isRecoveryAction(value) {
+    return value === "retry_fresh_worker" || value === "retry_fresh_reviewer" || value === "hold";
+}
+export function isRetryAction(value) {
+    return value === "retry_fresh_worker" || value === "retry_fresh_reviewer";
+}
 export function taskFromSelection(repo, selected) {
     const value = {
         repo,
@@ -52,6 +58,19 @@ export function assertJobInvariant(job) {
         throw new Error("blocked job requires an incident");
     if (job.state === "recovery_approved" && !job.approval) {
         throw new Error("recovery_approved job requires an approval");
+    }
+    if (job.incident &&
+        (!Array.isArray(job.incident.allowedActions) ||
+            job.incident.allowedActions.length === 0 ||
+            job.incident.allowedActions.some((action) => !isRecoveryAction(action)) ||
+            new Set(job.incident.allowedActions).size !== job.incident.allowedActions.length)) {
+        throw new Error("incident has an invalid recovery action");
+    }
+    if (job.analysis && !isRecoveryAction(job.analysis.action)) {
+        throw new Error("analysis has an invalid recovery action");
+    }
+    if (job.approval && !isRetryAction(job.approval.action)) {
+        throw new Error("approval has an invalid recovery action");
     }
     if ((job.state === "worker_running" || job.state === "reviewer_running") && !job.activeAttempt) {
         throw new Error(`${job.state} requires an active attempt`);
