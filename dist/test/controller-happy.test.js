@@ -155,10 +155,36 @@ test("Reviewer attempt binds validation argv before later config changes", async
     await controller.tick();
     assert.deepEqual(git.reviewerValidationArgv, [["npm", "run", "verify"]]);
 });
+test("Reviewer preflight attributes pre-existing worktree residue before any Reviewer handle", async () => {
+    const store = new MemoryStore();
+    const git = new FakeGit();
+    const herdr = new FakeHerdr([
+        { lane: "worker", status: "completed", headSha: "b".repeat(40) },
+    ]);
+    const controller = new HarnessController({
+        config,
+        store,
+        github: new FakeGitHub([issue({ number: 25, title: "Preflight residue" })]),
+        git,
+        herdr,
+        analyst: new FakeAnalyst(),
+        evidence: new FakeEvidence(),
+        clock: new FakeClock(),
+        ids: new SequenceIds(),
+    });
+    for (let index = 0; index < 9; index += 1)
+        await controller.tick();
+    assert.equal(herdr.prepared.find((entry) => entry.lane === "worker")?.env.PYTHONDONTWRITEBYTECODE, "1");
+    git.reviewerFailure = "worktree has changes outside Harness result files:\n?? generated.pyc";
+    await controller.tick();
+    assert.equal(store.state.activeJob?.incident?.class, "reviewer_preflight_dirty");
+    assert.equal(store.state.activeJob?.activeAttempt?.handle, null);
+    assert.equal(herdr.prepared.filter((entry) => entry.lane === "reviewer").length, 0);
+    assert.match(store.state.activeJob?.incident?.summary ?? "", /before Reviewer start/);
+});
 test("blocked Reviewer cannot bypass worktree verification", async () => {
     const store = new MemoryStore();
     const git = new FakeGit();
-    git.reviewerFailure = "reviewer left an untracked product file";
     const controller = new HarnessController({
         config,
         store,
@@ -173,15 +199,16 @@ test("blocked Reviewer cannot bypass worktree verification", async () => {
         clock: new FakeClock(),
         ids: new SequenceIds(),
     });
-    for (let index = 0; index < 13; index += 1)
+    for (let index = 0; index < 12; index += 1)
         await controller.tick();
+    git.reviewerFailure = "reviewer left an untracked product file";
+    await controller.tick();
     assert.equal(store.state.activeJob?.incident?.class, "integrity_violation");
     assert.match(store.state.activeJob?.incident?.summary ?? "", /untracked product file/);
 });
 test("Reviewer wait failure cannot bypass worktree verification", async () => {
     const store = new MemoryStore();
     const git = new FakeGit();
-    git.reviewerFailure = "reviewer changed the worktree before wait failed";
     const herdr = new FakeHerdr([
         { lane: "worker", status: "completed", headSha: "b".repeat(40) },
     ]);
@@ -198,6 +225,7 @@ test("Reviewer wait failure cannot bypass worktree verification", async () => {
     });
     for (let index = 0; index < 12; index += 1)
         await controller.tick();
+    git.reviewerFailure = "reviewer changed the worktree before wait failed";
     herdr.waitFailure = new Error("Herdr wait unavailable");
     await controller.tick();
     assert.equal(store.state.activeJob?.incident?.class, "integrity_violation");

@@ -16,6 +16,8 @@ export function allowedActionsFor(blockClass: BlockClass, lane: Incident["lane"]
     case "review_uncertain":
     case "ci_failure":
       return ["retry_fresh_worker", "hold"];
+    case "reviewer_preflight_dirty":
+      return lane === "reviewer" ? ["retry_fresh_reviewer", "hold"] : ["hold"];
     case "infrastructure_exhausted":
       return lane === "reviewer" ? ["retry_fresh_reviewer", "hold"] : ["retry_fresh_worker", "hold"];
     case "integrity_violation":

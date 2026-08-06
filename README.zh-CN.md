@@ -158,6 +158,7 @@ Approval 受 compare-and-swap 保护。随后继续单独 `tick`，直到 `recov
 
 - Worker/Reviewer `infrastructure_exhausted` 且没有 durable result；或
 - Reviewer `review_uncertain` 已产生与当前 HEAD 绑定的 durable `blocked` 结果，且其外部验证环境已经修复并通过有界探测；或
+- Reviewer 尚未获得 pane/agent 时，启动前检查发现并已人工保全或清理的 `reviewer_preflight_dirty`；或
 - Controller 自己记录的 Analyst 执行失败。
 
 顺序：
@@ -186,7 +187,7 @@ node dist/src/cli.js reassess \
 
 Fresh Worker 不会丢掉已提交改动：它继续使用同一任务 worktree，并从账本记录的 base/reviewed HEAD 接收有界恢复或 rework brief。未提交、未形成 durable result 的 agent 内部状态不被信任。
 
-完整性违规、任务身份过期、HEAD 漂移、禁止动作和未知证据不能靠改配置或重复命令转成 retry。
+完整性违规、任务身份过期、HEAD 漂移、禁止动作和未知证据不能靠改配置或重复命令转成 retry。唯一兼容迁移是旧版把“Reviewer 启动前残留”误记成完整性违规，且账本能证明 Reviewer 从未获得 handle；它会被精确 `reassess` 为 `reviewer_preflight_dirty`，仍需新 Analyst 判断、人类批准和恢复前 clean-tree 校验。
 
 ### 6. Agent 交付或交接
 

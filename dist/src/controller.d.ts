@@ -31,6 +31,7 @@ export declare class HarnessController {
     private prepareAttempt;
     private driveAttempt;
     private verifyReviewerIntegrity;
+    private verifyReviewerPreflight;
     private finishWorker;
     private finishReviewer;
     private closeCompletedAttempt;

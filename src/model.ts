@@ -145,6 +145,7 @@ export type BlockClass =
   | "agent_decision"
   | "agent_blocked"
   | "review_uncertain"
+  | "reviewer_preflight_dirty"
   | "infrastructure_exhausted"
   | "integrity_violation"
   | "stale_task"

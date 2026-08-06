@@ -86,21 +86,41 @@ export async function reassessIncident(store, request, dependencies) {
         && job.activeAttempt.result?.lane === "reviewer"
         && job.activeAttempt.result.status === "blocked"
         && job.activeAttempt.result.reviewedHeadSha === job.headSha;
+    const heldReviewerPreflight = job.incident.class === "reviewer_preflight_dirty"
+        && job.incident.lane === "reviewer"
+        && job.activeAttempt?.lane === "reviewer"
+        && job.activeAttempt.handle === null
+        && job.activeAttempt.result === null
+        && job.activeAttempt.expectedHeadSha === job.headSha;
+    const legacyReviewerPreflight = job.incident.class === "integrity_violation"
+        && job.incident.lane === "reviewer"
+        && job.incident.allowedActions.length === 1
+        && job.incident.allowedActions[0] === "hold"
+        && job.activeAttempt?.lane === "reviewer"
+        && job.activeAttempt.handle === null
+        && job.activeAttempt.result === null
+        && job.activeAttempt.expectedHeadSha === job.headSha
+        && job.incident.summary.startsWith("reviewer modified the worktree outside Harness result files:");
+    const effectiveRetryAction = legacyReviewerPreflight ? "retry_fresh_reviewer" : retryAction;
     const analystExecutionFailed = job.analysis.evidenceDigest === job.incident.evidenceDigest
         && isControllerAnalystFailure(job.analysis);
-    if (retryAction === null ||
-        !job.incident.allowedActions.includes(retryAction) ||
-        !allowedActionsFor(job.incident.class, job.incident.lane).includes(retryAction) ||
+    if (effectiveRetryAction === null ||
+        (!legacyReviewerPreflight && !job.incident.allowedActions.includes(effectiveRetryAction)) ||
+        (!legacyReviewerPreflight && !allowedActionsFor(job.incident.class, job.incident.lane).includes(effectiveRetryAction)) ||
         !exactAttempt ||
-        (!heldInfrastructure && !heldReviewerBlock && !analystExecutionFailed)) {
-        throw new Error("only an exact held infrastructure incident, HEAD-bound Reviewer block, or controller-recorded Analyst execution failure can be reassessed");
+        (!heldInfrastructure && !heldReviewerBlock && !heldReviewerPreflight && !legacyReviewerPreflight && !analystExecutionFailed)) {
+        throw new Error("only an exact held infrastructure incident, HEAD-bound Reviewer block, pre-start Reviewer residue, or controller-recorded Analyst execution failure can be reassessed");
     }
     const successor = makeIncident({
         jobId: job.id,
         jobRevision: job.revision + 1,
         lane: job.incident.lane,
         attemptId: job.incident.attemptId,
-        blockClass: heldReviewerBlock ? "infrastructure_exhausted" : job.incident.class,
+        blockClass: heldReviewerBlock
+            ? "infrastructure_exhausted"
+            : legacyReviewerPreflight
+                ? "reviewer_preflight_dirty"
+                : job.incident.class,
         summary: [
             `Reassessment requested for held incident ${job.incident.id}.`,
             `Previous incident (untrusted):\n${job.incident.summary}`,

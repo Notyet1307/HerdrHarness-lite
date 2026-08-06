@@ -423,6 +423,92 @@ test("held Reviewer validation block can be reassessed and retried on the same H
   assert.equal(store.state.activeJob?.state, "publish_ready");
 });
 
+test("legacy pre-start Reviewer residue is reassessed through an auditable compatibility migration", async () => {
+  const headSha = "b".repeat(40);
+  const store = new MemoryStore();
+  const clock = new FakeClock();
+  const ids = new SequenceIds();
+  const git = new FakeGit();
+  const herdr = new FakeHerdr([
+    { lane: "worker", status: "completed", headSha },
+    { lane: "reviewer", status: "pass", reviewedHeadSha: headSha },
+  ]);
+  const analyst = new FakeAnalyst([
+    {
+      kind: "advice",
+      action: "hold",
+      summary: "Preserve and remove the pre-existing cache before review",
+      resolutionBrief: "",
+      evidenceRefs: ["task"],
+      unknowns: ["worktree cleanliness"],
+    },
+    {
+      kind: "advice",
+      action: "retry_fresh_reviewer",
+      summary: "The cache was preserved and the unchanged HEAD is clean",
+      resolutionBrief: "Review the unchanged implementation HEAD in a fresh isolated Reviewer.",
+      evidenceRefs: ["task"],
+      unknowns: [],
+    },
+  ]);
+  const controller = new HarnessController({
+    config,
+    store,
+    github: new FakeGitHub([issue({ number: 38, title: "Migrate pre-start Reviewer residue" })]),
+    git,
+    herdr,
+    analyst,
+    evidence: new FakeEvidence(),
+    clock,
+    ids,
+  });
+
+  for (let index = 0; index < 9; index += 1) await controller.tick();
+  git.reviewerFailure = "worktree has changes outside Harness result files:\n?? generated.pyc";
+  await controller.tick();
+  const legacy = store.state.activeJob!;
+  legacy.incident!.class = "integrity_violation";
+  legacy.incident!.allowedActions = ["hold"];
+  legacy.incident!.summary = "reviewer modified the worktree outside Harness result files:\n?? generated.pyc";
+  assert.equal(legacy.activeAttempt?.handle, null);
+
+  await controller.tick();
+  const held = store.state.activeJob!;
+  assert.equal(held.analysis?.action, "hold");
+  git.reviewerFailure = null;
+
+  const reassessment = await reassessIncident(
+    store,
+    {
+      expectedRevision: held.revision,
+      incidentId: held.incident!.id,
+      analysisId: held.analysis!.id,
+      actor: "human@example.test",
+      reason: "Preserved generated.pyc, verified its digest, removed it from the task worktree, and kept the exact HEAD unchanged.",
+    },
+    { clock, ids },
+  );
+  assert.equal(store.state.activeJob?.incident?.class, "reviewer_preflight_dirty");
+  assert.equal(store.state.activeJob?.analysis, null);
+  assert.deepEqual(store.state.activeJob?.reassessments?.at(-1), reassessment);
+
+  assert.equal((await controller.tick()).action, "analysis_recorded");
+  await approveRecovery(
+    store,
+    {
+      expectedRevision: store.state.activeJob!.revision,
+      incidentId: store.state.activeJob!.incident!.id,
+      analysisId: store.state.activeJob!.analysis!.id,
+      actor: "human@example.test",
+      reason: "Approve one fresh Reviewer against the unchanged clean HEAD.",
+    },
+    { clock, ids },
+  );
+  assert.equal((await controller.tick()).action, "recovery_applied");
+  assert.equal(store.state.activeJob?.state, "reviewer_ready");
+  assert.equal(store.state.activeJob?.headSha, headSha);
+});
+
 test("held Worker infrastructure incident can be reassessed without granting retry authority", async () => {
   const store = new MemoryStore();
   const clock = new FakeClock();
@@ -615,7 +701,7 @@ test("integrity incidents cannot be converted into retry authority by the Analys
       },
       { clock, ids },
     ),
-    /only an exact held infrastructure incident, HEAD-bound Reviewer block, or controller-recorded Analyst execution failure/,
+    /only an exact held infrastructure incident, HEAD-bound Reviewer block, pre-start Reviewer residue, or controller-recorded Analyst execution failure/,
   );
   await assert.rejects(
     () => approveRecovery(

@@ -61,6 +61,7 @@ export type ReviewerVerification = {
 } | {
     ok: false;
     class: "integrity_violation";
+    kind: "head_mismatch" | "worktree_dirty";
     reason: string;
 };
 export interface GitPort {
@@ -71,6 +72,7 @@ export interface GitPort {
         baseSha: string;
         reportedHeadSha: string;
         expectedRemoteHeadSha: string | null;
+        allowedResultPaths: string[];
     }): Promise<WorkerVerification>;
     prepareReviewer(input: {
         worktree: WorktreeHandle;

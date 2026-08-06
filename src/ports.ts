@@ -78,7 +78,7 @@ export type WorkerVerification =
 
 export type ReviewerVerification =
   | { ok: true }
-  | { ok: false; class: "integrity_violation"; reason: string };
+  | { ok: false; class: "integrity_violation"; kind: "head_mismatch" | "worktree_dirty"; reason: string };
 
 export interface GitPort {
   refreshBase(localPath: string, baseRef: string): Promise<string>;
@@ -88,6 +88,7 @@ export interface GitPort {
     baseSha: string;
     reportedHeadSha: string;
     expectedRemoteHeadSha: string | null;
+    allowedResultPaths: string[];
   }): Promise<WorkerVerification>;
   prepareReviewer(input: {
     worktree: WorktreeHandle;

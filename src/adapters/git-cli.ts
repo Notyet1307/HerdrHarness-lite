@@ -23,6 +23,7 @@ export class GitCli implements GitPort {
     baseSha: string;
     reportedHeadSha: string;
     expectedRemoteHeadSha: string | null;
+    allowedResultPaths: string[];
   }): Promise<WorkerVerification> {
     const path = input.worktree.path;
     const head = this.git(path, ["rev-parse", "HEAD"]).trim();
@@ -41,9 +42,13 @@ export class GitCli implements GitPort {
     if (!Number.isInteger(count) || count < 1) {
       return { ok: false, class: "integrity_violation", reason: "worker produced no commit after its attempt base" };
     }
-    const dirty = this.git(path, ["status", "--porcelain", "--untracked-files=no"]);
-    if (dirty.trim()) {
-      return { ok: false, class: "integrity_violation", reason: `tracked worktree is dirty:\n${dirty.trim()}` };
+    const dirty = unexpectedStatus(
+      this.git(path, ["status", "--porcelain=v1", "--untracked-files=all"]),
+      path,
+      input.allowedResultPaths,
+    );
+    if (dirty.length > 0) {
+      return { ok: false, class: "integrity_violation", reason: `worker left uncommitted worktree changes outside Harness result files:\n${dirty.join("\n")}` };
     }
     const remote = this.runner.run("git", ["-C", path, "ls-remote", "--heads", "origin", input.branch]);
     if (!remote.ok) {
@@ -152,19 +157,18 @@ export class GitCli implements GitPort {
       return {
         ok: false,
         class: "integrity_violation",
+        kind: "head_mismatch",
         reason: `review is not bound to the current HEAD ${input.expectedHeadSha}`,
       };
     }
     const status = this.git(input.worktree.path, ["status", "--porcelain=v1", "--untracked-files=all"]);
-    const allowed = new Set(input.allowedResultPaths.map((path) => relative(input.worktree.path, path).replace(/\\/g, "/")));
-    const unexpected = status.split(/\r?\n/).filter((line) => (
-      line && (!line.startsWith("?? ") || !allowed.has(line.slice(3)))
-    ));
+    const unexpected = unexpectedStatus(status, input.worktree.path, input.allowedResultPaths);
     if (unexpected.length > 0) {
       return {
         ok: false,
         class: "integrity_violation",
-        reason: `reviewer modified the worktree outside Harness result files:\n${unexpected.join("\n")}`,
+        kind: "worktree_dirty",
+        reason: `worktree has changes outside Harness result files:\n${unexpected.join("\n")}`,
       };
     }
     return { ok: true };
@@ -173,6 +177,13 @@ export class GitCli implements GitPort {
   private git(path: string, args: string[]): string {
     return requireSuccess(this.runner.run("git", ["-C", path, ...args]), `git ${args[0] ?? "command"}`);
   }
+}
+
+function unexpectedStatus(status: string, worktreePath: string, allowedResultPaths: string[]): string[] {
+  const allowed = new Set(allowedResultPaths.map((path) => relative(worktreePath, path).replace(/\\/g, "/")));
+  return status.split(/\r?\n/).filter((line) => (
+    line && (!line.startsWith("?? ") || !allowed.has(line.slice(3)))
+  ));
 }
 
 function makeReadOnly(path: string): void {

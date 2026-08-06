@@ -115,7 +115,7 @@ export type EvidencePack = {
     items: EvidenceItem[];
     missing: string[];
 };
-export type BlockClass = "agent_decision" | "agent_blocked" | "review_uncertain" | "infrastructure_exhausted" | "integrity_violation" | "stale_task" | "ci_failure" | "ci_rework_exhausted" | "analyst_unavailable";
+export type BlockClass = "agent_decision" | "agent_blocked" | "review_uncertain" | "reviewer_preflight_dirty" | "infrastructure_exhausted" | "integrity_violation" | "stale_task" | "ci_failure" | "ci_rework_exhausted" | "analyst_unavailable";
 export type RecoveryAction = "retry_fresh_worker" | "retry_fresh_reviewer" | "hold";
 export declare function isRecoveryAction(value: unknown): value is RecoveryAction;
 export declare function isRetryAction(value: unknown): value is Exclude<RecoveryAction, "hold">;

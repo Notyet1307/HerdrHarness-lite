@@ -14,6 +14,7 @@ export declare class GitCli implements GitPort {
         baseSha: string;
         reportedHeadSha: string;
         expectedRemoteHeadSha: string | null;
+        allowedResultPaths: string[];
     }): Promise<WorkerVerification>;
     prepareReviewer(input: {
         worktree: {

@@ -84,6 +84,22 @@ test("Reviewer preparation exports a read-only exact-HEAD snapshot and writable 
         rmSync(root, { recursive: true, force: true });
     }
 });
+test("Worker Git verification rejects untracked files outside Harness results", async () => {
+    const input = {
+        worktree,
+        branch: worktree.branch,
+        baseSha: "a".repeat(40),
+        reportedHeadSha: head,
+        expectedRemoteHeadSha: null,
+        allowedResultPaths: ["/repo/.harness/attempt-worker.json"],
+    };
+    const allowed = await new GitCli(new WorkerRunner(head, null, "?? .harness/attempt-worker.json\n")).verifyWorker(input);
+    assert.deepEqual(allowed, { ok: true, headSha: head });
+    const rejected = await new GitCli(new WorkerRunner(head, null, "?? .harness/attempt-worker.json\n?? investigations/issue_33/__pycache__/probe.pyc\n")).verifyWorker(input);
+    assert.equal(rejected.ok, false);
+    if (!rejected.ok)
+        assert.match(rejected.reason, /probe\.pyc/);
+});
 test("post-PR Worker verification requires the remote branch to remain on the reviewed anchor", async () => {
     const publishedHead = "b".repeat(40);
     const reworkedHead = "c".repeat(40);
@@ -93,6 +109,7 @@ test("post-PR Worker verification requires the remote branch to remain on the re
         baseSha: publishedHead,
         reportedHeadSha: reworkedHead,
         expectedRemoteHeadSha: publishedHead,
+        allowedResultPaths: [],
     };
     const accepted = await new GitCli(new WorkerRunner(reworkedHead, publishedHead)).verifyWorker(input);
     assert.deepEqual(accepted, { ok: true, headSha: reworkedHead });
@@ -125,9 +142,11 @@ class ReviewRunner {
 class WorkerRunner {
     localHead;
     remoteHead;
-    constructor(localHead, remoteHead) {
+    status;
+    constructor(localHead, remoteHead, status = "") {
         this.localHead = localHead;
         this.remoteHead = remoteHead;
+        this.status = status;
     }
     run(_command, args) {
         const operation = args[2];
@@ -140,7 +159,7 @@ class WorkerRunner {
         if (operation === "rev-list")
             return ok("1\n");
         if (operation === "status")
-            return ok("");
+            return ok(args.includes("--untracked-files=no") ? "" : this.status);
         if (operation === "ls-remote") {
             return ok(this.remoteHead ? `${this.remoteHead}\trefs/heads/${worktree.branch}\n` : "");
         }

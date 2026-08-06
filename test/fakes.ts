@@ -153,9 +153,9 @@ export class FakeGit implements GitPort {
     };
   }
 
-  async verifyReviewer(): Promise<{ ok: true } | { ok: false; class: "integrity_violation"; reason: string }> {
+  async verifyReviewer(): Promise<{ ok: true } | { ok: false; class: "integrity_violation"; kind: "worktree_dirty"; reason: string }> {
     return this.reviewerFailure
-      ? { ok: false, class: "integrity_violation", reason: this.reviewerFailure }
+      ? { ok: false, class: "integrity_violation", kind: "worktree_dirty", reason: this.reviewerFailure }
       : { ok: true };
   }
 }

@@ -356,7 +356,7 @@ export class HarnessController {
 
     if (attempt.phase === "prepared") {
       if (lane === "reviewer") {
-        const integrityBlock = await this.verifyReviewerIntegrity(
+        const integrityBlock = await this.verifyReviewerPreflight(
           state,
           job,
           attempt,
@@ -368,7 +368,7 @@ export class HarnessController {
       let handle;
       try {
         let cwd = job.worktree.path;
-        let env: Record<string, string> = {};
+        let env: Record<string, string> = lane === "worker" ? { PYTHONDONTWRITEBYTECODE: "1" } : {};
         if (lane === "reviewer") {
           if (!attempt.expectedHeadSha) throw new Error("Reviewer attempt has no expected HEAD");
           if (!validReviewerValidationArgv(attempt.reviewerValidationArgv)) {
@@ -548,7 +548,41 @@ export class HarnessController {
     return this.block(state, job, {
       class: verification.class,
       lane: "reviewer",
-      summary: verification.reason,
+      summary: `Reviewer boundary violation: ${verification.reason}`,
+      attemptResult,
+    });
+  }
+
+  private async verifyReviewerPreflight(
+    state: HarnessState,
+    job: Job,
+    attempt: Attempt,
+    reportedHeadSha: string | null,
+    attemptResult: AttemptResult | null,
+  ): Promise<TickResult | null> {
+    if (!job.worktree || !job.headSha) {
+      return this.block(state, job, {
+        class: "integrity_violation",
+        lane: "reviewer",
+        summary: "reviewer lane lost its expected worktree or implementation HEAD",
+        attemptResult,
+      });
+    }
+    const verification = await this.deps.git.verifyReviewer({
+      worktree: job.worktree,
+      expectedHeadSha: job.headSha,
+      reportedHeadSha,
+      allowedResultPaths: [...job.attempts.map((settled) => settled.resultPath), attempt.resultPath]
+        .filter((path) => pathIsWithin(job.worktree!.path, path)),
+    });
+    if (verification.ok) return null;
+    const preflightResidue = verification.kind === "worktree_dirty" && attempt.handle === null;
+    return this.block(state, job, {
+      class: preflightResidue ? "reviewer_preflight_dirty" : verification.class,
+      lane: "reviewer",
+      summary: preflightResidue
+        ? `Worktree residue existed before Reviewer start: ${verification.reason}`
+        : `Reviewer boundary violation: ${verification.reason}`,
       attemptResult,
     });
   }
@@ -591,6 +625,8 @@ export class HarnessController {
       baseSha: attempt.baseSha,
       reportedHeadSha: worker.headSha,
       expectedRemoteHeadSha: attempt.expectedRemoteHeadSha ?? null,
+      allowedResultPaths: [...job.attempts.map((settled) => settled.resultPath), attempt.resultPath]
+        .filter((path) => pathIsWithin(job.worktree!.path, path)),
     });
     if (!verification.ok) {
       return this.block(state, job, {
@@ -973,7 +1009,7 @@ export class HarnessController {
 
     if (approval.action === "retry_fresh_reviewer") {
       if (
-        incident.class !== "infrastructure_exhausted" ||
+        (incident.class !== "infrastructure_exhausted" && incident.class !== "reviewer_preflight_dirty") ||
         incident.lane !== "reviewer" ||
         job.activeAttempt?.lane !== "reviewer" ||
         incident.attemptId !== job.activeAttempt.id
@@ -985,7 +1021,7 @@ export class HarnessController {
           attemptResult: job.activeAttempt?.result ?? null,
         });
       }
-      const integrityBlock = await this.verifyReviewerIntegrity(
+      const integrityBlock = await this.verifyReviewerPreflight(
         state,
         job,
         job.activeAttempt,

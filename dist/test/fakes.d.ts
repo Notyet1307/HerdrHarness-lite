@@ -94,6 +94,7 @@ export declare class FakeGit implements GitPort {
     } | {
         ok: false;
         class: "integrity_violation";
+        kind: "worktree_dirty";
         reason: string;
     }>;
 }

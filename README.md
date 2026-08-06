@@ -158,6 +158,7 @@ Use `reassess` only when the incident is exactly one of these retryable cases:
 
 - Worker/Reviewer `infrastructure_exhausted` with no durable result; or
 - Reviewer `review_uncertain` with a durable `blocked` result bound to the current HEAD, after its external validation environment was repaired and probed; or
+- `reviewer_preflight_dirty` discovered before the Reviewer received a pane/agent, after the residue was preserved or cleaned by an operator; or
 - an Analyst execution failure recorded by the Controller itself.
 
 Sequence:
@@ -186,7 +187,7 @@ node dist/src/cli.js reassess \
 
 A fresh Worker retains committed work: it uses the same task worktree and receives a bounded recovery/rework brief based on the ledger's base or reviewed HEAD. Uncommitted agent state without a durable result is not trusted.
 
-Integrity violations, stale task identity, HEAD drift, forbidden actions, and unknown evidence cannot become retryable through a config edit or repeated command.
+Integrity violations, stale task identity, HEAD drift, forbidden actions, and unknown evidence cannot become retryable through a config edit or repeated command. The sole compatibility migration is a legacy incident that misattributed pre-start residue to a Reviewer when the ledger proves no Reviewer handle was ever issued; exact `reassess` converts it to `reviewer_preflight_dirty`, still requiring fresh Analyst advice, human approval, and a clean-tree check before recovery.
 
 ### 6. Agent completion and handoff
 
