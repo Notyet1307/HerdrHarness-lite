@@ -2,168 +2,348 @@
 
 [English](./README.md) | 简体中文
 
-HerdrHarness Lite 是一个小型、失败关闭的 GitHub Issue 交付控制器。它在 Herdr worktree 中使用全新的 Pi Worker 和 Reviewer，把 workflow 权限放在持久状态机里，而不是把 agent 会话、终端状态或聊天回复当成交付事实。
+HerdrHarness Lite 是一个小型、失败关闭的 GitHub Issue 交付控制器。它用持久状态机协调 GitHub、Git、Herdr、Pi Worker、独立 Reviewer 和 Codex Analyst；agent 会话、终端输出和聊天回复都不是交付事实。
+
+这份 README 有两条阅读路径：
+
+- Agent 要安装、运行、查看或恢复 Harness：从“Agent 操作手册”开始，并按步骤与停止条件执行。
+- 人类要理解系统：从“系统如何运行”开始，再看“能力与边界”。
+
+## Agent 操作手册
+
+这是操作契约。执行任何命令前先读完本节六步；README 不扩大用户授权，只要求查看时就在 `status` 后停止。先读状态，再采取动作；每次只允许一个 Controller 写账本。把命令中的大写占位符替换为当前机器的真实值。
+
+### 1. 预检
+
+从 [`harness.config.example.json`](./harness.config.example.json) 复制配置。保留其中完整的角色参数，只替换仓库、路径、provider/model 和验证命令。
+
+运行环境需要 Node.js `>=22.16.0`、Git、已登录目标仓库的 GitHub CLI、Herdr、Pi、`pi-subagents` 和 Codex CLI。首次安装或仓库更新后执行：
+
+```bash
+npm ci
+npm run build
+pi install npm:pi-subagents
+pi install /ABSOLUTE/PATH/HerdrHarness-lite
+gh auth status
+gh repo view OWNER/REPOSITORY
+herdr session list --json
+pi --list-models WORKER_PROVIDER
+pi --list-models REVIEWER_PROVIDER
+/ABSOLUTE/PATH/codex --version
+node dist/src/cli.js status --config /ABSOLUTE/PATH/harness.config.json
+```
+
+如果配置中的命名 Herdr session 未运行，先启动或连接：
+
+```bash
+herdr session attach SESSION_NAME
+```
+
+逐项确认：
+
+- `gh` 身份对目标仓库有 Issue、PR 和标签操作权限；
+- `localPath` 指向目标仓库 clone，`baseRef` 存在；
+- `stateDir` 和 `worktreeRoot` 位于产品仓库之外；
+- 配置中的 Herdr session 为 `running: true`；
+- Pi 当前目录能列出 Worker 与 Reviewer 所选 model；
+- `analyst.argv` 用 `--codex-bin` 固定真实 Codex CLI 路径；
+- `status` 可以读取账本；若已有 `activeJob`，继续它，不领取新任务。
+
+预检完成条件：上述检查全部有真实输出，且不存在未解释的身份、路径、provider 或 active job 不确定性。
+
+### 2. 先用手动 `tick`
+
+首次真实任务使用手动模式：
+
+```bash
+node dist/src/cli.js tick --config /ABSOLUTE/PATH/harness.config.json
+```
+
+每次成功的 `tick` 至多写入一个持久迁移。根据返回结果继续：
+
+| 返回状态 | 下一步 |
+| --- | --- |
+| `idle` | 当前没有可执行 Issue；停止或等待队列变化 |
+| `selected`、`claimed`、`worktree_created` | 核对消息后再执行一次 `tick` |
+| `attempt_prepared`、`attempt_pane_ready`、`attempt_agent_ready` | 再执行一次 `tick`；下一步可能进入长时间 dispatch |
+| dispatch 阶段命令仍未返回 | 等待；只用 `status` 和 Herdr 只读查看，不并发启动第二个 `tick` |
+| `attempt_dispatched`、`attempt_completed`、`published`、`merged` | 再执行一次 `tick` 消费下一阶段 |
+| `publish_retry` | 修复消息指出的可重试发布条件，再执行 `tick` |
+| `waiting_for_merge` | 等待 GitHub required checks/merge，再执行 `tick`；不得绕过 GitHub |
+| `blocked`、`analysis_recorded`、`waiting_for_approval` | 进入“恢复 blocked job” |
+| `archived` | 当前 slot 已释放；下一次 `tick` 可以选择下一个 Issue |
+
+任意 `ok:false` 都先运行 `status` 并修复消息中的具体条件。重复同一命令不会自动授予恢复权限。
+
+Dispatch 阶段会调用 Herdr `agent prompt --wait`，因此可能在整个 Worker 或 Reviewer 运行期间不返回。命令没有输出不等于 prompt 丢失。
+
+单步完成条件：账本只推进了一次，或明确停在等待外部条件/agent 的状态；没有并行 Controller。
+
+### 3. 查看当前进展
+
+先读 Harness 账本：
+
+```bash
+node dist/src/cli.js status --config /ABSOLUTE/PATH/harness.config.json
+```
+
+从 `activeJob.activeAttempt.handle.agentName` 取出 agent 名称，再读 Herdr：
+
+```bash
+herdr --session SESSION_NAME agent get AGENT_NAME
+herdr --session SESSION_NAME agent read AGENT_NAME \
+  --source recent-unwrapped --lines 40
+```
+
+Pi 底部显示实际 `(provider) model • thinking`。配置文件只能表达意图；运行时 footer 和真实探测才证明实际选择。
+
+查看完成条件：已确认 `activeJob.state`、`revision`、attempt ID/phase、实际 provider/model，以及当前是在工作、等待还是 blocked。
+
+### 4. 切换到连续 `run`
+
+手动完成一次端到端 canary 后，再启动：
+
+```bash
+node dist/src/cli.js run \
+  --config /ABSOLUTE/PATH/harness.config.json \
+  --poll-ms 15000
+```
+
+可用 `--max-cycles N` 做有界试跑。不设置时它是前台常驻进程；仓库不会自行安装 daemon。
+
+`run` 与 `tick` 使用同一个状态机。PR merge 被 GitHub 确认并归档后，下一轮才会领取下一个符合条件的 Issue。Blocked job 会占住唯一 active slot，`run` 不能跳过 Analyst hold 或人工审批。
+
+配置在 `run` 启动时只读取一次。修改 provider、model、thinking、路径或验证命令后，停止旧 `run` 并重新启动。
+
+### 5. 恢复 blocked job
+
+所有恢复都从精确状态开始：
+
+```bash
+node dist/src/cli.js status --config /ABSOLUTE/PATH/harness.config.json
+```
+
+记录：
+
+- `activeJob.revision`
+- `activeJob.state`
+- `activeJob.incident.id`、class 和 lane
+- `activeJob.analysis.id`、action、summary
+- `activeJob.activeAttempt.id`、lane、phase
+- `activeJob.headSha`
+
+#### 新 block
+
+当 `state=blocked` 且 `analysis=null` 时，只执行一次 `tick`。Analyst 会收到有界证据包并记录建议。
+
+- `action=hold`：停止。不能批准 `hold`。
+- `action=retry_fresh_worker` 或 `retry_fresh_reviewer`：把证据和建议交给人类；只有人类明确同意后才能执行 `approve`。
+
+```bash
+node dist/src/cli.js approve \
+  --config /ABSOLUTE/PATH/harness.config.json \
+  --revision REVISION \
+  --incident INCIDENT_ID \
+  --analysis ANALYSIS_ID \
+  --actor OPERATOR \
+  --reason "Evidence checked; approve one bounded fresh retry"
+```
+
+Approval 受 compare-and-swap 保护。随后继续单独 `tick`，直到 `recovery_applied`，再依次创建并派发 fresh attempt。Harness 会关闭旧 pane，绝不恢复旧 agent。
+
+#### Provider 502、节点满载或 Analyst 运行时已修复
+
+仅当 incident 精确对应以下可重评情况时使用 `reassess`：
+
+- Worker/Reviewer `infrastructure_exhausted` 且没有 durable result；或
+- Controller 自己记录的 Analyst 执行失败。
+
+顺序：
+
+1. 停止连续 `run`；
+2. 修改故障角色的 provider/model，或修复 Analyst 可执行文件；
+3. 使用新配置完成一次有界、无 session 探测；
+4. 如果旧故障尚未入账，执行 `tick` 使其成为 blocked incident；
+5. 如果 Analyst 已基于旧运行时返回 `hold`，执行精确 `reassess`；
+6. 再执行一次 `tick` 获取新 Analyst 判断；
+7. 若新建议是 lane 匹配的 fresh retry，获得人类明确批准后执行 `approve`；
+8. 继续 `tick` 到 fresh attempt 已派发，或重新启动 `run`；
+9. 用 Herdr footer 核对新 agent 的实际 provider/model/thinking。
+
+```bash
+node dist/src/cli.js reassess \
+  --config /ABSOLUTE/PATH/harness.config.json \
+  --revision REVISION \
+  --incident HELD_INCIDENT_ID \
+  --analysis HELD_ANALYSIS_ID \
+  --actor OPERATOR \
+  --reason "Affected runtime changed and a bounded probe passed"
+```
+
+`reassess` 只请求新判断，不授予 retry 权限。如果新 Analyst 仍返回 `hold`，停止。
+
+Fresh Worker 不会丢掉已提交改动：它继续使用同一任务 worktree，并从账本记录的 base/reviewed HEAD 接收有界恢复或 rework brief。未提交、未形成 durable result 的 agent 内部状态不被信任。
+
+完整性违规、任务身份过期、HEAD 漂移、禁止动作和未知证据不能靠改配置或重复命令转成 retry。
+
+### 6. Agent 交付或交接
+
+只有以下事实可以支撑“任务完成”：
+
+- Worker durable result 已通过 Git provenance 验证；
+- Reviewer 对精确 HEAD 返回 `pass`；
+- PR 已发布；
+- GitHub required checks 和 merge 已真实完成；
+- Harness 已观察到 merge，并把 job `archived`。
+
+如果只完成了恢复，报告 fresh attempt ID、lane、phase 和实际 provider/model；不要称 Issue 已完成。
+
+交接至少报告：job ID、revision/state、Issue、attempt ID、HEAD、PR、已运行验证、失败/跳过项，以及下一条允许执行的命令。
+
+## 系统如何运行
+
+### 事实源
+
+| 系统 | 负责的事实 |
+| --- | --- |
+| GitHub | Issue 状态、依赖、队列标签、PR、required checks 和 merge |
+| Harness ledger | active job、revision、attempt、incident、Analyst 建议、人工审批和 effect receipt |
+| Git | 固定 base、实现 HEAD、提交 provenance 和 clean-tree |
+| Herdr / Pi | worktree、pane 和 agent 运行时；只提供执行与可观察性 |
+
+任何一层都不能替代另一层。尤其是 Herdr `idle/done`、Pi 最终回复或终端截图只能说明运行状态，不能替代 durable result、Git 验证、Reviewer 结论或 GitHub merge。
+
+### 正常状态机
 
 ```text
 GitHub ready issue
-  -> 持久 claim
-  -> 与任务绑定的 Codex Analyst
-  -> Herdr worktree
+  -> durable selection and claim
+  -> task-bound Codex Analyst session
+  -> isolated Herdr worktree
   -> fresh Pi Worker
-  -> fresh 独立 Pi Reviewer
-  -> Pull Request
-  -> 可选 GitHub 原生 auto-merge
-  -> 观察到 merge 后归档
+  -> durable result + Git verification
+  -> fresh independent Pi Reviewer
+      -> pass: publish PR
+      -> changes: fresh Worker -> fresh Reviewer
+  -> optional GitHub native auto-merge
+  -> observe merge
+  -> archive and release the slot
 ```
 
 无法安全继续时：
 
 ```text
 blocked incident
-  -> 有界、不可信证据
-  -> Analyst 建议
-  -> 允许重试时的精确人工审批
-  -> 关闭旧 pane
-  -> fresh Worker 或 Reviewer attempt
+  -> bounded untrusted evidence
+  -> Analyst advice
+      -> hold: stop
+      -> fresh retry recommendation
+  -> exact human approval
+  -> close old pane
+  -> fresh Worker or Reviewer attempt
 ```
 
-## 当前能力快照
+每次 `tick` 至多完成一次持久迁移，所以进程重启后从账本继续，不会重放整个编排脚本。
 
-| 能力 | 当前行为 | 解决的问题 |
-| --- | --- | --- |
-| 独立运行时选择 | Worker 与 Reviewer 分别固定 `provider`、`model` 和 `thinking`；修改只作用于未来 fresh attempt | 单一 provider 过载时可只切换受影响角色 |
-| 强制 Reviewer 边界 | Reviewer 读取 exact-HEAD 只读快照；Standards/Spec 各由一个只读子代理检查；验证只在一次性可写副本运行 | Reviewer 无需获得产品 worktree 的通用写入或 shell 权限 |
-| 身份绑定结果 | 验证命令、review HEAD、attempt 和结果路径预先绑定；结果原子写入且不可覆盖 | agent 结束、终端输出或错误 attempt 的文件不能冒充验收结果 |
-| 受审计恢复 | 可重试的运行时故障必须经过 provider 探测、Analyst 判断、CAS 人工审批，再创建 fresh agent | 不恢复旧会话，也不把重复执行命令当成恢复授权 |
-| 安全 auto-merge | PR 绑定已审 HEAD 请求 GitHub 原生 auto-merge；HEAD 漂移或发布恢复会先取消 auto-merge | CI、required checks 和最终 merge 权限仍由 GitHub 控制 |
-| 可观察连续运行 | `tick` 每次推进一个持久迁移；`run` 复用同一状态机，merge 归档后才领取下一个 Issue | 后台自动推进仍保留单写者、blocked slot 和人工门禁 |
+### 角色与信息边界
 
-## Harness 保证什么
+| 角色 | 什么时候运行 | 拥有什么信息 | 权限与完成条件 |
+| --- | --- | --- | --- |
+| Worker | 首次实现、Reviewer actionable findings 后的 rework、获批的 Worker 恢复 | 不可变 Issue snapshot、task digest、base/branch、可选的有界 rework/recovery brief、result path | 可修改任务 worktree、测试和提交；不能 push/建 PR。只有身份绑定 durable result 与 Git 验证同时通过才完成 |
+| Reviewer | 每次 Worker HEAD 被接受后 | Issue 目标、固定 base、精确 HEAD、Harness 生成的 Git evidence、固定验证 argv | 顶层无通用 shell/edit/write；独立检查 Standards 和 Spec，在验证副本运行命令，通过 `review_submit` 返回 `pass/changes/blocked` |
+| Analyst | claim 后建立任务绑定 session；正常主链不介入，只有 blocked 时执行判断 turn | 任务 snapshot、incident、账本/Git/最近 review 等有界证据；最多请求 `maxAnalystTurns` 轮白名单只读证据 | 只能建议 `hold` 或 policy 允许的 fresh retry；不能写状态、改 Git、操作 Herdr 或批准自己 |
+| 人类 | provider/运行时变更、风险接受和恢复授权时 | 精确 revision、incident、analysis 与证据 | 唯一可签发 retry approval；审批后 Controller 仍会重新检查 policy、身份和 Git |
 
-- 每次 `tick` 至多完成一次持久状态迁移。
-- Worker 只有写出 durable result 且 Git provenance 验证通过才算完成。
-- Reviewer 只有绑定精确实现 HEAD，并通过允许产物范围内的 clean-tree 检查才可 `pass`。
-- Rework 总是启动 fresh Worker，再启动 fresh Reviewer，最多执行 `maxReviewRounds` 轮。
-- Analyst 只能建议，不能授权。重试必须有绑定当前 revision、incident、analysis 的精确人工审批。
-- 基础设施不确定、身份过期、证据缺失、HEAD 漂移和完整性违规全部 fail closed。
-- Provider 修改只对未来 fresh attempt 生效；不会静默修改或复用正在运行的 agent。
+Worker 与 Reviewer 是两个独立的顶层 Pi agent。Reviewer 不在旧 Worker 会话中继续运行。
 
-## 环境要求
+### Review、Rework 与 Reviewer 隔离
 
-- Node.js `>=22.16.0`
-- Git 和已对目标仓库授权的 GitHub CLI（`gh`）
-- 一个正在运行的 Herdr 命名 session
-- 已配置目标 provider/model 凭据的 Pi
-- `pi-subagents`
-- 用于受限持久 Analyst wrapper 的 Codex CLI
+Reviewer 针对精确实现 HEAD 创建只读源码快照。它只能前台启动一次 `subagent`，且必须恰好包含一个 Standards 子代理和一个 Spec 子代理；两个子代理的工具上限都是 `read,grep,find,ls`。失败、缺失或没有实质输出的任一轴都不能得到 `pass` 或 `changes`。
 
-安装依赖并构建：
+`review_validate` 在独立可写副本中执行 attempt 已绑定的固定 argv，使用最小环境和私有 cache/home/temp。源码、验证、状态与结果路径按 canonical path 双向检查不得重叠，包括符号链接别名。`review_submit` 在产品 worktree 外原子发布唯一结果，已有结果不可覆盖。
 
-```bash
-npm ci
-npm run build
-pi install npm:pi-subagents
-pi install /absolute/path/to/HerdrHarness-lite
-```
+这是 Pi 工具级写权限边界，不是恶意测试代码的 OS 沙箱。验证命令本身不可信时，应使用容器或独立 OS 账户。
 
-运行 Harness 前启动或连接命名 Herdr session：
+Reviewer `changes` 必须包含可执行 findings。Harness 将 findings 作为有界 brief 交给 fresh Worker，再启动 fresh Reviewer。超过 `maxReviewRounds`、findings 缺失或证据不完整时 fail closed。
 
-```bash
-herdr session attach herdr-harness
-herdr session list --json
-```
+## 能力与边界
 
-## 配置
+Harness 能够：
 
-复制 [`harness.config.example.json`](./harness.config.example.json)，并把所有路径改为绝对路径。
+- 从一个 GitHub 仓库选择 `readyLabel` 队列中的严格前沿 Issue；
+- 持久 claim，并维护单一 active job；
+- 创建隔离 worktree 和 fresh Worker/Reviewer；
+- 验证 durable result、Git provenance、精确 review HEAD 和 Reviewer 隔离结果；
+- 执行有界 rework 与经人工批准的 fresh recovery；
+- 发布 PR、请求 GitHub 原生 auto-merge、观察 merge，并在归档后领取下一个 Issue；
+- 让 Worker 与 Reviewer 独立选择 provider/model/thinking。
 
-重要字段：
+Harness 不会：
+
+- 把 agent 回复、pane 状态或未提交改动当成完成；
+- 恢复旧 agent 会话，或让 Analyst 自行批准重试；
+- 绕过 GitHub branch protection、required checks 或最终 merge 决策；
+- 跳过占用 active slot 的 blocked job；
+- 并发调度多个 active job；
+- 为恶意验证命令提供完整 OS 隔离。
+
+## 配置参考
+
+以 [`harness.config.example.json`](./harness.config.example.json) 为角色参数的单一事实源，不要从 README 手工重建完整 argv。
 
 | 字段 | 含义 |
 | --- | --- |
 | `repo` | `owner/name` 格式的 GitHub 仓库 |
-| `localPath` | 用于解析和刷新 `baseRef` 的本地 clone |
+| `localPath` | 用于刷新 `baseRef` 的本地 clone |
 | `baseRef` | 目标分支，通常为 `main` |
-| `readyLabel` | GitHub 任务队列标签，例如 `ready-for-agent` |
-| `claimLabel` | 持久 GitHub 领取标记；可配置，不是硬编码 |
-| `stateDir` | 私有 Harness 状态、事件日志和 Analyst receipts |
-| `worktreeRoot` | 隔离的 Herdr 任务 worktree 根目录 |
+| `readyLabel` | GitHub 可执行任务标签，例如 `ready-for-agent` |
+| `claimLabel` | 持久领取标记，例如 `agent:claimed` |
+| `stateDir` | 私有账本、事件、Analyst receipts 和 Reviewer attempt 数据 |
+| `worktreeRoot` | Herdr 任务 worktree 根目录 |
 | `maxReviewRounds` | Reviewer/rework 最大轮数 |
-| `maxAnalystTurns` | Analyst 可请求的有界证据轮数 |
-| `reviewerValidationArgv` | 在一次性可写副本中执行的固定、无 shell 验证 argv |
-| `autoMerge` | 精确 Reviewer pass 后请求 GitHub 原生 auto-merge |
-| `workerArgv` / `reviewerArgv` | 被验证为角色契约的 Pi 原生参数 |
-| `herdr.session` | 必填的 Herdr 命名 session |
-| `analyst` | Codex Analyst wrapper 的命令与参数 |
+| `maxAnalystTurns` | Analyst 可请求的最大证据轮数 |
+| `reviewerValidationArgv` | Harness 直接执行、不经过 shell 拼接的固定验证 argv |
+| `autoMerge` | Reviewer pass 后是否请求 GitHub 原生 auto-merge |
+| `workerArgv` / `reviewerArgv` | 被 Controller 验证的 Pi 角色契约 |
+| `herdr.session` | 必填的命名 Herdr session |
+| `analyst` | task-bound Codex Analyst wrapper 命令与参数 |
 
-Controller 在领取任务前验证角色契约：
+角色契约：
 
-| 角色 | 必需 skills | 工具 | Thinking |
+| 角色 | 必需内容 | 工具 | Thinking |
 | --- | --- | --- | --- |
-| Worker | `implement`、`tdd`、bundled `code-review` | 实现所需读写工具和 `subagent` | `high`、`xhigh` 或 `max` |
-| Reviewer | 仅 bundled `code-review` | `read,grep,find,ls,subagent,review_validate,review_submit` | `max` |
-| Review-axis 子代理 | 不继承 skills | `read,grep,find,ls` | `max` |
+| Worker | `implement`、`tdd`、bundled `code-review` | `read,bash,edit,write,grep,find,ls,subagent` | `high`、`xhigh` 或 `max` |
+| Reviewer | bundled `code-review`、显式 `pi-subagents` 与 `reviewer-tools.js` extensions | `read,grep,find,ls,subagent,review_validate,review_submit` | `max` |
+| Review-axis 子代理 | fresh context，不继承 skills/extensions | `read,grep,find,ls` | `max` |
 
-两个角色都必须包含 `--no-approve --no-skills`。Reviewer 还必须包含 `--no-extensions`，并且只显式加载声明过的 `pi-subagents` 入口和 bundled `reviewer-tools.js`。Harness 会核对 skill/extension 真实身份、Matt Pocock installer provenance、精确工具集合和 bundled review 代码。只有 `--provider`、`--model`、`--no-session` 可以作为可选运行时选择器；session 复用、prompt 注入、环境 extension 和扩大工具权限都会被拒绝。
+Worker 与 Reviewer 都必须包含 `--no-approve --no-skills`；Reviewer 还必须包含 `--no-extensions` 和示例配置声明的两个 extension。Controller 会核对 skill/extension 身份、工具集合和 bundled review 代码。可选运行时选择器仅限 `--provider`、`--model`、`--no-session`。
 
-每个 Reviewer 都从只读 exact-HEAD 源码快照启动。其 `subagent` 只能前台启动一次，且必须恰好包含一个 Standards 子代理和一个 Spec 子代理；子代理运行时工具上限为 `read,grep,find,ls`。管理动作、重复启动、失败、未完成或没有实质输出的任一轴、以及其他 agent profile 都不能产出 `pass` 或 `changes`。`review_validate` 只在独立可写副本中执行 attempt 已绑定的 argv，并使用最小环境及私有 cache/home/temp 路径；源码、验证、状态和结果路径会按真实路径双向检查不得重叠，包括符号链接别名。`review_submit` 在产品 worktree 外原子发布唯一的身份绑定结果，已有结果不可覆盖。这是 Pi 工具级边界，不隔离恶意测试代码；验证命令本身不可信时，应再使用容器或独立 OS 账户。
+### Provider/model 示例
 
-Analyst 的可执行文件也应固定：在 `analyst.argv` 中加入 `"--codex-bin", "/absolute/path/to/codex"`。不要依赖交互式 shell 的 `PATH`；service 或 SSH 启动的 tick 可能拥有不同环境。
+在示例配置的完整 `workerArgv` 中加入或替换以下 selector，同时保留其余必需参数：
 
-### Provider 与 model 的显式选择
-
-Provider/model 应写入对应角色的 Pi 原生 argv，Worker 与 Reviewer 可以独立选择。下面把未来 Worker attempt 固定到已登录 ChatGPT 订阅的 OpenAI Codex Luna Max，同时把未来 Reviewer attempt 固定到 Baizhi Chat 的 DeepSeek V4 Flash：
-
-```json
-{
-  "workerArgv": [
-    "--provider",
-    "openai-codex",
-    "--model",
-    "gpt-5.6-luna",
-    "--no-approve",
-    "--no-skills",
-    "--skill",
-    "/absolute/path/to/.agents/skills/implement",
-    "--skill",
-    "/absolute/path/to/.agents/skills/tdd",
-    "--skill",
-    "/absolute/path/to/HerdrHarness-lite/pi/skills/code-review",
-    "--tools",
-    "read,bash,edit,write,grep,find,ls,subagent",
-    "--thinking",
-    "max"
-  ],
-  "reviewerArgv": [
-    "--no-approve",
-    "--no-skills",
-    "--no-extensions",
-    "--extension",
-    "/absolute/path/to/.pi/agent/npm/node_modules/pi-subagents/index.ts",
-    "--extension",
-    "/absolute/path/to/HerdrHarness-lite/pi/extensions/reviewer-tools.js",
-    "--provider",
-    "baizhi-chat",
-    "--model",
-    "deepseek-v4-flash",
-    "--skill",
-    "/absolute/path/to/HerdrHarness-lite/pi/skills/code-review",
-    "--tools",
-    "read,grep,find,ls,subagent,review_validate,review_submit",
-    "--thinking",
-    "max"
-  ]
-}
+```text
+"--provider", "openai-codex",
+"--model", "gpt-5.6-luna",
+"--thinking", "max"
 ```
 
-两组只是独立示例，不要求配对使用。`openai-codex` 需要 Pi 中有效的 ChatGPT/OpenAI Codex 登录；其他 provider 使用各自凭据。先确认 model 存在于 Pi 当前目录：
+在完整 `reviewerArgv` 中加入或替换：
+
+```text
+"--provider", "baizhi-chat",
+"--model", "deepseek-v4-flash",
+"--thinking", "max"
+```
+
+两者独立，不要求配对。先确认 model，再进行故障恢复：
 
 ```bash
 pi --list-models openai-codex
 pi --list-models baizhi-chat
 ```
 
-Provider 故障恢复前，使用故障角色的新配置执行一次有界、无 session 探测。例如 Worker Luna Max：
+有界 Worker 探测示例：
 
 ```bash
 pi --no-session --no-approve --no-skills \
@@ -174,183 +354,48 @@ pi --no-session --no-approve --no-skills \
   -p "Read package.json and print only its name."
 ```
 
-Reviewer DeepSeek V4 Flash：
+Reviewer 探测同理，替换为其 provider/model。`-p` 和探测文本只用于命令行探测，不得写入角色 argv。
 
-```bash
-pi --no-session --no-approve --no-skills \
-  --provider baizhi-chat \
-  --model deepseek-v4-flash \
-  --thinking max \
-  --tools read \
-  -p "Read package.json and print only its name."
+Analyst 应在 `analyst.argv` 中固定：
+
+```json
+"--codex-bin", "/absolute/path/to/codex"
 ```
 
-不要把 `-p` 或探测文本写进 `workerArgv` / `reviewerArgv`，Harness 会拒绝。修改配置不会改变正在运行的 attempt。每次单独执行 `tick` 都会重新读取配置，但连续 `run` 进程只保留自身启动时加载的配置。修改 provider 后，必须先停止并重新启动 `run`，再让 Controller 创建受影响角色的 fresh attempt。
+service、SSH 和交互 shell 的 `PATH` 可能不同，因此二进制和 skill/extension 路径优先使用绝对路径。
 
-要核对运行中的 Pi 实际选择了什么，从 `status` 读取 `activeJob.activeAttempt.handle.agentName`，再查看 Herdr 最近输出：
-
-```bash
-node dist/src/cli.js status --config /absolute/harness.config.json
-herdr --session herdr-harness agent get AGENT_NAME
-herdr --session herdr-harness agent read AGENT_NAME \
-  --source recent-unwrapped --lines 40
-```
-
-Pi 底部会显示实际 `(provider) model • thinking`。运行时显示和真实探测才是证据；配置文件本身不能证明 provider 当前健康。
-
-## GitHub 准备
+## GitHub 队列与 Auto-merge
 
 Harness 只选择同时满足以下条件的 Issue：
 
-- 状态为 `OPEN`；
-- 带有配置的 `readyLabel`；
+- `OPEN`；
+- 带配置的 `readyLabel`；
 - 没有 assignee；
-- 不存在 OPEN blocker；
-- 没有出现在 Harness 持久 ledger 中。
+- 没有 OPEN blocker；
+- 不在持久 ledger 的已处理集合中。
 
-包含原生 sub-issues 的父 Issue 是 Map 容器，不会被领取；第一个 OPEN 且可执行的子任务是严格前沿。任务队列可以直接使用 `ready-for-agent`，不需要专门的 `herdr-lite:ready`。`claimLabel` 只是让人和自动化看到 Harness 已领取该任务。
+带原生 sub-issues 的父 Issue 是 Map 容器，不会被领取；第一个 OPEN 且可执行的子任务是严格前沿。任务标签可以直接使用 `ready-for-agent`，不需要专用 `herdr-lite:ready`。`claimLabel` 只用于让人和自动化看到 Harness 已领取任务。
 
-首次运行前检查身份和仓库：
-
-```bash
-gh auth status
-gh repo view owner/repository
-```
-
-如果启用 `autoMerge`，GitHub 必须允许 auto-merge，目标分支 ruleset 也必须配置预期 required checks。Harness 不会替代 branch protection。
-
-## 命令
-
-```bash
-node dist/src/cli.js status --config /absolute/harness.config.json
-node dist/src/cli.js tick --config /absolute/harness.config.json
-node dist/src/cli.js run --config /absolute/harness.config.json \
-  --poll-ms 15000
-```
-
-### 手动 `tick` 模式
-
-重复执行同一个 `tick`。每次成功调用推进一个持久阶段，例如确认 claim、创建 worktree、准备 attempt、创建 pane、启动 agent、验收结果、发布 PR、观察 merge 或归档。
-
-Dispatch 阶段的 `tick` 会故意调用 Herdr `agent prompt --wait`，因此可能在整个 Worker 或 Reviewer 运行期间一直不返回。这段时间没有输出不代表 prompt 丢失。需要时查看该 Harness 自有 agent；不要仅因为命令还在等待就再执行一个 `tick`。命令返回后，再用下一次 `tick` 消费和验证 durable result。
-
-### 连续 `run` 模式
-
-`run` 使用同一个 Controller 循环，并在每轮之间等待：
-
-```bash
-node dist/src/cli.js run \
-  --config /absolute/harness.config.json \
-  --poll-ms 15000
-```
-
-手动试跑可增加 `--max-cycles N`。不设置时，`run` 是前台常驻进程；用 `Ctrl-C` 或外部服务管理器停止。仓库本身不会安装 daemon。配置只在该进程启动时读取一次，所以修改角色的 provider、model 或 thinking 后必须重启 `run`。
-
-经过审查的 PR merge 并归档后，下一轮可以领取下一个符合条件的 Issue。Blocked job 会占住唯一 active slot，不能被跳过。`run` 可以继续轮询，但不能绕过 Analyst hold 或人工审批门。
-
-## 正常 Review 与 Rework
-
-1. Fresh Worker 在固定 base 上实现并提交。
-2. Fresh Reviewer 针对精确 HEAD 独立检查 Standards 和 Spec。
-3. `pass` 进入发布。
-4. `changes` 且包含可执行 findings 时，启动 fresh Worker 接收有界 findings brief，随后再启动 fresh Reviewer。
-5. 用完 `maxReviewRounds`、缺少 findings、证据不完整或 review 不确定时，生成 blocked incident。
-
-Worker 与 Reviewer 是两个独立的顶层 Pi agent。Review 不会在旧 Worker 会话里继续运行。
-
-## 故障恢复
-
-所有恢复都先读取持久状态：
-
-```bash
-node dist/src/cli.js status --config /absolute/harness.config.json
-```
-
-记录以下精确字段：
-
-- `activeJob.revision`
-- `activeJob.state`
-- `activeJob.incident.id` 及 class/lane
-- `activeJob.analysis.id` 及 action
-- `activeJob.activeAttempt`
-- `activeJob.headSha`
-
-### 1. 让 Analyst 诊断新 block
-
-当 job 为 `blocked` 且 `analysis` 为 `null`，执行一次 `tick`，Harness 会构造有界证据包并记录 Analyst 建议：
-
-```bash
-node dist/src/cli.js tick --config /absolute/harness.config.json
-```
-
-Analyst 可以请求白名单只读证据、建议一个 policy 允许的 retry，或返回 `hold`。它不能写 Controller 状态、改 Git、操作 Herdr，也不能批准自己的建议。
-
-### 2. 批准允许的重试
-
-只有当前 analysis action 是 `retry_fresh_worker` 或 `retry_fresh_reviewer`，并且人接受证据时才能批准：
-
-```bash
-node dist/src/cli.js approve \
-  --config /absolute/harness.config.json \
-  --revision 23 \
-  --incident incident-id \
-  --analysis analysis-id \
-  --actor operator-name \
-  --reason "已核对证据，批准一次有界 fresh retry"
-```
-
-该命令受 compare-and-swap 保护。revision、incident、analysis 任一变化都会拒绝。Approval 只记录权限；后续 Controller tick 会重新检查 policy 与 Git，关闭旧 pane，再创建 fresh attempt，绝不恢复旧 agent。
-
-### 3. 重新评估已修正的运行时故障
-
-`hold` 不能直接批准。只有精确绑定可重试 Worker/Reviewer attempt，并且满足以下任一条件时才能重评：（a）`infrastructure_exhausted` 且没有 durable result；（b）Controller 自己记录了 Analyst 执行失败并 fail closed。两种情况都要求运行环境确实发生变化：
-
-1. 如果存在连续 `run` 进程，先停止它；
-2. 修复或切换故障角色的 provider/model，或修正 Analyst 可执行文件/运行时；
-3. 执行有界、无 session provider 探测；
-4. 用 `reassess` 请求新的 Analyst 判断。
-
-```bash
-node dist/src/cli.js reassess \
-  --config /absolute/harness.config.json \
-  --revision 21 \
-  --incident held-incident-id \
-  --analysis held-analysis-id \
-  --actor operator-name \
-  --reason "故障运行时已修正，且有界探测通过"
-```
-
-`reassess` 会把旧 revision/incident/analysis、actor 和有界 reason 保留在审计记录中，把 operator statement 标为不可信证据，创建拥有全新 receipt key 的 successor incident，并清空旧 analysis。它本身不授予 retry 权限、不关闭或启动 agent，也不接触 Git。
-
-接着单独执行一次 `tick` 获取新的 Analyst 判断。如果仍为 `hold`，就停止；如果建议与 lane 匹配的 `retry_fresh_worker` 或 `retry_fresh_reviewer`，必须对新的 revision/incident/analysis 再执行一次精确 `approve`。之后继续手动 tick，或者启动一个新的 `run` 进程；两种方式都会加载修改后的 provider 配置。
-
-### 4. 必须保持停止的故障
-
-完整性违规、任务身份过期、任务绑定 Analyst 启动失败、禁止动作、HEAD 漂移和未知证据，不能通过修改 JSON 或重复命令变成重试权限。Controller 记录的 Analyst turn 执行失败只能通过上面的受审计重评路径请求一次新分析，仍然不能授予 retry 权限。其他情况必须保持 hold，直到通过明确受支持的路径修正底层事实。
-
-绝不要手工编辑 `state.json` 或 result JSON。Snapshot、CAS revision、effect receipts、result identity 与 Git 检查共同构成一条信任边界。
-
-## Auto-merge 与下一个 Issue
-
-设置 `autoMerge: true` 后，发布阶段请求：
+启用 `autoMerge` 时，Harness 为已审 HEAD 请求：
 
 ```text
 gh pr merge --auto --match-head-commit <reviewed-sha> --merge
 ```
 
-Required checks 和最终 merge 仍由 GitHub 决定。Harness 持续观察 PR；一旦 HEAD 漂移，会先禁用 auto-merge，再 fail closed。只有 GitHub 报告已 merge 才归档。连续 `run` 随后可以选择下一个符合条件的 Issue。
+GitHub 必须允许 auto-merge，目标分支 ruleset 必须配置 required checks。PR HEAD 漂移或发布恢复时，Harness 会先取消 auto-merge 再 fail closed。只有 GitHub 报告 merged 后才归档。
 
 ## 状态与审计数据
 
 `stateDir` 保存：
 
 - 单一 active job snapshot 与 terminal job 摘要；
-- compare-and-swap revision 状态；
-- append-only 保存事件；
-- Codex Analyst effect receipts 与 session 身份。
-- 每次 Reviewer attempt 的源码快照、验证副本、定点证据、descriptor 和外部结果。
+- compare-and-swap revision 和 append-only 保存事件；
+- incident、Analyst effect receipts、session identity、approval 与 reassessment；
+- 每次 Reviewer attempt 的只读源码快照、验证副本、fixed-point evidence、descriptor 和外部 result。
 
-Reassessment 审计记录在 terminal archive 后仍然保留。Analyst 从自己的私有 state 目录运行，只接收有界、不可信的 task/evidence 数据包。无法关闭精确记录的 Analyst session 时，终态 job 会保留而不会静默归档。
+Reassessment 记录在 terminal archive 后仍保留。无法关闭精确绑定的 Analyst session 时，终态 job 不会静默归档。
+
+绝不要手工编辑 `state.json` 或 result JSON。
 
 ## 开发与验证
 
@@ -360,15 +405,15 @@ npm test
 npm run verify
 ```
 
-默认测试使用 fake GitHub、Git、Herdr 和 Analyst 端口。真实 canary 还验证过命名 Herdr session、fresh Pi Worker/Reviewer、持久 Codex Analyst receipts、精确 SHA review、PR 发布、原生 auto-merge 观察和 terminal archive。这些是历史证据，不代表 provider 或 GitHub 设置当前仍然健康；恢复前必须重新核对 live runtime。
+默认测试使用 fake GitHub、Git、Herdr 和 Analyst ports。真实 canary 的历史成功不证明 provider、凭据或 GitHub ruleset 当前健康；运行和恢复都必须重新核对 live evidence。
 
-实现有意保持精简：
+实现入口：
 
 ```text
 src/model.ts       领域记录与不变量
 src/controller.ts  单写者状态机
 src/policy.ts      incident policy 与结果验证
-src/recovery.ts    精确 approval/reassessment gates
+src/recovery.ts    approval 与 reassessment gates
 src/prompts.ts     Worker/Reviewer 契约
 src/ports.ts       外部边界
 src/cli.ts         tick/run/status/approve/reassess
