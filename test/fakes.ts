@@ -1,8 +1,10 @@
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { digest, type AnalystSession, type AnalystTurn, type AttemptResult, type EvidenceItem, type EvidenceRequest, type HarnessState, type IssueSnapshot, type Job, type PullRequestRef, type SelectedTask } from "../src/model.js";
 import type { AnalystPort, Clock, EvidencePort, GitHubPort, GitPort, HerdrPort, IdGenerator, StateStore } from "../src/ports.js";
 
 export const validCodeReviewSkillPath = resolve("pi/skills/code-review");
+export const validPiSubagentsExtensionPath = resolve("test/fixtures/pi-subagents/index.js");
+export const validReviewerToolsExtensionPath = resolve("pi/extensions/reviewer-tools.js");
 export const validImplementSkillPath = resolve("test/fixtures/pi-skills/skills/implement");
 export const validTddSkillPath = resolve("test/fixtures/pi-skills/skills/tdd");
 export const substituteCodeReviewSkillPath = resolve("test/fixtures/substitute-review/other/SKILL.md");
@@ -21,8 +23,11 @@ export const validWorkerArgv = [
 export const validReviewerArgv = [
   "--no-approve",
   "--no-skills",
+  "--no-extensions",
+  "--extension", validPiSubagentsExtensionPath,
+  "--extension", validReviewerToolsExtensionPath,
   "--skill", validCodeReviewSkillPath,
-  "--tools", "read,bash,grep,find,ls,subagent",
+  "--tools", "read,grep,find,ls,subagent,review_validate,review_submit",
   "--thinking", "max",
 ];
 
@@ -116,6 +121,14 @@ export class FakeGit implements GitPort {
     return this.workerFailure ? { ok: false, ...this.workerFailure } : { ok: true, headSha: input.reportedHeadSha };
   }
 
+  async prepareReviewer(input: { rootPath: string }): Promise<{ reviewPath: string; descriptorPath: string; evidencePath: string }> {
+    return {
+      reviewPath: join(input.rootPath, "source"),
+      descriptorPath: join(input.rootPath, "descriptor.json"),
+      evidencePath: join(input.rootPath, "review-evidence.txt"),
+    };
+  }
+
   async verifyReviewer(): Promise<{ ok: true } | { ok: false; class: "integrity_violation"; reason: string }> {
     return this.reviewerFailure
       ? { ok: false, class: "integrity_violation", reason: this.reviewerFailure }
@@ -129,7 +142,7 @@ type Outcome = (
 ) & { agentStatus?: "idle" | "done" | "blocked" | "unknown" };
 
 export class FakeHerdr implements HerdrPort {
-  prepared: Array<{ attemptId: string; lane: string; handle: { agentName: string; paneId: string; tabId: string; workspaceId: string } }> = [];
+  prepared: Array<{ attemptId: string; lane: string; cwd: string; env: Record<string, string>; handle: { agentName: string; paneId: string; tabId: string; workspaceId: string } }> = [];
   started: string[] = [];
   prompts: Array<{ dispatchId: string; skill: "implement" | "code-review"; text: string }> = [];
   closed: string[] = [];
@@ -143,14 +156,14 @@ export class FakeHerdr implements HerdrPort {
     return { workspaceId: "ws-1", path: input.path, branch: input.branch };
   }
 
-  async createAttemptPane(input: { worktree: { workspaceId: string }; attempt: { id: string; lane: "worker" | "reviewer" } }): Promise<{ agentName: string; paneId: string; tabId: string; workspaceId: string }> {
+  async createAttemptPane(input: { worktree: { workspaceId: string; path: string }; attempt: { id: string; lane: "worker" | "reviewer" }; cwd?: string; env?: Record<string, string> }): Promise<{ agentName: string; paneId: string; tabId: string; workspaceId: string }> {
     const handle = {
       agentName: `agent-${input.attempt.id}`,
       paneId: `pane-${input.attempt.id}`,
       tabId: `tab-${input.attempt.id}`,
       workspaceId: input.worktree.workspaceId,
     };
-    this.prepared.push({ attemptId: input.attempt.id, lane: input.attempt.lane, handle });
+    this.prepared.push({ attemptId: input.attempt.id, lane: input.attempt.lane, cwd: input.cwd ?? input.worktree.path, env: input.env ?? {}, handle });
     return handle;
   }
 

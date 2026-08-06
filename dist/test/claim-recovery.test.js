@@ -5,12 +5,14 @@ import { FakeAnalyst, FakeClock, FakeEvidence, FakeGit, FakeGitHub, FakeHerdr, M
 const config = {
     repo: "owner/repo",
     localPath: "/repo",
+    stateDir: "/state",
     baseRef: "main",
     readyLabel: "ready-for-agent",
     claimLabel: "agent:claimed",
     worktreeRoot: "/worktrees",
     maxReviewRounds: 3,
     maxAnalystTurns: 3,
+    reviewerValidationArgv: ["npm", "run", "verify"],
     workerArgv: validWorkerArgv,
     reviewerArgv: validReviewerArgv,
 };

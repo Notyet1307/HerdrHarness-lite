@@ -1,4 +1,5 @@
-import { relative } from "node:path";
+import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { GitPort, ReviewerVerification, WorkerVerification } from "../ports.js";
 import { type CommandRunner, requireSuccess, SyncCommandRunner } from "./command.js";
 
@@ -52,6 +53,84 @@ export class GitCli implements GitPort {
     return { ok: true, headSha: head };
   }
 
+  async prepareReviewer(input: {
+    worktree: { path: string; branch: string; workspaceId: string };
+    rootPath: string;
+    resultPath: string;
+    jobId: string;
+    attemptId: string;
+    baseSha: string;
+    expectedHeadSha: string;
+    validationArgv: string[];
+  }): Promise<{ reviewPath: string; descriptorPath: string; evidencePath: string }> {
+    const rootPath = resolve(input.rootPath);
+    if (isWithin(input.worktree.path, rootPath)) throw new Error("Reviewer state must be outside the product worktree");
+    if (resolve(input.resultPath) !== join(rootPath, "result.json")) throw new Error("Reviewer result path escaped its attempt root");
+
+    const reviewPath = join(rootPath, "source");
+    const validationPath = join(rootPath, "validation");
+    const scratchPath = join(rootPath, "scratch");
+    const descriptorPath = join(rootPath, "descriptor.json");
+    const evidencePath = join(rootPath, "review-evidence.txt");
+    const descriptor = {
+      version: 1,
+      jobId: input.jobId,
+      attemptId: input.attemptId,
+      reviewedHeadSha: input.expectedHeadSha,
+      validationArgv: input.validationArgv,
+      validationPath,
+      scratchPath,
+      resultPath: resolve(input.resultPath),
+    };
+
+    if (existsSync(descriptorPath)) {
+      const existing = JSON.parse(readFileSync(descriptorPath, "utf8")) as unknown;
+      if (JSON.stringify(existing) !== JSON.stringify(descriptor)) throw new Error("Reviewer descriptor identity changed after preparation");
+      for (const path of [reviewPath, validationPath, scratchPath, evidencePath]) {
+        if (!existsSync(path)) throw new Error(`Reviewer workspace is incomplete: ${path}`);
+      }
+      return { reviewPath, descriptorPath, evidencePath };
+    }
+
+    const head = this.git(input.worktree.path, ["rev-parse", "HEAD"]).trim();
+    if (head !== input.expectedHeadSha) throw new Error(`Reviewer source HEAD ${head} != ${input.expectedHeadSha}`);
+    const ancestry = this.runner.run("git", ["-C", input.worktree.path, "merge-base", "--is-ancestor", input.baseSha, head]);
+    if (!ancestry.ok) throw new Error(`Reviewer base ${input.baseSha} is not an ancestor of ${head}`);
+    const dirty = this.git(input.worktree.path, ["status", "--porcelain", "--untracked-files=no"]);
+    if (dirty.trim()) throw new Error(`Reviewer source has tracked changes:\n${dirty.trim()}`);
+    const diff = this.git(input.worktree.path, ["diff", "--no-ext-diff", "--find-renames", `${input.baseSha}...${head}`]);
+    if (!diff.trim()) throw new Error("Reviewer fixed-point diff is empty");
+    const commits = this.git(input.worktree.path, ["log", "--oneline", `${input.baseSha}..${head}`]);
+
+    if (existsSync(rootPath)) makeWritable(rootPath);
+    rmSync(rootPath, { recursive: true, force: true });
+    mkdirSync(reviewPath, { recursive: true, mode: 0o700 });
+    chmodSync(rootPath, 0o700);
+    requireSuccess(
+      this.runner.run("git", ["-C", input.worktree.path, "checkout-index", "--all", "--force", `--prefix=${reviewPath}${sep}`]),
+      "git export Reviewer source",
+    );
+    cpSync(reviewPath, validationPath, { recursive: true });
+    for (const path of [join(scratchPath, "home"), join(scratchPath, "tmp"), join(scratchPath, "cache"), join(scratchPath, "pycache")]) {
+      mkdirSync(path, { recursive: true });
+    }
+    writeFileSync(evidencePath, [
+      `Base SHA: ${input.baseSha}`,
+      `Head SHA: ${head}`,
+      "Ancestry: verified",
+      "Tracked source state: clean",
+      "",
+      "Commits:",
+      commits.trim(),
+      "",
+      "Diff:",
+      diff,
+    ].join("\n"), { mode: 0o400 });
+    makeReadOnly(reviewPath);
+    writeFileSync(descriptorPath, `${JSON.stringify(descriptor, null, 2)}\n`, { flag: "wx", mode: 0o400 });
+    return { reviewPath, descriptorPath, evidencePath };
+  }
+
   async verifyReviewer(input: {
     worktree: { path: string; branch: string; workspaceId: string };
     expectedHeadSha: string;
@@ -83,5 +162,28 @@ export class GitCli implements GitPort {
 
   private git(path: string, args: string[]): string {
     return requireSuccess(this.runner.run("git", ["-C", path, ...args]), `git ${args[0] ?? "command"}`);
+  }
+}
+
+function isWithin(parent: string, child: string): boolean {
+  const path = relative(resolve(parent), resolve(child));
+  return path === "" || (!path.startsWith(`..${sep}`) && path !== ".." && !isAbsolute(path));
+}
+
+function makeReadOnly(path: string): void {
+  const stat = lstatSync(path);
+  if (stat.isSymbolicLink()) return;
+  if (stat.isDirectory()) {
+    for (const entry of readdirSync(path)) makeReadOnly(join(path, entry));
+  }
+  chmodSync(path, stat.mode & ~0o222);
+}
+
+function makeWritable(path: string): void {
+  const stat = lstatSync(path);
+  if (stat.isSymbolicLink()) return;
+  chmodSync(path, stat.mode | 0o200);
+  if (stat.isDirectory()) {
+    for (const entry of readdirSync(path)) makeWritable(join(path, entry));
   }
 }

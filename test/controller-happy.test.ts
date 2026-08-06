@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { Buffer } from "node:buffer";
 import { HarnessController } from "../src/controller.js";
 import type { HarnessConfig } from "../src/ports.js";
 import {
@@ -23,12 +24,14 @@ import {
 const config: HarnessConfig = {
   repo: "owner/repo",
   localPath: "/repo",
+  stateDir: "/state",
   baseRef: "main",
   readyLabel: "ready-for-agent",
   claimLabel: "agent:claimed",
   worktreeRoot: "/worktrees",
   maxReviewRounds: 3,
   maxAnalystTurns: 3,
+  reviewerValidationArgv: ["npm", "run", "verify"],
   workerArgv: validWorkerArgv,
   reviewerArgv: validReviewerArgv,
 };
@@ -103,7 +106,7 @@ test("config rejects incomplete Pi role contracts", () => {
     { ...config, reviewerArgv: [] },
     { ...config, workerArgv: [...validWorkerArgv.slice(0, 2), ...validWorkerArgv.slice(4)] },
     { ...config, workerArgv: validWorkerArgv.map((value) => value === "high" ? "low" : value) },
-    { ...config, reviewerArgv: [...validReviewerArgv, "--no-extensions"] },
+    { ...config, reviewerArgv: validReviewerArgv.filter((value) => value !== "--no-extensions") },
     { ...config, reviewerArgv: [...validReviewerArgv, "--extension", "/tmp/override.js"] },
     { ...config, reviewerArgv: [...validReviewerArgv, "--continue"] },
     {
@@ -119,7 +122,7 @@ test("config rejects incomplete Pi role contracts", () => {
     {
       ...config,
       reviewerArgv: validReviewerArgv.map((value) => (
-        value === "read,bash,grep,find,ls,subagent" ? `${value},write` : value
+        value === "read,grep,find,ls,subagent,review_validate,review_submit" ? `${value},write` : value
       )),
     },
   ]) {
@@ -245,6 +248,19 @@ test("happy path claims, starts Analyst, runs fresh Pi worker/reviewer, publishe
   assert.equal(herdr.prepared.length, 2);
   assert.equal(herdr.prepared[0]?.lane, "worker");
   assert.equal(herdr.prepared[1]?.lane, "reviewer");
+  assert.match(herdr.prepared[1]?.cwd ?? "", /^\/state\/reviewer-attempts\/job-001\/reviewer-/);
+  assert.match(herdr.prepared[1]?.env.HERDR_HARNESS_REVIEW_DESCRIPTOR ?? "", /\/descriptor\.json$/);
+  assert.ok(herdr.prepared[1]?.env.PI_SUBAGENT_CAPABILITY_CEILING_V1);
+  assert.deepEqual(JSON.parse(Buffer.from(
+    herdr.prepared[1]!.env.PI_SUBAGENT_CAPABILITY_CEILING_V1!,
+    "base64url",
+  ).toString("utf8")), {
+    version: 1,
+    allowedTools: ["find", "grep", "ls", "read"],
+    allowedAgents: ["herdr-harness-review-axis"],
+    denyExtensions: true,
+    sources: ["herdr-harness-lite"],
+  });
   assert.ok(herdr.prepared[0]?.attemptId !== herdr.prepared[1]?.attemptId);
   assert.deepEqual(herdr.prompts.map((prompt) => prompt.skill), ["implement", "code-review"]);
   assert.deepEqual(herdr.closed, [

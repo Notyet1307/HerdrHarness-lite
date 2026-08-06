@@ -9,6 +9,11 @@
   "worktreeRoot": "/absolute/path/to/worktrees",
   "maxReviewRounds": 3,
   "maxAnalystTurns": 3,
+  "reviewerValidationArgv": [
+    "npm",
+    "run",
+    "verify"
+  ],
   "workerArgv": [
     "--no-approve",
     "--no-skills",
@@ -26,10 +31,15 @@
   "reviewerArgv": [
     "--no-approve",
     "--no-skills",
+    "--no-extensions",
+    "--extension",
+    "/absolute/path/to/.pi/agent/npm/node_modules/pi-subagents/index.ts",
+    "--extension",
+    "/absolute/path/to/HerdrHarness-lite/pi/extensions/reviewer-tools.js",
     "--skill",
     "/absolute/path/to/HerdrHarness-lite/pi/skills/code-review",
     "--tools",
-    "read,bash,grep,find,ls,subagent",
+    "read,grep,find,ls,subagent,review_validate,review_submit",
     "--thinking",
     "max"
   ],

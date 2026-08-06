@@ -1,0 +1,12 @@
+{
+  "name": "pi-subagents",
+  "version": "0.0.0-test",
+  "exports": {
+    "./capability-ceiling": "./capability-ceiling.js"
+  },
+  "pi": {
+    "extensions": [
+      "./index.js"
+    ]
+  }
+}

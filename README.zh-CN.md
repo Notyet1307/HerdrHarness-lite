@@ -79,6 +79,7 @@ herdr session list --json
 | `worktreeRoot` | 隔离的 Herdr 任务 worktree 根目录 |
 | `maxReviewRounds` | Reviewer/rework 最大轮数 |
 | `maxAnalystTurns` | Analyst 可请求的有界证据轮数 |
+| `reviewerValidationArgv` | 在一次性可写副本中执行的固定、无 shell 验证 argv |
 | `autoMerge` | 精确 Reviewer pass 后请求 GitHub 原生 auto-merge |
 | `workerArgv` / `reviewerArgv` | 被验证为角色契约的 Pi 原生参数 |
 | `herdr.session` | 必填的 Herdr 命名 session |
@@ -89,10 +90,12 @@ Controller 在领取任务前验证角色契约：
 | 角色 | 必需 skills | 工具 | Thinking |
 | --- | --- | --- | --- |
 | Worker | `implement`、`tdd`、bundled `code-review` | 实现所需读写工具和 `subagent` | `high`、`xhigh` 或 `max` |
-| Reviewer | 仅 bundled `code-review` | 只读检查工具和 `subagent` | `max` |
-| Review-axis 子代理 | 不继承 skills | `read,grep,find,ls,bash` | `max` |
+| Reviewer | 仅 bundled `code-review` | `read,grep,find,ls,subagent,review_validate,review_submit` | `max` |
+| Review-axis 子代理 | 不继承 skills | `read,grep,find,ls` | `max` |
 
-两个角色都必须包含 `--no-approve --no-skills`。Harness 会核对 skill 真实身份、Matt Pocock installer provenance、精确工具集合和 bundled review skill。只有 `--provider`、`--model`、`--no-session` 可以作为可选运行时选择器；session 复用、extension、prompt 注入和扩大工具权限都会被拒绝。
+两个角色都必须包含 `--no-approve --no-skills`。Reviewer 还必须包含 `--no-extensions`，并且只显式加载声明过的 `pi-subagents` 入口和 bundled `reviewer-tools.js`。Harness 会核对 skill/extension 真实身份、Matt Pocock installer provenance、精确工具集合和 bundled review 代码。只有 `--provider`、`--model`、`--no-session` 可以作为可选运行时选择器；session 复用、prompt 注入、环境 extension 和扩大工具权限都会被拒绝。
+
+每个 Reviewer 都从只读 exact-HEAD 源码快照启动。其 `subagent` 调用被限制为两个 fresh `herdr-harness-review-axis` 子代理，子代理运行时工具上限为 `read,grep,find,ls`，管理动作和其他 agent profile 会被阻断。`review_validate` 只在独立可写副本中执行固定 argv，`review_submit` 独占产品 worktree 外的身份绑定结果通道。这是 Pi 工具级边界，不隔离恶意测试代码；验证命令本身不可信时，应再使用容器或独立 OS 账户。
 
 ### Provider 与 model 的显式选择
 
@@ -103,6 +106,11 @@ Provider/model 应写入对应角色的 Pi 原生 argv。下面只把未来 Revi
   "reviewerArgv": [
     "--no-approve",
     "--no-skills",
+    "--no-extensions",
+    "--extension",
+    "/absolute/path/to/.pi/agent/npm/node_modules/pi-subagents/index.ts",
+    "--extension",
+    "/absolute/path/to/HerdrHarness-lite/pi/extensions/reviewer-tools.js",
     "--provider",
     "baizhi-chat",
     "--model",
@@ -110,7 +118,7 @@ Provider/model 应写入对应角色的 Pi 原生 argv。下面只把未来 Revi
     "--skill",
     "/absolute/path/to/HerdrHarness-lite/pi/skills/code-review",
     "--tools",
-    "read,bash,grep,find,ls,subagent",
+    "read,grep,find,ls,subagent,review_validate,review_submit",
     "--thinking",
     "max"
   ]
@@ -297,6 +305,7 @@ Required checks 和最终 merge 仍由 GitHub 决定。Harness 持续观察 PR�
 - compare-and-swap revision 状态；
 - append-only 保存事件；
 - Codex Analyst effect receipts 与 session 身份。
+- 每次 Reviewer attempt 的源码快照、验证副本、定点证据、descriptor 和外部结果。
 
 Reassessment 审计记录在 terminal archive 后仍然保留。Analyst 从自己的私有 state 目录运行，只接收有界、不可信的 task/evidence 数据包。无法关闭精确记录的 Analyst session 时，终态 job 会保留而不会静默归档。
 

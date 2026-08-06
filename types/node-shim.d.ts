@@ -1,5 +1,6 @@
 declare const process: {
   argv: string[];
+  execPath: string;
   cwd(): string;
   env: Record<string, string | undefined>;
   stdout: { write(value: string): void };
@@ -21,6 +22,12 @@ declare module "node:crypto" {
   export function createHash(name: string): {
     update(value: string): unknown;
     digest(encoding: "hex"): string;
+  };
+}
+
+declare module "node:buffer" {
+  export const Buffer: {
+    from(value: string, encoding: "utf8" | "base64url"): { toString(encoding: "utf8" | "base64url"): string };
   };
 }
 
@@ -47,10 +54,18 @@ declare module "node:child_process" {
 
 declare module "node:fs" {
   export function chmodSync(path: string, mode: number): void;
+  export function cpSync(source: string, destination: string, options?: { recursive?: boolean }): void;
   export function existsSync(path: string): boolean;
   export function fsyncSync(fd: number): void;
   export function mkdirSync(path: string, options?: { recursive?: boolean; mode?: number }): string | undefined;
+  export function mkdtempSync(prefix: string): string;
   export function readFileSync(path: string | number, encoding: "utf8"): string;
+  export function readdirSync(path: string): string[];
+  export function lstatSync(path: string): {
+    mode: number;
+    isDirectory(): boolean;
+    isSymbolicLink(): boolean;
+  };
   export function writeFileSync(
     path: string,
     data: string,
@@ -64,7 +79,16 @@ declare module "node:fs" {
   export function unlinkSync(path: string): void;
 }
 
+declare module "node:os" {
+  export function tmpdir(): string;
+}
+
+declare module "node:url" {
+  export function pathToFileURL(path: string): { href: string };
+}
+
 declare module "node:path" {
+  export const sep: string;
   export function basename(path: string): string;
   export function dirname(path: string): string;
   export function isAbsolute(path: string): boolean;

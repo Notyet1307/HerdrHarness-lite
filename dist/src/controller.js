@@ -1,10 +1,21 @@
-import { readFileSync } from "node:fs";
-import { basename, dirname, isAbsolute, resolve } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { Buffer } from "node:buffer";
+import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { selectNextTask } from "./eligibility.js";
 import { assertJobInvariant, digest, evolveJob, isRetryAction, taskFromSelection, } from "./model.js";
 import { allowedActionsFor, buildEvidencePack, makeIncident, validateAttemptResult } from "./policy.js";
 import { reviewerPrompt, workerPrompt } from "./prompts.js";
 const BUNDLED_CODE_REVIEW_SKILL = resolve(import.meta.dirname, "../../pi/skills/code-review");
+const BUNDLED_REVIEWER_TOOLS_EXTENSION = resolve(import.meta.dirname, "../../pi/extensions/reviewer-tools.js");
+const REVIEW_DESCRIPTOR_ENV = "HERDR_HARNESS_REVIEW_DESCRIPTOR";
+const REVIEW_SUBAGENT_CEILING_ENV = "PI_SUBAGENT_CAPABILITY_CEILING_V1";
+const REVIEW_SUBAGENT_CEILING = Buffer.from(JSON.stringify({
+    version: 1,
+    allowedTools: ["find", "grep", "ls", "read"],
+    allowedAgents: ["herdr-harness-review-axis"],
+    denyExtensions: true,
+    sources: ["herdr-harness-lite"],
+}), "utf8").toString("base64url");
 /**
  * One controller owns all writes. Each tick performs at most one durable state
  * transition, so restarts resume from the ledger instead of replaying a whole
@@ -220,6 +231,7 @@ export class HarnessController {
         }
         const attemptId = this.deps.ids.next(lane);
         const now = this.deps.clock.now();
+        const reviewerRoot = resolve(this.deps.config.stateDir, "reviewer-attempts", safeToken(job.id), safeToken(attemptId));
         let attempt = {
             id: attemptId,
             lane,
@@ -227,7 +239,9 @@ export class HarnessController {
             round: job.reviewRound + 1,
             baseSha: lane === "worker" ? (job.headSha ?? job.baseSha) : job.baseSha,
             expectedHeadSha: lane === "reviewer" ? job.headSha : null,
-            resultPath: `${trimSlash(job.worktree.path)}/.harness/attempt-${safeToken(attemptId)}.json`,
+            resultPath: lane === "reviewer"
+                ? resolve(reviewerRoot, "result.json")
+                : `${trimSlash(job.worktree.path)}/.harness/attempt-${safeToken(attemptId)}.json`,
             promptDigest: "",
             handle: null,
             result: null,
@@ -255,11 +269,39 @@ export class HarnessController {
             });
         }
         if (attempt.phase === "prepared") {
+            if (lane === "reviewer") {
+                const integrityBlock = await this.verifyReviewerIntegrity(state, job, attempt, attempt.expectedHeadSha, null);
+                if (integrityBlock)
+                    return integrityBlock;
+            }
             let handle;
             try {
+                let cwd = job.worktree.path;
+                let env = {};
+                if (lane === "reviewer") {
+                    if (!attempt.expectedHeadSha)
+                        throw new Error("Reviewer attempt has no expected HEAD");
+                    const workspace = await this.deps.git.prepareReviewer({
+                        worktree: job.worktree,
+                        rootPath: dirname(attempt.resultPath),
+                        resultPath: attempt.resultPath,
+                        jobId: job.id,
+                        attemptId: attempt.id,
+                        baseSha: attempt.baseSha,
+                        expectedHeadSha: attempt.expectedHeadSha,
+                        validationArgv: this.deps.config.reviewerValidationArgv,
+                    });
+                    cwd = workspace.reviewPath;
+                    env = {
+                        [REVIEW_DESCRIPTOR_ENV]: workspace.descriptorPath,
+                        [REVIEW_SUBAGENT_CEILING_ENV]: REVIEW_SUBAGENT_CEILING,
+                    };
+                }
                 handle = await this.deps.herdr.createAttemptPane({
                     worktree: job.worktree,
                     attempt,
+                    cwd,
+                    env,
                 });
             }
             catch (error) {
@@ -390,7 +432,8 @@ export class HarnessController {
             worktree: job.worktree,
             expectedHeadSha: job.headSha,
             reportedHeadSha,
-            allowedResultPaths: [...job.attempts.map((settled) => settled.resultPath), attempt.resultPath],
+            allowedResultPaths: [...job.attempts.map((settled) => settled.resultPath), attempt.resultPath]
+                .filter((path) => isWithin(job.worktree.path, path)),
         });
         if (verification.ok)
             return null;
@@ -848,6 +891,7 @@ function validateConfig(config) {
     for (const [name, value] of [
         ["repo", config.repo],
         ["localPath", config.localPath],
+        ["stateDir", config.stateDir],
         ["baseRef", config.baseRef],
         ["readyLabel", config.readyLabel],
         ["claimLabel", config.claimLabel],
@@ -856,6 +900,12 @@ function validateConfig(config) {
         if (!value.trim())
             throw new Error(`${name} must not be empty`);
     }
+    for (const [name, path] of [["localPath", config.localPath], ["stateDir", config.stateDir], ["worktreeRoot", config.worktreeRoot]]) {
+        if (!isAbsolute(path))
+            throw new Error(`${name} must be absolute`);
+    }
+    if (isWithin(config.localPath, config.stateDir))
+        throw new Error("stateDir must be outside localPath");
     if (!Number.isInteger(config.maxReviewRounds) || config.maxReviewRounds < 1) {
         throw new Error("maxReviewRounds must be a positive integer");
     }
@@ -865,13 +915,17 @@ function validateConfig(config) {
     for (const [name, value] of [
         ["workerArgv", config.workerArgv],
         ["reviewerArgv", config.reviewerArgv],
+        ["reviewerValidationArgv", config.reviewerValidationArgv],
     ]) {
         if (!Array.isArray(value) || value.some((argument) => typeof argument !== "string")) {
             throw new Error(`${name} must be an array of strings`);
         }
     }
+    if (config.reviewerValidationArgv.length < 1 || config.reviewerValidationArgv.length > 32 || config.reviewerValidationArgv.some((argument) => !argument || argument.length > 8192)) {
+        throw new Error("reviewerValidationArgv must contain 1 to 32 non-empty arguments");
+    }
     validatePiRoleArgv("workerArgv", config.workerArgv, ["implement", "tdd", "code-review"], ["read", "bash", "edit", "write", "grep", "find", "ls", "subagent"], ["high", "xhigh", "max"]);
-    validatePiRoleArgv("reviewerArgv", config.reviewerArgv, ["code-review"], ["read", "bash", "grep", "find", "ls", "subagent"], ["max"]);
+    validatePiRoleArgv("reviewerArgv", config.reviewerArgv, ["code-review"], ["read", "grep", "find", "ls", "subagent", "review_validate", "review_submit"], ["max"]);
 }
 function validatePiRoleArgv(name, argv, skills, tools, allowedThinking) {
     const fail = (reason) => {
@@ -882,6 +936,12 @@ function validatePiRoleArgv(name, argv, skills, tools, allowedThinking) {
         fail("--no-approve is required");
     if (!argv.includes("--no-skills"))
         fail("--no-skills is required");
+    if (name === "reviewerArgv") {
+        validateReviewerExtensions(argv, fail);
+    }
+    else if (argv.includes("--no-extensions") || flagValues(argv, "--extension").length > 0) {
+        fail("Worker extensions are not allowed");
+    }
     const skillPaths = flagValues(argv, "--skill");
     if (skillPaths.some((path) => !isAbsolute(path)))
         fail("skill paths must be absolute");
@@ -920,8 +980,8 @@ function flagValues(argv, flag) {
     return argv.flatMap((value, index) => value === flag && argv[index + 1] ? [argv[index + 1]] : []);
 }
 function validateAllowedPiArgv(argv, fail) {
-    const valueFlags = new Set(["--skill", "--tools", "--thinking", "--provider", "--model"]);
-    const booleanFlags = new Set(["--no-approve", "--no-skills", "--no-session"]);
+    const valueFlags = new Set(["--skill", "--tools", "--thinking", "--provider", "--model", "--extension"]);
+    const booleanFlags = new Set(["--no-approve", "--no-skills", "--no-session", "--no-extensions"]);
     for (let index = 0; index < argv.length; index += 1) {
         const argument = argv[index];
         if (booleanFlags.has(argument))
@@ -932,6 +992,39 @@ function validateAllowedPiArgv(argv, fail) {
         if (!value || value.startsWith("-"))
             fail(`${argument} requires a separate value`);
         index += 1;
+    }
+}
+function validateReviewerExtensions(argv, fail) {
+    if (argv.filter((argument) => argument === "--no-extensions").length !== 1) {
+        fail("exactly one --no-extensions is required");
+    }
+    const extensions = flagValues(argv, "--extension");
+    if (extensions.length !== 2 || extensions.some((path) => !isAbsolute(path))) {
+        fail("exactly two absolute --extension paths are required");
+    }
+    if (extensions.filter((path) => resolve(path) === BUNDLED_REVIEWER_TOOLS_EXTENSION).length !== 1) {
+        fail("reviewer-tools must resolve to the bundled Harness extension");
+    }
+    const subagents = extensions.filter((path) => resolve(path) !== BUNDLED_REVIEWER_TOOLS_EXTENSION);
+    if (subagents.length !== 1 || !isPiSubagentsExtension(subagents[0])) {
+        fail("the other Reviewer extension must be the declared pi-subagents package entrypoint");
+    }
+}
+function isPiSubagentsExtension(path) {
+    const extensionPath = resolve(path);
+    const packageRoot = dirname(extensionPath);
+    try {
+        const manifest = JSON.parse(readFileSync(resolve(packageRoot, "package.json"), "utf8"));
+        const capabilityEntrypoint = manifest.exports?.["./capability-ceiling"];
+        return manifest.name === "pi-subagents"
+            && existsSync(extensionPath)
+            && Array.isArray(manifest.pi?.extensions)
+            && manifest.pi.extensions.some((entry) => typeof entry === "string" && resolve(packageRoot, entry) === extensionPath)
+            && typeof capabilityEntrypoint === "string"
+            && existsSync(resolve(packageRoot, capabilityEntrypoint));
+    }
+    catch {
+        return false;
     }
 }
 function piSkillDirectory(path) {
@@ -977,6 +1070,10 @@ function result(ok, action, jobId, messageValue) {
 function safeToken(value) {
     const normalized = value.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
     return normalized || "job";
+}
+function isWithin(parent, child) {
+    const path = relative(resolve(parent), resolve(child));
+    return path === "" || (!path.startsWith(`..${sep}`) && path !== ".." && !isAbsolute(path));
 }
 function trimSlash(value) {
     return value.replace(/\/+$/g, "");

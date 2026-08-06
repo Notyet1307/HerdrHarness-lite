@@ -208,6 +208,24 @@ test("Herdr adapter starts Pi without a native-argument separator when argv is e
         ["--session", "test-session", "agent", "start", "hhw-contract", "--kind", "pi", "--pane", "w1:p2"],
     ]);
 });
+test("Herdr adapter injects the Reviewer snapshot cwd and descriptor environment", async () => {
+    const runner = new RecordingRunner();
+    const herdr = new HerdrCli({ runner, session: "test-session" });
+    await herdr.createAttemptPane({
+        worktree: { workspaceId: "w1", path: "/tmp/worktree", branch: "agent/issue-1" },
+        attempt: { id: "reviewer-001", lane: "reviewer" },
+        cwd: "/tmp/reviewer/source",
+        env: { HERDR_HARNESS_REVIEW_DESCRIPTOR: "/tmp/reviewer/descriptor.json" },
+    });
+    assert.deepEqual(runner.calls[1], {
+        command: "herdr",
+        args: [
+            "--session", "test-session", "tab", "create", "--workspace", "w1",
+            "--cwd", "/tmp/reviewer/source", "--label", "reviewer reviewer-001", "--no-focus",
+            "--env", "HERDR_HARNESS_REVIEW_DESCRIPTOR=/tmp/reviewer/descriptor.json",
+        ],
+    });
+});
 test("Herdr adapter recovers the unique pane created before its handle was persisted", async () => {
     const calls = [];
     const runner = {

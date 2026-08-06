@@ -79,6 +79,7 @@ Important fields:
 | `worktreeRoot` | Root for isolated Herdr task worktrees |
 | `maxReviewRounds` | Maximum Reviewer/rework rounds |
 | `maxAnalystTurns` | Bounded evidence turns allowed to the Analyst |
+| `reviewerValidationArgv` | One fixed, shell-free validation argv run in a disposable copy |
 | `autoMerge` | Request GitHub native auto-merge after an exact Reviewer pass |
 | `workerArgv` / `reviewerArgv` | Native Pi arguments validated as role contracts |
 | `herdr.session` | Required named Herdr session |
@@ -89,10 +90,12 @@ The Controller validates the role contracts before doing work:
 | Role | Required skills | Tools | Thinking |
 | --- | --- | --- | --- |
 | Worker | `implement`, `tdd`, bundled `code-review` | read/write implementation tools plus `subagent` | `high`, `xhigh`, or `max` |
-| Reviewer | bundled `code-review` only | read-only inspection tools plus `subagent` | `max` |
-| Review-axis child | none inherited | `read,grep,find,ls,bash` | `max` |
+| Reviewer | bundled `code-review` only | `read,grep,find,ls,subagent,review_validate,review_submit` | `max` |
+| Review-axis child | none inherited | `read,grep,find,ls` | `max` |
 
-Both roles require `--no-approve --no-skills`. Skill identity, Matt Pocock installer provenance, exact tools, and the bundled review skill are checked. Only `--provider`, `--model`, and `--no-session` are allowed as optional runtime selectors; session reuse, extensions, prompt injection, and wider tools are rejected.
+Both roles require `--no-approve --no-skills`. Reviewer additionally requires `--no-extensions` and exactly two explicit extensions: the declared `pi-subagents` package entrypoint and the bundled `reviewer-tools.js`. Skill/extension identity, Matt Pocock installer provenance, exact tools, and the bundled review code are checked. Only `--provider`, `--model`, and `--no-session` are allowed as optional runtime selectors; session reuse, prompt injection, ambient extensions, and wider tools are rejected.
+
+Each Reviewer gets a read-only exact-HEAD source snapshot. Its `subagent` call is restricted to exactly two fresh `herdr-harness-review-axis` children, with a runtime ceiling of `read,grep,find,ls`; management actions and other agent profiles are blocked. `review_validate` runs the fixed argv once in a separate writable copy with private cache/home paths; `review_submit` alone writes the identity-bound result outside the product worktree. This is a Pi tool boundary, not containment for malicious test code: use a container or separate OS account if the validation command itself is adversarial.
 
 ### Explicit provider and model selection
 
@@ -103,6 +106,11 @@ Provider/model selection belongs in the role's native Pi argv. This example pins
   "reviewerArgv": [
     "--no-approve",
     "--no-skills",
+    "--no-extensions",
+    "--extension",
+    "/absolute/path/to/.pi/agent/npm/node_modules/pi-subagents/index.ts",
+    "--extension",
+    "/absolute/path/to/HerdrHarness-lite/pi/extensions/reviewer-tools.js",
     "--provider",
     "baizhi-chat",
     "--model",
@@ -110,7 +118,7 @@ Provider/model selection belongs in the role's native Pi argv. This example pins
     "--skill",
     "/absolute/path/to/HerdrHarness-lite/pi/skills/code-review",
     "--tools",
-    "read,bash,grep,find,ls,subagent",
+    "read,grep,find,ls,subagent,review_validate,review_submit",
     "--thinking",
     "max"
   ]
@@ -297,6 +305,7 @@ Required checks and final merge remain GitHub decisions. The Harness observes th
 - compare-and-swap revision state;
 - append-only save events;
 - Codex Analyst effect receipts and session identity.
+- per-attempt Reviewer snapshots, disposable validation copies, fixed-point evidence, descriptors, and external results.
 
 Reassessment audit records survive terminal archive. The Analyst runs from its private state directory and receives only bounded untrusted task/evidence packets. Failure to close the exact recorded Analyst session keeps the terminal job unarchived.
 

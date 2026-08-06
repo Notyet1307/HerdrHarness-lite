@@ -27,6 +27,8 @@ export declare class HerdrCli implements HerdrPort {
             id: string;
             lane: "worker" | "reviewer";
         };
+        cwd?: string;
+        env?: Record<string, string>;
     }): Promise<AgentHandle>;
     private findAttemptPane;
     startAgent(input: {

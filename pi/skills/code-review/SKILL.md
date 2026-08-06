@@ -19,7 +19,7 @@ Use the Base SHA supplied by the Harness dispatch as the fixed point and the
 supplied Head SHA (or current committed `HEAD` inside a worker self-review) as
 the review target.
 
-Run and record:
+In a Worker self-review, run and record:
 
 ```bash
 git rev-parse <base-sha>^{commit}
@@ -32,6 +32,11 @@ git log <base-sha>..HEAD --oneline
 Fail closed if the refs do not resolve, ancestry fails, the requested Head SHA
 does not equal `HEAD`, or the three-dot diff is empty. A worker must create its
 implementation checkpoint commit before this review.
+
+In a top-level Reviewer attempt, generic shell access is unavailable. Read the
+Harness-generated `review-evidence.txt` named in the dispatch instead. It binds
+the Base SHA, exact Head SHA, ancestry, clean tracked state, commit list, and
+three-dot diff. Missing or inconsistent evidence is a blocking gap.
 
 ## 2. Resolve evidence
 
@@ -89,7 +94,7 @@ Keep `artifacts: false`: child reports return inline to the parent without
 writing `.pi-subagents/` debug files into the reviewed worktree. Do not replace
 this with post-review deletion or a wider Harness Git allowlist.
 
-The Standards brief must contain the fixed-point diff command, commit list,
+The Standards brief must contain the fixed-point identity, diff evidence, commit list,
 standards-source paths, the full smell list above, and these rules: cite every
 documented-standard violation; label smells as judgement calls; repository
 rules override smells; stay under 400 words.
@@ -109,14 +114,18 @@ opinion.
 ## 4. Aggregate without collapsing the axes
 
 Keep the two reports under `Standards` and `Spec`. Do not merge or rerank across
-axes. Run any required validation command once and record its exact exit code.
+axes. In a Worker self-review, run the required validation normally. In a
+top-level Reviewer attempt, call `review_validate` exactly once; it runs the
+Harness-configured argv in a disposable writable copy and returns the exact
+exit status.
 
 - In a Worker attempt, return the reports to the Worker. The Worker applies
   accepted fixes, commits the final clean state, then writes its own worker
   result. This skill never writes a reviewer result during worker self-review.
-- In a top-level Reviewer attempt, never edit product source. Write exactly the
-  Harness reviewer result requested by the dispatch, bound to the supplied
-  job, attempt, lane, and reviewed Head SHA.
+- In a top-level Reviewer attempt, never edit product source or write a result
+  file directly. Call `review_submit` exactly once with only status, summary,
+  and findings; the Harness-owned tool binds the job, attempt, lane, and exact
+  reviewed Head SHA before writing the external result channel.
 
 For a top-level Reviewer result:
 

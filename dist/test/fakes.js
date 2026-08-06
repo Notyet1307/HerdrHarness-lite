@@ -1,6 +1,8 @@
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { digest } from "../src/model.js";
 export const validCodeReviewSkillPath = resolve("pi/skills/code-review");
+export const validPiSubagentsExtensionPath = resolve("test/fixtures/pi-subagents/index.js");
+export const validReviewerToolsExtensionPath = resolve("pi/extensions/reviewer-tools.js");
 export const validImplementSkillPath = resolve("test/fixtures/pi-skills/skills/implement");
 export const validTddSkillPath = resolve("test/fixtures/pi-skills/skills/tdd");
 export const substituteCodeReviewSkillPath = resolve("test/fixtures/substitute-review/other/SKILL.md");
@@ -17,8 +19,11 @@ export const validWorkerArgv = [
 export const validReviewerArgv = [
     "--no-approve",
     "--no-skills",
+    "--no-extensions",
+    "--extension", validPiSubagentsExtensionPath,
+    "--extension", validReviewerToolsExtensionPath,
     "--skill", validCodeReviewSkillPath,
-    "--tools", "read,bash,grep,find,ls,subagent",
+    "--tools", "read,grep,find,ls,subagent,review_validate,review_submit",
     "--thinking", "max",
 ];
 export class FakeClock {
@@ -94,6 +99,13 @@ export class FakeGit {
     async verifyWorker(input) {
         return this.workerFailure ? { ok: false, ...this.workerFailure } : { ok: true, headSha: input.reportedHeadSha };
     }
+    async prepareReviewer(input) {
+        return {
+            reviewPath: join(input.rootPath, "source"),
+            descriptorPath: join(input.rootPath, "descriptor.json"),
+            evidencePath: join(input.rootPath, "review-evidence.txt"),
+        };
+    }
     async verifyReviewer() {
         return this.reviewerFailure
             ? { ok: false, class: "integrity_violation", reason: this.reviewerFailure }
@@ -122,7 +134,7 @@ export class FakeHerdr {
             tabId: `tab-${input.attempt.id}`,
             workspaceId: input.worktree.workspaceId,
         };
-        this.prepared.push({ attemptId: input.attempt.id, lane: input.attempt.lane, handle });
+        this.prepared.push({ attemptId: input.attempt.id, lane: input.attempt.lane, cwd: input.cwd ?? input.worktree.path, env: input.env ?? {}, handle });
         return handle;
     }
     async startAgent(input) {

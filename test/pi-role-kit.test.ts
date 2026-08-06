@@ -31,14 +31,14 @@ test("Pi child reviewer has a strict non-writing, non-recursive tool list", () =
   const agent = readFileSync("pi/agents/herdr-harness-review-axis.md", "utf8");
   const tools = agent.match(/^tools:\s*(.+)$/m)?.[1]?.split(",").map((tool) => tool.trim()) ?? [];
 
-  assert.deepEqual(tools, ["read", "grep", "find", "ls", "bash"]);
+  assert.deepEqual(tools, ["read", "grep", "find", "ls"]);
   assert.equal(/^tools:.*\b(?:edit|write|subagent)\b/m.test(agent), false);
   assert.match(agent, /^thinking:\s*max$/m);
   assert.match(agent, /^inheritProjectContext:\s*true$/m);
   assert.match(agent, /^inheritSkills:\s*false$/m);
   assert.match(agent, /^defaultContext:\s*fresh$/m);
   assert.match(agent, /^extensions:\s*$/m);
-  assert.match(agent, /Do not run\s+project validation commands/);
+  assert.match(agent, /Do not run\s+project\s+validation commands/);
 });
 
 test("example config pins the Worker and Reviewer Pi role contracts", () => {
@@ -48,8 +48,10 @@ test("example config pins the Worker and Reviewer Pi role contracts", () => {
     "code-review",
   ]);
   assert.deepEqual(flagValues(exampleConfig.reviewerArgv, "--skill").map(lastPathPart), ["code-review"]);
+  assert.equal(exampleConfig.reviewerArgv.includes("--no-extensions"), true);
+  assert.deepEqual(flagValues(exampleConfig.reviewerArgv, "--extension").map(lastPathPart), ["index.ts", "reviewer-tools.js"]);
   assert.deepEqual(flagValues(exampleConfig.workerArgv, "--tools"), ["read,bash,edit,write,grep,find,ls,subagent"]);
-  assert.deepEqual(flagValues(exampleConfig.reviewerArgv, "--tools"), ["read,bash,grep,find,ls,subagent"]);
+  assert.deepEqual(flagValues(exampleConfig.reviewerArgv, "--tools"), ["read,grep,find,ls,subagent,review_validate,review_submit"]);
   assert.deepEqual(flagValues(exampleConfig.workerArgv, "--thinking"), ["high"]);
   assert.deepEqual(flagValues(exampleConfig.reviewerArgv, "--thinking"), ["max"]);
 });

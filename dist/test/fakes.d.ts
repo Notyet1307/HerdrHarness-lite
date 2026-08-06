@@ -1,6 +1,8 @@
 import { type AnalystSession, type AnalystTurn, type AttemptResult, type EvidenceItem, type EvidenceRequest, type HarnessState, type IssueSnapshot, type Job, type PullRequestRef, type SelectedTask } from "../src/model.js";
 import type { AnalystPort, Clock, EvidencePort, GitHubPort, GitPort, HerdrPort, IdGenerator, StateStore } from "../src/ports.js";
 export declare const validCodeReviewSkillPath: string;
+export declare const validPiSubagentsExtensionPath: string;
+export declare const validReviewerToolsExtensionPath: string;
 export declare const validImplementSkillPath: string;
 export declare const validTddSkillPath: string;
 export declare const substituteCodeReviewSkillPath: string;
@@ -68,6 +70,13 @@ export declare class FakeGit implements GitPort {
         class: "integrity_violation" | "stale_task";
         reason: string;
     }>;
+    prepareReviewer(input: {
+        rootPath: string;
+    }): Promise<{
+        reviewPath: string;
+        descriptorPath: string;
+        evidencePath: string;
+    }>;
     verifyReviewer(): Promise<{
         ok: true;
     } | {
@@ -99,6 +108,8 @@ export declare class FakeHerdr implements HerdrPort {
     prepared: Array<{
         attemptId: string;
         lane: string;
+        cwd: string;
+        env: Record<string, string>;
         handle: {
             agentName: string;
             paneId: string;
@@ -131,11 +142,14 @@ export declare class FakeHerdr implements HerdrPort {
     createAttemptPane(input: {
         worktree: {
             workspaceId: string;
+            path: string;
         };
         attempt: {
             id: string;
             lane: "worker" | "reviewer";
         };
+        cwd?: string;
+        env?: Record<string, string>;
     }): Promise<{
         agentName: string;
         paneId: string;

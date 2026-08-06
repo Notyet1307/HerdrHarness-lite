@@ -55,20 +55,30 @@ export class HerdrCli {
     async createAttemptPane(input) {
         const agentName = attemptAgentName(input.attempt.id, input.attempt.lane);
         const label = `${input.attempt.lane} ${input.attempt.id}`;
-        const existing = this.findAttemptPane(input.worktree, agentName, label);
+        const cwd = input.cwd ?? input.worktree.path;
+        const env = input.env ?? {};
+        for (const [name, value] of Object.entries(env)) {
+            if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) || /[\0\r\n]/.test(value))
+                throw new Error("invalid Herdr attempt environment");
+        }
+        const existing = this.findAttemptPane(input.worktree, agentName, label, cwd);
         if (existing)
             return existing;
-        const tab = this.invoke([
+        const createArgs = [
             "tab",
             "create",
             "--workspace",
             input.worktree.workspaceId,
             "--cwd",
-            input.worktree.path,
+            cwd,
             "--label",
             label,
             "--no-focus",
-        ]);
+        ];
+        for (const [name, value] of Object.entries(env).sort(([left], [right]) => left.localeCompare(right))) {
+            createArgs.push("--env", `${name}=${value}`);
+        }
+        const tab = this.invoke(createArgs);
         expectType(tab, "tab_created");
         const tabInfo = object(tab.tab);
         const pane = object(tab.root_pane ?? tab.pane);
@@ -83,7 +93,7 @@ export class HerdrCli {
         }
         return { agentName, paneId, tabId, workspaceId: input.worktree.workspaceId };
     }
-    findAttemptPane(worktree, agentName, label) {
+    findAttemptPane(worktree, agentName, label, expectedCwd) {
         const tabList = this.invoke(["tab", "list", "--workspace", worktree.workspaceId]);
         expectType(tabList, "tab_list");
         const tabs = array(tabList.tabs).map(object).filter((tab) => (text(tab.workspace_id) === worktree.workspaceId && text(tab.label) === label));
@@ -103,7 +113,7 @@ export class HerdrCli {
         const pane = panes[0];
         const paneId = text(pane.pane_id);
         const cwd = text(pane.foreground_cwd) ?? text(pane.cwd);
-        if (!paneId || cwd !== worktree.path)
+        if (!paneId || cwd !== expectedCwd)
             throw new Error(`Herdr attempt pane ${agentName} has a different identity`);
         return { agentName, paneId, tabId, workspaceId: worktree.workspaceId };
     }

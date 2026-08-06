@@ -2,6 +2,7 @@ import type { AgentHandle, AgentStatus, AnalystSession, AnalystTurn, Attempt, At
 export type HarnessConfig = {
     repo: string;
     localPath: string;
+    stateDir: string;
     baseRef: string;
     autoMerge?: boolean;
     readyLabel: string;
@@ -9,6 +10,8 @@ export type HarnessConfig = {
     worktreeRoot: string;
     maxReviewRounds: number;
     maxAnalystTurns: number;
+    /** Fixed argv executed by the Harness-owned Reviewer validation tool without a shell. */
+    reviewerValidationArgv: string[];
     /** Native Pi arguments only; Herdr selects `pi` and Controller validates the role contract. */
     workerArgv: string[];
     reviewerArgv: string[];
@@ -67,6 +70,20 @@ export interface GitPort {
         baseSha: string;
         reportedHeadSha: string;
     }): Promise<WorkerVerification>;
+    prepareReviewer(input: {
+        worktree: WorktreeHandle;
+        rootPath: string;
+        resultPath: string;
+        jobId: string;
+        attemptId: string;
+        baseSha: string;
+        expectedHeadSha: string;
+        validationArgv: string[];
+    }): Promise<{
+        reviewPath: string;
+        descriptorPath: string;
+        evidencePath: string;
+    }>;
     verifyReviewer(input: {
         worktree: WorktreeHandle;
         expectedHeadSha: string;
@@ -85,6 +102,8 @@ export interface HerdrPort {
     createAttemptPane(input: {
         worktree: WorktreeHandle;
         attempt: Attempt;
+        cwd?: string;
+        env?: Record<string, string>;
     }): Promise<AgentHandle>;
     startAgent(input: {
         handle: AgentHandle;
