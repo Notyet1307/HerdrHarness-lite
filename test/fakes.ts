@@ -112,6 +112,7 @@ export class FakeGit implements GitPort {
   baseSha = "a".repeat(40);
   workerFailure: { class: "integrity_violation" | "stale_task"; reason: string } | null = null;
   reviewerFailure: string | null = null;
+  reviewerValidationArgv: string[][] = [];
 
   async refreshBase(): Promise<string> {
     return this.baseSha;
@@ -121,7 +122,8 @@ export class FakeGit implements GitPort {
     return this.workerFailure ? { ok: false, ...this.workerFailure } : { ok: true, headSha: input.reportedHeadSha };
   }
 
-  async prepareReviewer(input: { rootPath: string }): Promise<{ reviewPath: string; descriptorPath: string; evidencePath: string }> {
+  async prepareReviewer(input: { rootPath: string; validationArgv: string[] }): Promise<{ reviewPath: string; descriptorPath: string; evidencePath: string }> {
+    this.reviewerValidationArgv.push([...input.validationArgv]);
     return {
       reviewPath: join(input.rootPath, "source"),
       descriptorPath: join(input.rootPath, "descriptor.json"),

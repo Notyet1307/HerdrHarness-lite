@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { GitCli } from "../src/adapters/git-cli.js";
@@ -66,6 +66,20 @@ test("Reviewer preparation exports a read-only exact-HEAD snapshot and writable 
       ...input,
       rootPath: join(repo, "review-state"),
       resultPath: join(repo, "review-state", "result.json"),
+    }), /outside the product worktree/);
+    await assert.rejects(() => new GitCli(runner).prepareReviewer({
+      ...input,
+      rootPath: root,
+      resultPath: join(root, "result.json"),
+    }), /outside the product worktree/);
+    const linkedState = join(repo, "linked-review-state");
+    mkdirSync(linkedState);
+    const stateLink = join(root, "state-link");
+    symlinkSync(linkedState, stateLink, "dir");
+    await assert.rejects(() => new GitCli(runner).prepareReviewer({
+      ...input,
+      rootPath: stateLink,
+      resultPath: join(stateLink, "result.json"),
     }), /outside the product worktree/);
   } finally {
     const sourcePath = join(attemptRoot, "source");

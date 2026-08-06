@@ -59,6 +59,7 @@ export declare class FakeGit implements GitPort {
         reason: string;
     } | null;
     reviewerFailure: string | null;
+    reviewerValidationArgv: string[][];
     refreshBase(): Promise<string>;
     verifyWorker(input: {
         reportedHeadSha: string;
@@ -72,6 +73,7 @@ export declare class FakeGit implements GitPort {
     }>;
     prepareReviewer(input: {
         rootPath: string;
+        validationArgv: string[];
     }): Promise<{
         reviewPath: string;
         descriptorPath: string;

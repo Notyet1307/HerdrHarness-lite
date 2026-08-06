@@ -73,6 +73,7 @@ export type Attempt = {
     baseSha: string;
     expectedHeadSha: string | null;
     resultPath: string;
+    reviewerValidationArgv?: string[];
     promptDigest: string;
     handle: AgentHandle | null;
     result: AttemptResult | null;

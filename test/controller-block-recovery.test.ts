@@ -394,6 +394,85 @@ test("held Worker infrastructure incident can be reassessed without granting ret
   assert.equal(store.state.activeJob?.approval, null);
 });
 
+test("controller-recorded Analyst execution failure can be reassessed without granting retry authority", async () => {
+  const store = new MemoryStore();
+  const clock = new FakeClock();
+  const ids = new SequenceIds();
+  const analyst = new FakeAnalyst([]);
+  const controller = new HarnessController({
+    config: { ...config, maxReviewRounds: 1 },
+    store,
+    github: new FakeGitHub([issue({ number: 36, title: "Reassess failed Analyst execution" })]),
+    git: new FakeGit(),
+    herdr: new FakeHerdr([
+      { lane: "worker", status: "completed", headSha: "b".repeat(40) },
+      {
+        lane: "reviewer",
+        status: "changes",
+        findings: [{ severity: "major", summary: "Fix the boundary", evidence: "src/boundary.ts:1" }],
+      },
+    ]),
+    analyst,
+    evidence: new FakeEvidence(),
+    clock,
+    ids,
+  });
+
+  for (let index = 0; index < 14; index += 1) await controller.tick();
+  const held = store.state.activeJob!;
+  assert.equal(held.incident?.class, "review_uncertain");
+  assert.equal(held.activeAttempt?.phase, "settled");
+  assert.ok(held.activeAttempt?.result);
+  assert.match(held.analysis?.summary ?? "", /Analyst diagnosis failed closed/);
+
+  const controllerFailureDigest = held.analysis!.evidenceDigest;
+  store.state.activeJob!.analysis!.evidenceDigest = "c".repeat(64);
+  await assert.rejects(
+    () => reassessIncident(
+      store,
+      {
+        expectedRevision: held.revision,
+        incidentId: held.incident!.id,
+        analysisId: held.analysis!.id,
+        actor: "human@example.test",
+        reason: "A lookalike Analyst hold must not unlock reassessment.",
+      },
+      { clock, ids },
+    ),
+    /controller-recorded Analyst execution failure/,
+  );
+  store.state.activeJob!.analysis!.evidenceDigest = controllerFailureDigest;
+
+  analyst.turns.push({
+    kind: "advice",
+    action: "retry_fresh_worker",
+    summary: "The Analyst runtime is available again",
+    resolutionBrief: "Apply the exact Reviewer finding, then rerun the full independent review.",
+    evidenceRefs: ["task"],
+    unknowns: [],
+  });
+  await reassessIncident(
+    store,
+    {
+      expectedRevision: held.revision,
+      incidentId: held.incident!.id,
+      analysisId: held.analysis!.id,
+      actor: "human@example.test",
+      reason: "Codex executable is now pinned to an absolute path.",
+    },
+    { clock, ids },
+  );
+  assert.equal(store.state.activeJob?.state, "blocked");
+  assert.equal(store.state.activeJob?.analysis, null);
+  assert.equal(store.state.activeJob?.approval, null);
+  assert.equal(store.state.activeJob?.incident?.class, "review_uncertain");
+  assert.ok(store.state.activeJob?.activeAttempt?.result);
+
+  assert.equal((await controller.tick()).action, "analysis_recorded");
+  assert.equal(store.state.activeJob?.analysis?.action, "retry_fresh_worker");
+  assert.equal(store.state.activeJob?.approval, null);
+});
+
 test("integrity incidents cannot be converted into retry authority by the Analyst", async () => {
   const store = new MemoryStore();
   const clock = new FakeClock();
@@ -439,7 +518,7 @@ test("integrity incidents cannot be converted into retry authority by the Analys
       },
       { clock, ids },
     ),
-    /only an exact held Worker or Reviewer infrastructure incident/,
+    /only an exact held infrastructure incident or controller-recorded Analyst execution failure/,
   );
   await assert.rejects(
     () => approveRecovery(

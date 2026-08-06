@@ -66,6 +66,7 @@ declare module "node:fs" {
     isDirectory(): boolean;
     isSymbolicLink(): boolean;
   };
+  export function realpathSync(path: string): string;
   export function writeFileSync(
     path: string,
     data: string,
@@ -77,6 +78,8 @@ declare module "node:fs" {
   export function openSync(path: string, flags: string, mode?: number): number;
   export function closeSync(fd: number): void;
   export function unlinkSync(path: string): void;
+  export function linkSync(existingPath: string, newPath: string): void;
+  export function symlinkSync(target: string, path: string, type?: "dir" | "file" | "junction"): void;
 }
 
 declare module "node:os" {

@@ -52,7 +52,9 @@
     "argv": [
       "/absolute/path/to/HerdrHarness-lite/dist/src/codex-analyst-wrapper.js",
       "--state-dir",
-      "/absolute/path/to/.herdr-harness-lite"
+      "/absolute/path/to/.herdr-harness-lite",
+      "--codex-bin",
+      "/absolute/path/to/codex"
     ]
   }
 }

@@ -1,4 +1,5 @@
-import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, fsyncSync, linkSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { dirname, isAbsolute, join } from "node:path";
 
@@ -9,11 +10,25 @@ export default function reviewerTools(pi) {
   const descriptor = readDescriptor();
   let validation = null;
   let submitted = false;
+  let axesCall = null;
+  let axesCompleted = false;
 
   pi.on("tool_call", async (event) => {
     if (event.toolName !== "subagent") return undefined;
-    if (!isReviewAxisCall(event.input)) {
+    if (axesCall) {
+      return { block: true, reason: "Reviewer may launch the two review axes only once" };
+    }
+    const tasks = reviewAxisTasks(event.input);
+    if (!tasks) {
       return { block: true, reason: "Reviewer may launch only the two fixed fresh read-only review axes" };
+    }
+    axesCall = { id: event.toolCallId, tasks };
+    return undefined;
+  });
+
+  pi.on("tool_result", async (event) => {
+    if (event.toolName === "subagent" && axesCall?.id === event.toolCallId) {
+      axesCompleted = completedReviewAxes(event, axesCall.tasks);
     }
     return undefined;
   });
@@ -25,13 +40,14 @@ export default function reviewerTools(pi) {
     parameters: { type: "object", properties: {}, additionalProperties: false },
     execute: async () => {
       if (validation) return toolResult(validation);
-      const env = {
-        ...process.env,
+      const env = validationEnv({
         HOME: join(descriptor.scratchPath, "home"),
         TMPDIR: join(descriptor.scratchPath, "tmp"),
+        TMP: join(descriptor.scratchPath, "tmp"),
+        TEMP: join(descriptor.scratchPath, "tmp"),
         XDG_CACHE_HOME: join(descriptor.scratchPath, "cache"),
         PYTHONPYCACHEPREFIX: join(descriptor.scratchPath, "pycache"),
-      };
+      });
       const [command, ...args] = descriptor.validationArgv;
       const output = spawnSync(command, args, {
         cwd: descriptor.validationPath,
@@ -81,6 +97,9 @@ export default function reviewerTools(pi) {
     },
     execute: async (_toolCallId, params) => {
       if (submitted) throw new Error("Reviewer result was already submitted");
+      if ((params.status === "pass" || params.status === "changes") && !axesCompleted) {
+        throw new Error("Reviewer pass or changes requires one completed Standards and Spec subagent run");
+      }
       if ((params.status === "pass" || params.status === "changes") && !validation) {
         throw new Error("Reviewer pass or changes requires a review_validate run");
       }
@@ -97,32 +116,86 @@ export default function reviewerTools(pi) {
         reviewedHeadSha: descriptor.reviewedHeadSha,
         findings: params.findings,
       };
-      mkdirSync(dirname(descriptor.resultPath), { recursive: true });
-      const fd = openSync(descriptor.resultPath, "wx", 0o600);
-      try {
-        writeFileSync(fd, `${JSON.stringify(result)}\n`, "utf8");
-        fsyncSync(fd);
-      } finally {
-        closeSync(fd);
-      }
+      publishResult(descriptor.resultPath, `${JSON.stringify(result)}\n`);
       submitted = true;
       return toolResult({ submitted: true, status: params.status, reviewedHeadSha: descriptor.reviewedHeadSha });
     },
   });
 }
 
-function isReviewAxisCall(input) {
-  if (!input || typeof input !== "object" || Array.isArray(input)) return false;
+function reviewAxisTasks(input) {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return null;
   const keys = Object.keys(input).sort();
-  if (keys.join(",") !== "agentScope,artifacts,async,context,tasks") return false;
-  if (input.artifacts !== false || input.agentScope !== "user" || input.context !== "fresh" || input.async !== false) return false;
-  if (!Array.isArray(input.tasks) || input.tasks.length !== 2) return false;
-  return input.tasks.every((task) => (
+  if (keys.join(",") !== "agentScope,artifacts,async,context,tasks") return null;
+  if (input.artifacts !== false || input.agentScope !== "user" || input.context !== "fresh" || input.async !== false) return null;
+  if (!Array.isArray(input.tasks) || input.tasks.length !== 2) return null;
+  if (!input.tasks.every((task) => (
     task && typeof task === "object" && !Array.isArray(task)
     && Object.keys(task).sort().join(",") === "agent,task"
     && task.agent === "herdr-harness-review-axis"
     && typeof task.task === "string" && task.task.trim().length > 0 && task.task.length <= 50_000
-  ));
+  ))) return null;
+  const axes = input.tasks.map((task) => reviewAxis(task.task));
+  if (new Set(axes).size !== 2 || !axes.includes("Standards") || !axes.includes("Spec")) return null;
+  return input.tasks.map((task) => task.task);
+}
+
+function reviewAxis(task) {
+  const match = /^Axis: (Standards|Spec)\r?\n[\s\S]*\S$/.exec(task.trimEnd());
+  return match?.[1] ?? null;
+}
+
+function completedReviewAxes(event, expectedTasks) {
+  const details = event.details;
+  if (event.isError || !details || typeof details !== "object" || Array.isArray(details)
+    || details.mode !== "parallel" || !Array.isArray(details.results) || details.results.length !== 2) return false;
+  const tasks = new Set();
+  for (const result of details.results) {
+    if (!result || typeof result !== "object" || Array.isArray(result)
+      || result.agent !== "herdr-harness-review-axis"
+      || !expectedTasks.includes(result.task)
+      || result.exitCode !== 0 || result.error
+      || result.interrupted || result.timedOut || result.stopped || result.detached
+      || typeof result.finalOutput !== "string" || !result.finalOutput.trim()) return false;
+    tasks.add(result.task);
+  }
+  return tasks.size === 2;
+}
+
+function validationEnv(scratch) {
+  const env = { PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin", ...scratch };
+  for (const name of ["LANG", "LC_ALL", "LC_CTYPE"]) {
+    if (process.env[name]) env[name] = process.env[name];
+  }
+  return env;
+}
+
+function publishResult(path, body) {
+  mkdirSync(dirname(path), { recursive: true });
+  const temporary = `${path}.${randomUUID()}.tmp`;
+  let fd = null;
+  try {
+    fd = openSync(temporary, "wx", 0o600);
+    writeFileSync(fd, body, "utf8");
+    fsyncSync(fd);
+    closeSync(fd);
+    fd = null;
+    linkSync(temporary, path);
+    unlinkSync(temporary);
+    syncDirectory(dirname(path));
+  } finally {
+    if (fd !== null) closeSync(fd);
+    if (existsSync(temporary)) unlinkSync(temporary);
+  }
+}
+
+function syncDirectory(path) {
+  const fd = openSync(path, "r");
+  try {
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
 }
 
 function readDescriptor() {

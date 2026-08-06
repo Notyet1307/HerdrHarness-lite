@@ -1,4 +1,4 @@
-import type { Approval, HarnessState, Reassessment } from "./model.js";
+import type { AnalystAdvice, Approval, HarnessState, Reassessment } from "./model.js";
 import { evolveJob, isBoundedText, isRetryAction } from "./model.js";
 import { allowedActionsFor, makeIncident } from "./policy.js";
 import type { Clock, IdGenerator, StateStore } from "./ports.js";
@@ -83,21 +83,22 @@ export async function reassessIncident(
   if (!job.analysis || job.analysis.id !== request.analysisId) throw new Error("analysis changed before reassessment");
   if (job.analysis.incidentId !== job.incident.id) throw new Error("analysis is not bound to the active incident");
   if (job.analysis.action !== "hold") throw new Error("only a held analysis can be reassessed");
-  const retryAction = job.incident.lane === "worker"
-    ? "retry_fresh_worker"
-    : job.incident.lane === "reviewer" ? "retry_fresh_reviewer" : null;
+  const retryActions = job.incident.allowedActions.filter(isRetryAction);
+  const retryAction = retryActions.length === 1 ? retryActions[0]! : null;
+  const exactAttempt = job.approval === null && job.activeAttempt?.lane === job.incident.lane
+    && job.activeAttempt.id === job.incident.attemptId && job.activeAttempt.phase === "settled";
+  const heldInfrastructure = job.incident.class === "infrastructure_exhausted"
+    && job.activeAttempt?.result === null;
+  const analystExecutionFailed = job.analysis.evidenceDigest === job.incident.evidenceDigest
+    && isControllerAnalystFailure(job.analysis);
   if (
     retryAction === null ||
-    job.incident.class !== "infrastructure_exhausted" ||
     !job.incident.allowedActions.includes(retryAction) ||
     !allowedActionsFor(job.incident.class, job.incident.lane).includes(retryAction) ||
-    job.approval !== null ||
-    job.activeAttempt?.lane !== job.incident.lane ||
-    job.activeAttempt.id !== job.incident.attemptId ||
-    job.activeAttempt.phase !== "settled" ||
-    job.activeAttempt.result !== null
+    !exactAttempt ||
+    (!heldInfrastructure && !analystExecutionFailed)
   ) {
-    throw new Error("only an exact held Worker or Reviewer infrastructure incident can be reassessed");
+    throw new Error("only an exact held infrastructure incident or controller-recorded Analyst execution failure can be reassessed");
   }
 
   const successor = makeIncident({
@@ -136,4 +137,12 @@ export async function reassessIncident(
   });
   await store.save({ ...state, activeJob: nextJob }, job.revision);
   return reassessment;
+}
+
+function isControllerAnalystFailure(advice: AnalystAdvice): boolean {
+  return advice.action === "hold"
+    && advice.resolutionBrief === ""
+    && advice.evidenceRefs.length === 0
+    && advice.unknowns.length === 1
+    && advice.summary === `Analyst diagnosis failed closed: ${advice.unknowns[0]}`;
 }

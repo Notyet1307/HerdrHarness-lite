@@ -1,10 +1,11 @@
 import { existsSync, readFileSync } from "node:fs";
 import { Buffer } from "node:buffer";
-import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, resolve } from "node:path";
 import { selectNextTask } from "./eligibility.js";
 import { assertJobInvariant, digest, evolveJob, isRetryAction, taskFromSelection, } from "./model.js";
 import { allowedActionsFor, buildEvidencePack, makeIncident, validateAttemptResult } from "./policy.js";
 import { reviewerPrompt, workerPrompt } from "./prompts.js";
+import { pathIsWithin, pathsOverlap } from "./path-safety.js";
 const BUNDLED_CODE_REVIEW_SKILL = resolve(import.meta.dirname, "../../pi/skills/code-review");
 const BUNDLED_REVIEWER_TOOLS_EXTENSION = resolve(import.meta.dirname, "../../pi/extensions/reviewer-tools.js");
 const REVIEW_DESCRIPTOR_ENV = "HERDR_HARNESS_REVIEW_DESCRIPTOR";
@@ -242,6 +243,7 @@ export class HarnessController {
             resultPath: lane === "reviewer"
                 ? resolve(reviewerRoot, "result.json")
                 : `${trimSlash(job.worktree.path)}/.harness/attempt-${safeToken(attemptId)}.json`,
+            ...(lane === "reviewer" ? { reviewerValidationArgv: [...this.deps.config.reviewerValidationArgv] } : {}),
             promptDigest: "",
             handle: null,
             result: null,
@@ -281,6 +283,14 @@ export class HarnessController {
                 if (lane === "reviewer") {
                     if (!attempt.expectedHeadSha)
                         throw new Error("Reviewer attempt has no expected HEAD");
+                    if (!validReviewerValidationArgv(attempt.reviewerValidationArgv)) {
+                        return this.block(state, job, {
+                            class: "integrity_violation",
+                            lane,
+                            summary: "Reviewer attempt has no durably bound validation command",
+                            attemptResult: null,
+                        });
+                    }
                     const workspace = await this.deps.git.prepareReviewer({
                         worktree: job.worktree,
                         rootPath: dirname(attempt.resultPath),
@@ -289,7 +299,7 @@ export class HarnessController {
                         attemptId: attempt.id,
                         baseSha: attempt.baseSha,
                         expectedHeadSha: attempt.expectedHeadSha,
-                        validationArgv: this.deps.config.reviewerValidationArgv,
+                        validationArgv: attempt.reviewerValidationArgv,
                     });
                     cwd = workspace.reviewPath;
                     env = {
@@ -433,7 +443,7 @@ export class HarnessController {
             expectedHeadSha: job.headSha,
             reportedHeadSha,
             allowedResultPaths: [...job.attempts.map((settled) => settled.resultPath), attempt.resultPath]
-                .filter((path) => isWithin(job.worktree.path, path)),
+                .filter((path) => pathIsWithin(job.worktree.path, path)),
         });
         if (verification.ok)
             return null;
@@ -904,8 +914,10 @@ function validateConfig(config) {
         if (!isAbsolute(path))
             throw new Error(`${name} must be absolute`);
     }
-    if (isWithin(config.localPath, config.stateDir))
-        throw new Error("stateDir must be outside localPath");
+    if (pathsOverlap(config.localPath, config.stateDir))
+        throw new Error("localPath and stateDir must not overlap");
+    if (pathsOverlap(config.stateDir, config.worktreeRoot))
+        throw new Error("stateDir and worktreeRoot must not overlap");
     if (!Number.isInteger(config.maxReviewRounds) || config.maxReviewRounds < 1) {
         throw new Error("maxReviewRounds must be a positive integer");
     }
@@ -921,7 +933,7 @@ function validateConfig(config) {
             throw new Error(`${name} must be an array of strings`);
         }
     }
-    if (config.reviewerValidationArgv.length < 1 || config.reviewerValidationArgv.length > 32 || config.reviewerValidationArgv.some((argument) => !argument || argument.length > 8192)) {
+    if (!validReviewerValidationArgv(config.reviewerValidationArgv)) {
         throw new Error("reviewerValidationArgv must contain 1 to 32 non-empty arguments");
     }
     validatePiRoleArgv("workerArgv", config.workerArgv, ["implement", "tdd", "code-review"], ["read", "bash", "edit", "write", "grep", "find", "ls", "subagent"], ["high", "xhigh", "max"]);
@@ -1071,9 +1083,9 @@ function safeToken(value) {
     const normalized = value.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
     return normalized || "job";
 }
-function isWithin(parent, child) {
-    const path = relative(resolve(parent), resolve(child));
-    return path === "" || (!path.startsWith(`..${sep}`) && path !== ".." && !isAbsolute(path));
+function validReviewerValidationArgv(value) {
+    return Array.isArray(value) && value.length >= 1 && value.length <= 32
+        && value.every((argument) => typeof argument === "string" && argument.length > 0 && argument.length <= 8192);
 }
 function trimSlash(value) {
     return value.replace(/\/+$/g, "");

@@ -140,6 +140,47 @@ test("config rejects incomplete Pi role contracts", () => {
   }
 });
 
+test("config rejects state paths that overlap source or worktree roots", () => {
+  for (const invalidConfig of [
+    { ...config, stateDir: "/" },
+    { ...config, stateDir: "/state", worktreeRoot: "/state/worktrees" },
+    { ...config, stateDir: "/state/reviewer", worktreeRoot: "/state" },
+  ]) {
+    assert.throws(() => new HarnessController({
+      config: invalidConfig,
+      store: new MemoryStore(),
+      github: new FakeGitHub([]),
+      git: new FakeGit(),
+      herdr: new FakeHerdr([]),
+      analyst: new FakeAnalyst(),
+      evidence: new FakeEvidence(),
+      clock: new FakeClock(),
+      ids: new SequenceIds(),
+    }), /must not overlap/);
+  }
+});
+
+test("Reviewer attempt binds validation argv before later config changes", async () => {
+  const mutableConfig = { ...config, reviewerValidationArgv: [...config.reviewerValidationArgv] };
+  const git = new FakeGit();
+  const controller = new HarnessController({
+    config: mutableConfig,
+    store: new MemoryStore(),
+    github: new FakeGitHub([issue({ number: 24, title: "Bind review validation" })]),
+    git,
+    herdr: new FakeHerdr([{ lane: "worker", status: "completed", headSha: "b".repeat(40) }]),
+    analyst: new FakeAnalyst(),
+    evidence: new FakeEvidence(),
+    clock: new FakeClock(),
+    ids: new SequenceIds(),
+  });
+
+  for (let index = 0; index < 9; index += 1) await controller.tick();
+  mutableConfig.reviewerValidationArgv[0] = "changed-after-preparation";
+  await controller.tick();
+  assert.deepEqual(git.reviewerValidationArgv, [["npm", "run", "verify"]]);
+});
+
 test("blocked Reviewer cannot bypass worktree verification", async () => {
   const store = new MemoryStore();
   const git = new FakeGit();

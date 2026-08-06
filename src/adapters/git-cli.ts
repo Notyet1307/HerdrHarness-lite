@@ -1,6 +1,7 @@
 import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { join, relative, resolve, sep } from "node:path";
 import type { GitPort, ReviewerVerification, WorkerVerification } from "../ports.js";
+import { pathsOverlap } from "../path-safety.js";
 import { type CommandRunner, requireSuccess, SyncCommandRunner } from "./command.js";
 
 export class GitCli implements GitPort {
@@ -64,7 +65,7 @@ export class GitCli implements GitPort {
     validationArgv: string[];
   }): Promise<{ reviewPath: string; descriptorPath: string; evidencePath: string }> {
     const rootPath = resolve(input.rootPath);
-    if (isWithin(input.worktree.path, rootPath)) throw new Error("Reviewer state must be outside the product worktree");
+    if (pathsOverlap(input.worktree.path, rootPath)) throw new Error("Reviewer state must be outside the product worktree");
     if (resolve(input.resultPath) !== join(rootPath, "result.json")) throw new Error("Reviewer result path escaped its attempt root");
 
     const reviewPath = join(rootPath, "source");
@@ -163,11 +164,6 @@ export class GitCli implements GitPort {
   private git(path: string, args: string[]): string {
     return requireSuccess(this.runner.run("git", ["-C", path, ...args]), `git ${args[0] ?? "command"}`);
   }
-}
-
-function isWithin(parent: string, child: string): boolean {
-  const path = relative(resolve(parent), resolve(child));
-  return path === "" || (!path.startsWith(`..${sep}`) && path !== ".." && !isAbsolute(path));
 }
 
 function makeReadOnly(path: string): void {

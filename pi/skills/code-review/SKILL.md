@@ -80,11 +80,11 @@ subagent({
   tasks: [
     {
       agent: "herdr-harness-review-axis",
-      task: "<self-contained Standards brief>"
+      task: "Axis: Standards\n<self-contained Standards brief>"
     },
     {
       agent: "herdr-harness-review-axis",
-      task: "<self-contained Spec brief>"
+      task: "Axis: Spec\n<self-contained Spec brief>"
     }
   ]
 })

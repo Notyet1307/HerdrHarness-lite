@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { Buffer } from "node:buffer";
-import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, resolve } from "node:path";
 import { selectNextTask } from "./eligibility.js";
 import {
   assertJobInvariant,
@@ -31,6 +31,7 @@ import type {
   StateStore,
 } from "./ports.js";
 import { reviewerPrompt, workerPrompt } from "./prompts.js";
+import { pathIsWithin, pathsOverlap } from "./path-safety.js";
 
 const BUNDLED_CODE_REVIEW_SKILL = resolve(import.meta.dirname, "../../pi/skills/code-review");
 const BUNDLED_REVIEWER_TOOLS_EXTENSION = resolve(import.meta.dirname, "../../pi/extensions/reviewer-tools.js");
@@ -319,6 +320,7 @@ export class HarnessController {
       resultPath: lane === "reviewer"
         ? resolve(reviewerRoot, "result.json")
         : `${trimSlash(job.worktree.path)}/.harness/attempt-${safeToken(attemptId)}.json`,
+      ...(lane === "reviewer" ? { reviewerValidationArgv: [...this.deps.config.reviewerValidationArgv] } : {}),
       promptDigest: "",
       handle: null,
       result: null,
@@ -364,6 +366,14 @@ export class HarnessController {
         let env: Record<string, string> = {};
         if (lane === "reviewer") {
           if (!attempt.expectedHeadSha) throw new Error("Reviewer attempt has no expected HEAD");
+          if (!validReviewerValidationArgv(attempt.reviewerValidationArgv)) {
+            return this.block(state, job, {
+              class: "integrity_violation",
+              lane,
+              summary: "Reviewer attempt has no durably bound validation command",
+              attemptResult: null,
+            });
+          }
           const workspace = await this.deps.git.prepareReviewer({
             worktree: job.worktree,
             rootPath: dirname(attempt.resultPath),
@@ -372,7 +382,7 @@ export class HarnessController {
             attemptId: attempt.id,
             baseSha: attempt.baseSha,
             expectedHeadSha: attempt.expectedHeadSha,
-            validationArgv: this.deps.config.reviewerValidationArgv,
+            validationArgv: attempt.reviewerValidationArgv,
           });
           cwd = workspace.reviewPath;
           env = {
@@ -527,7 +537,7 @@ export class HarnessController {
       expectedHeadSha: job.headSha,
       reportedHeadSha,
       allowedResultPaths: [...job.attempts.map((settled) => settled.resultPath), attempt.resultPath]
-        .filter((path) => isWithin(job.worktree!.path, path)),
+        .filter((path) => pathIsWithin(job.worktree!.path, path)),
     });
     if (verification.ok) return null;
     return this.block(state, job, {
@@ -1045,7 +1055,8 @@ function validateConfig(config: HarnessConfig): void {
   for (const [name, path] of [["localPath", config.localPath], ["stateDir", config.stateDir], ["worktreeRoot", config.worktreeRoot]] as const) {
     if (!isAbsolute(path)) throw new Error(`${name} must be absolute`);
   }
-  if (isWithin(config.localPath, config.stateDir)) throw new Error("stateDir must be outside localPath");
+  if (pathsOverlap(config.localPath, config.stateDir)) throw new Error("localPath and stateDir must not overlap");
+  if (pathsOverlap(config.stateDir, config.worktreeRoot)) throw new Error("stateDir and worktreeRoot must not overlap");
   if (!Number.isInteger(config.maxReviewRounds) || config.maxReviewRounds < 1) {
     throw new Error("maxReviewRounds must be a positive integer");
   }
@@ -1061,7 +1072,7 @@ function validateConfig(config: HarnessConfig): void {
       throw new Error(`${name} must be an array of strings`);
     }
   }
-  if (config.reviewerValidationArgv.length < 1 || config.reviewerValidationArgv.length > 32 || config.reviewerValidationArgv.some((argument) => !argument || argument.length > 8192)) {
+  if (!validReviewerValidationArgv(config.reviewerValidationArgv)) {
     throw new Error("reviewerValidationArgv must contain 1 to 32 non-empty arguments");
   }
   validatePiRoleArgv(
@@ -1236,9 +1247,9 @@ function safeToken(value: string): string {
   return normalized || "job";
 }
 
-function isWithin(parent: string, child: string): boolean {
-  const path = relative(resolve(parent), resolve(child));
-  return path === "" || (!path.startsWith(`..${sep}`) && path !== ".." && !isAbsolute(path));
+function validReviewerValidationArgv(value: unknown): value is string[] {
+  return Array.isArray(value) && value.length >= 1 && value.length <= 32
+    && value.every((argument) => typeof argument === "string" && argument.length > 0 && argument.length <= 8192);
 }
 
 function trimSlash(value: string): string {

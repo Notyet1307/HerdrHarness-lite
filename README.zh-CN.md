@@ -95,7 +95,9 @@ Controller 在领取任务前验证角色契约：
 
 两个角色都必须包含 `--no-approve --no-skills`。Reviewer 还必须包含 `--no-extensions`，并且只显式加载声明过的 `pi-subagents` 入口和 bundled `reviewer-tools.js`。Harness 会核对 skill/extension 真实身份、Matt Pocock installer provenance、精确工具集合和 bundled review 代码。只有 `--provider`、`--model`、`--no-session` 可以作为可选运行时选择器；session 复用、prompt 注入、环境 extension 和扩大工具权限都会被拒绝。
 
-每个 Reviewer 都从只读 exact-HEAD 源码快照启动。其 `subagent` 调用被限制为两个 fresh `herdr-harness-review-axis` 子代理，子代理运行时工具上限为 `read,grep,find,ls`，管理动作和其他 agent profile 会被阻断。`review_validate` 只在独立可写副本中执行固定 argv，`review_submit` 独占产品 worktree 外的身份绑定结果通道。这是 Pi 工具级边界，不隔离恶意测试代码；验证命令本身不可信时，应再使用容器或独立 OS 账户。
+每个 Reviewer 都从只读 exact-HEAD 源码快照启动。其 `subagent` 只能前台启动一次，且必须恰好包含一个 Standards 子代理和一个 Spec 子代理；子代理运行时工具上限为 `read,grep,find,ls`。管理动作、重复启动、失败或未完成的任一轴、以及其他 agent profile 都不能产出 `pass` 或 `changes`。`review_validate` 只在独立可写副本中执行 attempt 已绑定的 argv，并使用最小环境及私有 cache/home/temp 路径；`review_submit` 原子发布产品 worktree 外唯一的身份绑定结果。这是 Pi 工具级边界，不隔离恶意测试代码；验证命令本身不可信时，应再使用容器或独立 OS 账户。
+
+Analyst 的可执行文件也应固定：在 `analyst.argv` 中加入 `"--codex-bin", "/absolute/path/to/codex"`。不要依赖交互式 shell 的 `PATH`；service 或 SSH 启动的 tick 可能拥有不同环境。
 
 ### Provider 与 model 的显式选择
 
@@ -258,12 +260,12 @@ node dist/src/cli.js approve \
 
 该命令受 compare-and-swap 保护。revision、incident、analysis 任一变化都会拒绝。Approval 只记录权限；后续 Controller tick 会重新检查 policy 与 Git，关闭旧 pane，再创建 fresh attempt，绝不恢复旧 agent。
 
-### 3. 重新评估处于 hold 的 Worker 或 Reviewer provider 故障
+### 3. 重新评估已修正的运行时故障
 
-`hold` 不能直接批准。仅当该 hold 精确对应 Worker 或 Reviewer `infrastructure_exhausted`、且没有 durable result，并且运行环境确实发生变化时：
+`hold` 不能直接批准。只有精确绑定可重试 Worker/Reviewer attempt，并且满足以下任一条件时才能重评：（a）`infrastructure_exhausted` 且没有 durable result；（b）Controller 自己记录了 Analyst 执行失败并 fail closed。两种情况都要求运行环境确实发生变化：
 
 1. 如果存在连续 `run` 进程，先停止它；
-2. 修复或切换故障角色的 provider/model；
+2. 修复或切换故障角色的 provider/model，或修正 Analyst 可执行文件/运行时；
 3. 执行有界、无 session provider 探测；
 4. 用 `reassess` 请求新的 Analyst 判断。
 
@@ -274,7 +276,7 @@ node dist/src/cli.js reassess \
   --incident held-incident-id \
   --analysis held-analysis-id \
   --actor operator-name \
-  --reason "故障角色 provider 已切换，且无 session 只读探测通过"
+  --reason "故障运行时已修正，且有界探测通过"
 ```
 
 `reassess` 会把旧 revision/incident/analysis、actor 和有界 reason 保留在审计记录中，把 operator statement 标为不可信证据，创建拥有全新 receipt key 的 successor incident，并清空旧 analysis。它本身不授予 retry 权限、不关闭或启动 agent，也不接触 Git。
@@ -283,7 +285,7 @@ node dist/src/cli.js reassess \
 
 ### 4. 必须保持停止的故障
 
-完整性违规、任务身份过期、Analyst 不可用、禁止动作、HEAD 漂移和未知证据，不能通过修改 JSON 或重复命令变成重试权限。必须保持 hold，直到通过明确受支持的路径修正底层事实。
+完整性违规、任务身份过期、任务绑定 Analyst 启动失败、禁止动作、HEAD 漂移和未知证据，不能通过修改 JSON 或重复命令变成重试权限。Controller 记录的 Analyst turn 执行失败只能通过上面的受审计重评路径请求一次新分析，仍然不能授予 retry 权限。其他情况必须保持 hold，直到通过明确受支持的路径修正底层事实。
 
 绝不要手工编辑 `state.json` 或 result JSON。Snapshot、CAS revision、effect receipts、result identity 与 Git 检查共同构成一条信任边界。
 

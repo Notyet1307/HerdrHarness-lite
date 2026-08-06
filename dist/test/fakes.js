@@ -93,6 +93,7 @@ export class FakeGit {
     baseSha = "a".repeat(40);
     workerFailure = null;
     reviewerFailure = null;
+    reviewerValidationArgv = [];
     async refreshBase() {
         return this.baseSha;
     }
@@ -100,6 +101,7 @@ export class FakeGit {
         return this.workerFailure ? { ok: false, ...this.workerFailure } : { ok: true, headSha: input.reportedHeadSha };
     }
     async prepareReviewer(input) {
+        this.reviewerValidationArgv.push([...input.validationArgv]);
         return {
             reviewPath: join(input.rootPath, "source"),
             descriptorPath: join(input.rootPath, "descriptor.json"),

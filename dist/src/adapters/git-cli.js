@@ -1,5 +1,6 @@
 import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { join, relative, resolve, sep } from "node:path";
+import { pathsOverlap } from "../path-safety.js";
 import { requireSuccess, SyncCommandRunner } from "./command.js";
 export class GitCli {
     runner;
@@ -46,7 +47,7 @@ export class GitCli {
     }
     async prepareReviewer(input) {
         const rootPath = resolve(input.rootPath);
-        if (isWithin(input.worktree.path, rootPath))
+        if (pathsOverlap(input.worktree.path, rootPath))
             throw new Error("Reviewer state must be outside the product worktree");
         if (resolve(input.resultPath) !== join(rootPath, "result.json"))
             throw new Error("Reviewer result path escaped its attempt root");
@@ -138,10 +139,6 @@ export class GitCli {
     git(path, args) {
         return requireSuccess(this.runner.run("git", ["-C", path, ...args]), `git ${args[0] ?? "command"}`);
     }
-}
-function isWithin(parent, child) {
-    const path = relative(resolve(parent), resolve(child));
-    return path === "" || (!path.startsWith(`..${sep}`) && path !== ".." && !isAbsolute(path));
 }
 function makeReadOnly(path) {
     const stat = lstatSync(path);

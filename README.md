@@ -95,7 +95,9 @@ The Controller validates the role contracts before doing work:
 
 Both roles require `--no-approve --no-skills`. Reviewer additionally requires `--no-extensions` and exactly two explicit extensions: the declared `pi-subagents` package entrypoint and the bundled `reviewer-tools.js`. Skill/extension identity, Matt Pocock installer provenance, exact tools, and the bundled review code are checked. Only `--provider`, `--model`, and `--no-session` are allowed as optional runtime selectors; session reuse, prompt injection, ambient extensions, and wider tools are rejected.
 
-Each Reviewer gets a read-only exact-HEAD source snapshot. Its `subagent` call is restricted to exactly two fresh `herdr-harness-review-axis` children, with a runtime ceiling of `read,grep,find,ls`; management actions and other agent profiles are blocked. `review_validate` runs the fixed argv once in a separate writable copy with private cache/home paths; `review_submit` alone writes the identity-bound result outside the product worktree. This is a Pi tool boundary, not containment for malicious test code: use a container or separate OS account if the validation command itself is adversarial.
+Each Reviewer gets a read-only exact-HEAD source snapshot. Its `subagent` call is restricted to exactly one foreground launch containing one Standards child and one Spec child, with a runtime ceiling of `read,grep,find,ls`; management actions, repeated launches, failed/incomplete axes, and other agent profiles cannot produce `pass` or `changes`. `review_validate` runs the attempt-bound argv once in a separate writable copy with a minimal environment and private cache/home/temp paths. `review_submit` atomically publishes the sole identity-bound result outside the product worktree. This is a Pi tool boundary, not containment for malicious test code: use a container or separate OS account if the validation command itself is adversarial.
+
+Pin the Analyst executable too: add `"--codex-bin", "/absolute/path/to/codex"` to `analyst.argv`. Do not rely on an interactive shell's `PATH`; service and SSH-launched ticks may have a different environment.
 
 ### Explicit provider and model selection
 
@@ -258,12 +260,12 @@ node dist/src/cli.js approve \
 
 The command is compare-and-swap protected. Any changed revision, incident, or analysis is rejected. Approval records authority only. A later Controller tick rechecks policy and Git, closes the old pane, and creates a fresh attempt; it never resumes the old agent.
 
-### 3. Reassess a held Worker or Reviewer provider failure
+### 3. Reassess a corrected runtime failure
 
-`hold` cannot be approved. If and only if the held incident is an exact Worker or Reviewer `infrastructure_exhausted` failure with no durable result, and the environment has materially changed:
+`hold` cannot be approved. Reassessment is allowed only for an exact retryable Worker/Reviewer attempt when either (a) it is an `infrastructure_exhausted` incident with no durable result, or (b) the Controller itself recorded that Analyst execution failed closed. In both cases the runtime must have materially changed:
 
 1. stop the existing continuous `run` process, if any;
-2. fix or switch the affected role's provider/model;
+2. fix or switch the affected role's provider/model, or correct the Analyst executable/runtime;
 3. run a bounded ephemeral provider probe;
 4. request a new Analyst decision with `reassess`.
 
@@ -274,7 +276,7 @@ node dist/src/cli.js reassess \
   --incident held-incident-id \
   --analysis held-analysis-id \
   --actor operator-name \
-  --reason "Affected role provider changed and an ephemeral read-tool probe passed"
+  --reason "Affected runtime was corrected and a bounded probe passed"
 ```
 
 `reassess` preserves the old revision/incident/analysis plus actor and bounded reason in the audit record, marks the operator statement as untrusted evidence, creates a successor incident with a fresh receipt key, and clears the old analysis. It does not grant retry authority, close/start an agent, or touch Git.
@@ -283,7 +285,7 @@ Run one standalone `tick` for the new Analyst decision. If it again returns `hol
 
 ### 4. Failures that must remain stopped
 
-Integrity violations, stale task identity, Analyst unavailability, forbidden actions, HEAD drift, and unknown evidence cannot be converted into retry authority by changing JSON or repeating commands. Keep them held until the underlying facts are corrected through an explicit supported path.
+Integrity violations, stale task identity, failure to start the task-bound Analyst, forbidden actions, HEAD drift, and unknown evidence cannot be converted into retry authority by changing JSON or repeating commands. A Controller-recorded Analyst turn execution failure may only request fresh analysis through the audited reassessment path above; it still cannot grant retry authority. Keep all other cases held until the underlying facts are corrected through an explicit supported path.
 
 Never edit `state.json` or result JSON by hand. The snapshot, compare-and-swap revision, effect receipts, result identity, and Git checks form one trust boundary.
 
