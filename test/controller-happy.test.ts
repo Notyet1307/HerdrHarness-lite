@@ -50,7 +50,7 @@ test("config rejects non-string native Pi arguments", () => {
   }
 });
 
-test("config allows Worker high or max and requires Reviewer max thinking", () => {
+test("config allows Worker high, xhigh, or max and requires Reviewer max thinking", () => {
   new HarnessController({
     config,
     store: new MemoryStore(),
@@ -64,6 +64,17 @@ test("config allows Worker high or max and requires Reviewer max thinking", () =
   });
   new HarnessController({
     config: { ...config, workerArgv: validWorkerArgv.map((value) => value === "high" ? "max" : value) },
+    store: new MemoryStore(),
+    github: new FakeGitHub([]),
+    git: new FakeGit(),
+    herdr: new FakeHerdr([]),
+    analyst: new FakeAnalyst(),
+    evidence: new FakeEvidence(),
+    clock: new FakeClock(),
+    ids: new SequenceIds(),
+  });
+  new HarnessController({
+    config: { ...config, workerArgv: validWorkerArgv.map((value) => value === "high" ? "xhigh" : value) },
     store: new MemoryStore(),
     github: new FakeGitHub([]),
     git: new FakeGit(),

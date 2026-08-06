@@ -870,7 +870,7 @@ function validateConfig(config) {
             throw new Error(`${name} must be an array of strings`);
         }
     }
-    validatePiRoleArgv("workerArgv", config.workerArgv, ["implement", "tdd", "code-review"], ["read", "bash", "edit", "write", "grep", "find", "ls", "subagent"], ["high", "max"]);
+    validatePiRoleArgv("workerArgv", config.workerArgv, ["implement", "tdd", "code-review"], ["read", "bash", "edit", "write", "grep", "find", "ls", "subagent"], ["high", "xhigh", "max"]);
     validatePiRoleArgv("reviewerArgv", config.reviewerArgv, ["code-review"], ["read", "bash", "grep", "find", "ls", "subagent"], ["max"]);
 }
 function validatePiRoleArgv(name, argv, skills, tools, allowedThinking) {

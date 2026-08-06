@@ -88,7 +88,7 @@ The Controller validates the role contracts before doing work:
 
 | Role | Required skills | Tools | Thinking |
 | --- | --- | --- | --- |
-| Worker | `implement`, `tdd`, bundled `code-review` | read/write implementation tools plus `subagent` | `high` or `max` |
+| Worker | `implement`, `tdd`, bundled `code-review` | read/write implementation tools plus `subagent` | `high`, `xhigh`, or `max` |
 | Reviewer | bundled `code-review` only | read-only inspection tools plus `subagent` | `max` |
 | Review-axis child | none inherited | `read,grep,find,ls,bash` | `max` |
 

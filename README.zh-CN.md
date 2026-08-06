@@ -88,7 +88,7 @@ Controller 在领取任务前验证角色契约：
 
 | 角色 | 必需 skills | 工具 | Thinking |
 | --- | --- | --- | --- |
-| Worker | `implement`、`tdd`、bundled `code-review` | 实现所需读写工具和 `subagent` | `high` 或 `max` |
+| Worker | `implement`、`tdd`、bundled `code-review` | 实现所需读写工具和 `subagent` | `high`、`xhigh` 或 `max` |
 | Reviewer | 仅 bundled `code-review` | 只读检查工具和 `subagent` | `max` |
 | Review-axis 子代理 | 不继承 skills | `read,grep,find,ls,bash` | `max` |
 
