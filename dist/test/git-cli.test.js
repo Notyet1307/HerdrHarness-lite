@@ -84,6 +84,30 @@ test("Reviewer preparation exports a read-only exact-HEAD snapshot and writable 
         rmSync(root, { recursive: true, force: true });
     }
 });
+test("post-PR Worker verification requires the remote branch to remain on the reviewed anchor", async () => {
+    const publishedHead = "b".repeat(40);
+    const reworkedHead = "c".repeat(40);
+    const input = {
+        worktree,
+        branch: worktree.branch,
+        baseSha: publishedHead,
+        reportedHeadSha: reworkedHead,
+        expectedRemoteHeadSha: publishedHead,
+    };
+    const accepted = await new GitCli(new WorkerRunner(reworkedHead, publishedHead)).verifyWorker(input);
+    assert.deepEqual(accepted, { ok: true, headSha: reworkedHead });
+    const drifted = await new GitCli(new WorkerRunner(reworkedHead, "d".repeat(40))).verifyWorker(input);
+    assert.equal(drifted.ok, false);
+    if (!drifted.ok)
+        assert.match(drifted.reason, /remote branch .* differs from reviewed anchor/);
+    const premature = await new GitCli(new WorkerRunner(reworkedHead, publishedHead)).verifyWorker({
+        ...input,
+        expectedRemoteHeadSha: null,
+    });
+    assert.equal(premature.ok, false);
+    if (!premature.ok)
+        assert.match(premature.reason, /pushed the branch before review/);
+});
 class ReviewRunner {
     status;
     constructor(status) {
@@ -95,6 +119,31 @@ class ReviewRunner {
             return ok(`${head}\n`);
         if (operation === "status")
             return ok(args.includes("--untracked-files=no") ? "" : this.status);
+        throw new Error(`unexpected git command: ${args.join(" ")}`);
+    }
+}
+class WorkerRunner {
+    localHead;
+    remoteHead;
+    constructor(localHead, remoteHead) {
+        this.localHead = localHead;
+        this.remoteHead = remoteHead;
+    }
+    run(_command, args) {
+        const operation = args[2];
+        if (operation === "rev-parse")
+            return ok(`${this.localHead}\n`);
+        if (operation === "branch")
+            return ok(`${worktree.branch}\n`);
+        if (operation === "merge-base")
+            return ok("");
+        if (operation === "rev-list")
+            return ok("1\n");
+        if (operation === "status")
+            return ok("");
+        if (operation === "ls-remote") {
+            return ok(this.remoteHead ? `${this.remoteHead}\trefs/heads/${worktree.branch}\n` : "");
+        }
         throw new Error(`unexpected git command: ${args.join(" ")}`);
     }
 }

@@ -131,6 +131,7 @@ Record:
 - `activeJob.analysis.id`, action, and summary
 - `activeJob.activeAttempt.id`, lane, and phase
 - `activeJob.headSha`
+- `activeJob.ciFailure` and `activeJob.ciReworkCount`, when present
 
 #### New block
 
@@ -385,6 +386,16 @@ gh pr merge --auto --match-head-commit <reviewed-sha> --merge
 
 GitHub must allow auto-merge, and the target branch ruleset must define required checks. On PR HEAD drift or publish recovery, the Harness disables auto-merge before failing closed. It archives only after GitHub reports the PR merged.
 
+While the PR is open, the Controller reads GitHub's required checks for the exact reviewed HEAD. An explicit failed or cancelled check causes it to:
+
+1. disable native auto-merge before changing ledger state;
+2. record a `ci_failure` incident with check identity, state, link, and bounded `gh run view --log-failed` output;
+3. retain the active slot and ask the task-bound Analyst for advice;
+4. require exact human approval before one fresh Worker may rework the same branch;
+5. verify that the remote branch still points to the previously reviewed PR HEAD, then require a fresh Reviewer before updating the same PR.
+
+The Controller does not auto-rerun CI or auto-rebase. A second required-check failure after the approved CI rework becomes `ci_rework_exhausted` and permits only `hold`.
+
 ## State and audit data
 
 `stateDir` contains:
@@ -392,6 +403,7 @@ GitHub must allow auto-merge, and the target branch ruleset must define required
 - the single active-job snapshot and terminal-job summaries;
 - compare-and-swap revisions and append-only save events;
 - incidents, Analyst effect receipts, session identity, approvals, and reassessments;
+- required-check failure evidence and the bounded CI rework count;
 - per-attempt Reviewer source snapshots, validation copies, fixed-point evidence, descriptors, and external results.
 
 Reassessment records survive terminal archive. If the exact task-bound Analyst session cannot be closed, a terminal job is not silently archived.

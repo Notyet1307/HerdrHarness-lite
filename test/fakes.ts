@@ -1,5 +1,5 @@
 import { join, resolve } from "node:path";
-import { digest, type AnalystSession, type AnalystTurn, type AttemptResult, type EvidenceItem, type EvidenceRequest, type HarnessState, type IssueSnapshot, type Job, type PullRequestRef, type SelectedTask } from "../src/model.js";
+import { digest, type AnalystSession, type AnalystTurn, type AttemptResult, type EvidenceItem, type EvidenceRequest, type HarnessState, type IssueSnapshot, type Job, type PullRequestCheck, type PullRequestObservation, type PullRequestRef, type SelectedTask } from "../src/model.js";
 import type { AnalystPort, Clock, EvidencePort, GitHubPort, GitPort, HerdrPort, IdGenerator, StateStore } from "../src/ports.js";
 
 export const validCodeReviewSkillPath = resolve("pi/skills/code-review");
@@ -66,7 +66,11 @@ export class MemoryStore implements StateStore {
 export class FakeGitHub implements GitHubPort {
   claims: Array<{ issue: number; jobId: string }> = [];
   published: PullRequestRef[] = [];
+  suspended: number[] = [];
   mergeStatus: "open" | "merged" | "closed_unmerged" = "open";
+  autoMergeEnabled = false;
+  requiredChecks: PullRequestCheck[] = [];
+  suspendFailure: Error | null = null;
 
   constructor(public graph: IssueSnapshot[]) {}
 
@@ -103,8 +107,18 @@ export class FakeGitHub implements GitHubPort {
     return pr;
   }
 
-  async observePullRequest(_repo: string, _pullRequest: PullRequestRef): Promise<"open" | "merged" | "closed_unmerged"> {
-    return this.mergeStatus;
+  async observePullRequest(_repo: string, _pullRequest: PullRequestRef): Promise<PullRequestObservation> {
+    return {
+      status: this.mergeStatus,
+      autoMergeEnabled: this.mergeStatus === "open" && this.autoMergeEnabled,
+      requiredChecks: this.mergeStatus === "open" ? clone(this.requiredChecks) : [],
+    };
+  }
+
+  async suspendAutoMerge(_repo: string, pullRequest: PullRequestRef): Promise<void> {
+    if (this.suspendFailure) throw this.suspendFailure;
+    this.suspended.push(pullRequest.number);
+    this.autoMergeEnabled = false;
   }
 }
 
@@ -113,12 +127,20 @@ export class FakeGit implements GitPort {
   workerFailure: { class: "integrity_violation" | "stale_task"; reason: string } | null = null;
   reviewerFailure: string | null = null;
   reviewerValidationArgv: string[][] = [];
+  workerVerifications: Array<{
+    reportedHeadSha: string;
+    expectedRemoteHeadSha: string | null;
+  }> = [];
 
   async refreshBase(): Promise<string> {
     return this.baseSha;
   }
 
-  async verifyWorker(input: { reportedHeadSha: string }): Promise<{ ok: true; headSha: string } | { ok: false; class: "integrity_violation" | "stale_task"; reason: string }> {
+  async verifyWorker(input: { reportedHeadSha: string; expectedRemoteHeadSha: string | null }): Promise<{ ok: true; headSha: string } | { ok: false; class: "integrity_violation" | "stale_task"; reason: string }> {
+    this.workerVerifications.push({
+      reportedHeadSha: input.reportedHeadSha,
+      expectedRemoteHeadSha: input.expectedRemoteHeadSha,
+    });
     return this.workerFailure ? { ok: false, ...this.workerFailure } : { ok: true, headSha: input.reportedHeadSha };
   }
 
@@ -270,7 +292,7 @@ export class FakeAnalyst implements AnalystPort {
 
 export class FakeEvidence implements EvidencePort {
   async initial(job: Job): Promise<{ items: EvidenceItem[]; missing: string[] }> {
-    return {
+    const result: { items: EvidenceItem[]; missing: string[] } = {
       items: [
         {
           ref: "task",
@@ -282,6 +304,17 @@ export class FakeEvidence implements EvidencePort {
       ],
       missing: ["git_diff"],
     };
+    if (job.ciFailure) {
+      const summary = JSON.stringify(job.ciFailure);
+      result.items.push({
+        ref: "ci-checks",
+        source: "github.required-checks",
+        summary,
+        digest: digest(summary),
+        trust: "untrusted",
+      });
+    }
+    return result;
   }
 
   async collect(_job: Job, requests: EvidenceRequest[]): Promise<EvidenceItem[]> {

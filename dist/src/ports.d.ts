@@ -1,4 +1,4 @@
-import type { AgentHandle, AgentStatus, AnalystSession, AnalystTurn, Attempt, AttemptResult, EvidenceItem, EvidencePack, EvidenceRequest, HarnessState, IssueSnapshot, Job, PullRequestRef, SelectedTask, TaskSnapshot, WorktreeHandle } from "./model.js";
+import type { AgentHandle, AgentStatus, AnalystSession, AnalystTurn, Attempt, AttemptResult, EvidenceItem, EvidencePack, EvidenceRequest, HarnessState, IssueSnapshot, Job, PullRequestObservation, PullRequestRef, SelectedTask, TaskSnapshot, WorktreeHandle } from "./model.js";
 export type HarnessConfig = {
     repo: string;
     localPath: string;
@@ -45,7 +45,8 @@ export interface GitHubPort {
         title: string;
         worktreePath: string;
     }): Promise<PullRequestRef>;
-    observePullRequest(repo: string, pullRequest: PullRequestRef): Promise<"open" | "merged" | "closed_unmerged">;
+    observePullRequest(repo: string, pullRequest: PullRequestRef): Promise<PullRequestObservation>;
+    suspendAutoMerge(repo: string, pullRequest: PullRequestRef): Promise<void>;
 }
 export type WorkerVerification = {
     ok: true;
@@ -69,6 +70,7 @@ export interface GitPort {
         branch: string;
         baseSha: string;
         reportedHeadSha: string;
+        expectedRemoteHeadSha: string | null;
     }): Promise<WorkerVerification>;
     prepareReviewer(input: {
         worktree: WorktreeHandle;

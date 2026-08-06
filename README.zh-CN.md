@@ -131,6 +131,7 @@ node dist/src/cli.js status --config /ABSOLUTE/PATH/harness.config.json
 - `activeJob.analysis.id`、action、summary
 - `activeJob.activeAttempt.id`、lane、phase
 - `activeJob.headSha`
+- `activeJob.ciFailure` 与 `activeJob.ciReworkCount`（存在时）
 
 #### 新 block
 
@@ -385,6 +386,16 @@ gh pr merge --auto --match-head-commit <reviewed-sha> --merge
 
 GitHub 必须允许 auto-merge，目标分支 ruleset 必须配置 required checks。PR HEAD 漂移或发布恢复时，Harness 会先取消 auto-merge 再 fail closed。只有 GitHub 报告 merged 后才归档。
 
+PR 仍为 OPEN 时，Controller 会读取精确 reviewed HEAD 上的 GitHub required checks。若 check 明确为失败或取消，它会：
+
+1. 在修改 ledger 状态前先取消原生 auto-merge；
+2. 记录 `ci_failure` incident，其中包含 check 身份、状态、链接，以及有界的 `gh run view --log-failed` 输出；
+3. 保留 active slot，并让任务绑定的 Analyst 给出建议；
+4. 只有精确人工批准后，才允许一个 fresh Worker 在同一分支回修；
+5. 先验证远端分支仍指向此前已审的 PR HEAD，再要求 fresh Reviewer，通过后更新同一 PR。
+
+Controller 不会自动 rerun CI，也不会自动 rebase。获批的 CI 回修完成后若 required check 再次失败，会进入 `ci_rework_exhausted`，只允许 `hold`。
+
 ## 状态与审计数据
 
 `stateDir` 保存：
@@ -392,6 +403,7 @@ GitHub 必须允许 auto-merge，目标分支 ruleset 必须配置 required chec
 - 单一 active job snapshot 与 terminal job 摘要；
 - compare-and-swap revision 和 append-only 保存事件；
 - incident、Analyst effect receipts、session identity、approval 与 reassessment；
+- required-check 失败证据与有界 CI 回修计数；
 - 每次 Reviewer attempt 的只读源码快照、验证副本、fixed-point evidence、descriptor 和外部 result。
 
 Reassessment 记录在 terminal archive 后仍保留。无法关闭精确绑定的 Analyst session 时，终态 job 不会静默归档。

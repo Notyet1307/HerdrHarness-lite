@@ -1,4 +1,4 @@
-import { type AnalystSession, type AnalystTurn, type AttemptResult, type EvidenceItem, type EvidenceRequest, type HarnessState, type IssueSnapshot, type Job, type PullRequestRef, type SelectedTask } from "../src/model.js";
+import { type AnalystSession, type AnalystTurn, type AttemptResult, type EvidenceItem, type EvidenceRequest, type HarnessState, type IssueSnapshot, type Job, type PullRequestCheck, type PullRequestObservation, type PullRequestRef, type SelectedTask } from "../src/model.js";
 import type { AnalystPort, Clock, EvidencePort, GitHubPort, GitPort, HerdrPort, IdGenerator, StateStore } from "../src/ports.js";
 export declare const validCodeReviewSkillPath: string;
 export declare const validPiSubagentsExtensionPath: string;
@@ -30,7 +30,11 @@ export declare class FakeGitHub implements GitHubPort {
         jobId: string;
     }>;
     published: PullRequestRef[];
+    suspended: number[];
     mergeStatus: "open" | "merged" | "closed_unmerged";
+    autoMergeEnabled: boolean;
+    requiredChecks: PullRequestCheck[];
+    suspendFailure: Error | null;
     constructor(graph: IssueSnapshot[]);
     listIssueGraph(_repo: string, _readyLabel: string): Promise<IssueSnapshot[]>;
     getIssue(_repo: string, issueNumber: number): Promise<IssueSnapshot>;
@@ -50,7 +54,8 @@ export declare class FakeGitHub implements GitHubPort {
         title: string;
         worktreePath: string;
     }): Promise<PullRequestRef>;
-    observePullRequest(_repo: string, _pullRequest: PullRequestRef): Promise<"open" | "merged" | "closed_unmerged">;
+    observePullRequest(_repo: string, _pullRequest: PullRequestRef): Promise<PullRequestObservation>;
+    suspendAutoMerge(_repo: string, pullRequest: PullRequestRef): Promise<void>;
 }
 export declare class FakeGit implements GitPort {
     baseSha: string;
@@ -60,9 +65,14 @@ export declare class FakeGit implements GitPort {
     } | null;
     reviewerFailure: string | null;
     reviewerValidationArgv: string[][];
+    workerVerifications: Array<{
+        reportedHeadSha: string;
+        expectedRemoteHeadSha: string | null;
+    }>;
     refreshBase(): Promise<string>;
     verifyWorker(input: {
         reportedHeadSha: string;
+        expectedRemoteHeadSha: string | null;
     }): Promise<{
         ok: true;
         headSha: string;

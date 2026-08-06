@@ -11,6 +11,7 @@ import type {
   HarnessState,
   IssueSnapshot,
   Job,
+  PullRequestObservation,
   PullRequestRef,
   SelectedTask,
   TaskSnapshot,
@@ -67,7 +68,8 @@ export interface GitHubPort {
     title: string;
     worktreePath: string;
   }): Promise<PullRequestRef>;
-  observePullRequest(repo: string, pullRequest: PullRequestRef): Promise<"open" | "merged" | "closed_unmerged">;
+  observePullRequest(repo: string, pullRequest: PullRequestRef): Promise<PullRequestObservation>;
+  suspendAutoMerge(repo: string, pullRequest: PullRequestRef): Promise<void>;
 }
 
 export type WorkerVerification =
@@ -85,6 +87,7 @@ export interface GitPort {
     branch: string;
     baseSha: string;
     reportedHeadSha: string;
+    expectedRemoteHeadSha: string | null;
   }): Promise<WorkerVerification>;
   prepareReviewer(input: {
     worktree: WorktreeHandle;

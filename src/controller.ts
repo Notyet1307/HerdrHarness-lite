@@ -11,10 +11,12 @@ import {
   type AnalystAdvice,
   type Attempt,
   type AttemptResult,
+  type CiFailure,
   type EvidenceItem,
   type HarnessState,
   type Incident,
   type Job,
+  type PullRequestCheck,
   type ReviewerResult,
   type WorkerResult,
 } from "./model.js";
@@ -160,6 +162,8 @@ export class HarnessController {
       approval: null,
       reassessments: [],
       pullRequest: null,
+      ciFailure: null,
+      ciReworkCount: 0,
       lastError: null,
       createdAt: now,
       updatedAt: now,
@@ -317,6 +321,7 @@ export class HarnessController {
       round: job.reviewRound + 1,
       baseSha: lane === "worker" ? (job.headSha ?? job.baseSha) : job.baseSha,
       expectedHeadSha: lane === "reviewer" ? job.headSha : null,
+      expectedRemoteHeadSha: lane === "worker" ? (job.pullRequest?.headSha ?? null) : null,
       resultPath: lane === "reviewer"
         ? resolve(reviewerRoot, "result.json")
         : `${trimSlash(job.worktree.path)}/.harness/attempt-${safeToken(attemptId)}.json`,
@@ -585,6 +590,7 @@ export class HarnessController {
       branch: job.branch,
       baseSha: attempt.baseSha,
       reportedHeadSha: worker.headSha,
+      expectedRemoteHeadSha: attempt.expectedRemoteHeadSha ?? null,
     });
     if (!verification.ok) {
       return this.block(state, job, {
@@ -730,6 +736,7 @@ export class HarnessController {
     const next = evolveJob(job, this.deps.clock.now(), {
       state: "awaiting_merge",
       pullRequest,
+      ciFailure: null,
       lastError: null,
     });
     await this.saveJob(state, job, next);
@@ -752,9 +759,43 @@ export class HarnessController {
         attemptResult: null,
       });
     }
-    const status = await this.deps.github.observePullRequest(job.task.repo, job.pullRequest);
-    if (status === "open") return result(true, "waiting_for_merge", job.id, `PR #${job.pullRequest.number} is still open`);
-    if (status === "closed_unmerged") {
+    let observation;
+    try {
+      observation = await this.deps.github.observePullRequest(job.task.repo, job.pullRequest);
+    } catch (error) {
+      return result(false, "waiting_for_merge", job.id, `PR observation is retryable: ${message(error)}`);
+    }
+    if (observation.status === "open") {
+      const failedChecks = observation.requiredChecks.filter(isFailedCheck);
+      if (failedChecks.length === 0) {
+        return result(true, "waiting_for_merge", job.id, `PR #${job.pullRequest.number} is still open`);
+      }
+      if (observation.autoMergeEnabled) {
+        try {
+          await this.deps.github.suspendAutoMerge(job.task.repo, job.pullRequest);
+        } catch (error) {
+          return result(
+            false,
+            "waiting_for_merge",
+            job.id,
+            `required CI failed but auto-merge suspension is not confirmed: ${message(error)}`,
+          );
+        }
+      }
+      const ciFailure: CiFailure = {
+        headSha: job.pullRequest.headSha,
+        observedAt: this.deps.clock.now(),
+        checks: failedChecks,
+      };
+      return this.block(state, job, {
+        class: (job.ciReworkCount ?? 0) >= 1 ? "ci_rework_exhausted" : "ci_failure",
+        lane: "controller",
+        summary: summarizeCiFailure(job.pullRequest.number, ciFailure),
+        attemptResult: null,
+        ciFailure,
+      });
+    }
+    if (observation.status === "closed_unmerged") {
       return this.block(state, job, {
         class: "integrity_violation",
         lane: "controller",
@@ -901,6 +942,35 @@ export class HarnessController {
       });
     }
 
+    const ciRecovery = approval.action === "retry_fresh_worker" && incident.class === "ci_failure";
+    if (ciRecovery) {
+      if (
+        incident.lane !== "controller" ||
+        incident.attemptId !== null ||
+        job.activeAttempt !== null ||
+        !job.pullRequest ||
+        !job.ciFailure ||
+        job.ciFailure.headSha !== job.pullRequest.headSha ||
+        job.headSha !== job.pullRequest.headSha ||
+        (job.ciReworkCount ?? 0) >= 1
+      ) {
+        return this.block(state, job, {
+          class: "integrity_violation",
+          lane: "controller",
+          summary: "fresh Worker CI recovery lost its exact PR or Git binding",
+          attemptResult: null,
+        });
+      }
+      let observation;
+      try {
+        observation = await this.deps.github.observePullRequest(job.task.repo, job.pullRequest);
+        if (observation.status !== "open") throw new Error(`PR is ${observation.status}`);
+        if (observation.autoMergeEnabled) await this.deps.github.suspendAutoMerge(job.task.repo, job.pullRequest);
+      } catch (error) {
+        return result(false, "recovery_applied", job.id, `CI recovery safety check is retryable: ${message(error)}`);
+      }
+    }
+
     if (approval.action === "retry_fresh_reviewer") {
       if (
         incident.class !== "infrastructure_exhausted" ||
@@ -945,6 +1015,7 @@ export class HarnessController {
       incident: null,
       analysis: null,
       approval: consumed,
+      ...(ciRecovery ? { ciReworkCount: (job.ciReworkCount ?? 0) + 1 } : {}),
       lastError: null,
     });
     await this.saveJob(state, job, next);
@@ -981,6 +1052,7 @@ export class HarnessController {
       lane: Incident["lane"];
       summary: string;
       attemptResult: AttemptResult | null;
+      ciFailure?: CiFailure;
     },
   ): Promise<TickResult> {
     const now = this.deps.clock.now();
@@ -1008,6 +1080,7 @@ export class HarnessController {
       incident,
       analysis: null,
       approval: null,
+      ...(input.ciFailure ? { ciFailure: input.ciFailure } : {}),
       lastError: input.summary,
     });
     await this.saveJob(state, job, next);
@@ -1038,6 +1111,18 @@ function dedupeEvidence(items: EvidenceItem[]): EvidenceItem[] {
     result.push(item);
   }
   return result.slice(0, 32);
+}
+
+function isFailedCheck(check: PullRequestCheck): boolean {
+  return check.bucket === "fail" || check.bucket === "cancel";
+}
+
+function summarizeCiFailure(number: number, failure: CiFailure): string {
+  const checks = failure.checks.slice(0, 8).map((check) => (
+    `- ${check.name}: ${check.state} (${check.bucket})${check.link ? ` ${check.link}` : ""}`
+  ));
+  if (failure.checks.length > checks.length) checks.push(`- ... ${failure.checks.length - checks.length} more failed checks`);
+  return [`PR #${number} required CI failed at ${failure.headSha}:`, ...checks].join("\n");
 }
 
 function validateConfig(config: HarnessConfig): void {

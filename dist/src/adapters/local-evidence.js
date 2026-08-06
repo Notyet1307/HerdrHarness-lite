@@ -20,11 +20,14 @@ export class LocalEvidence {
                 headSha: job.headSha,
                 branch: job.branch,
                 reviewRound: job.reviewRound,
+                ciReworkCount: job.ciReworkCount ?? 0,
                 lastError: job.lastError,
             })),
         ];
         if (job.incident)
             items.push(item("incident", "ledger.incident", JSON.stringify(job.incident)));
+        if (job.ciFailure)
+            items.push(item("ci-checks", "github.required-checks", JSON.stringify(job.ciFailure)));
         if (job.activeAttempt)
             items.push(item("active-attempt", "ledger.activeAttempt", JSON.stringify(job.activeAttempt)));
         const lastReview = [...job.attempts].reverse().find((attempt) => attempt.lane === "reviewer" && attempt.result);

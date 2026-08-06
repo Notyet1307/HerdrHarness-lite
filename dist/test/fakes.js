@@ -58,7 +58,11 @@ export class FakeGitHub {
     graph;
     claims = [];
     published = [];
+    suspended = [];
     mergeStatus = "open";
+    autoMergeEnabled = false;
+    requiredChecks = [];
+    suspendFailure = null;
     constructor(graph) {
         this.graph = graph;
     }
@@ -86,7 +90,17 @@ export class FakeGitHub {
         return pr;
     }
     async observePullRequest(_repo, _pullRequest) {
-        return this.mergeStatus;
+        return {
+            status: this.mergeStatus,
+            autoMergeEnabled: this.mergeStatus === "open" && this.autoMergeEnabled,
+            requiredChecks: this.mergeStatus === "open" ? clone(this.requiredChecks) : [],
+        };
+    }
+    async suspendAutoMerge(_repo, pullRequest) {
+        if (this.suspendFailure)
+            throw this.suspendFailure;
+        this.suspended.push(pullRequest.number);
+        this.autoMergeEnabled = false;
     }
 }
 export class FakeGit {
@@ -94,10 +108,15 @@ export class FakeGit {
     workerFailure = null;
     reviewerFailure = null;
     reviewerValidationArgv = [];
+    workerVerifications = [];
     async refreshBase() {
         return this.baseSha;
     }
     async verifyWorker(input) {
+        this.workerVerifications.push({
+            reportedHeadSha: input.reportedHeadSha,
+            expectedRemoteHeadSha: input.expectedRemoteHeadSha,
+        });
         return this.workerFailure ? { ok: false, ...this.workerFailure } : { ok: true, headSha: input.reportedHeadSha };
     }
     async prepareReviewer(input) {
@@ -233,7 +252,7 @@ export class FakeAnalyst {
 }
 export class FakeEvidence {
     async initial(job) {
-        return {
+        const result = {
             items: [
                 {
                     ref: "task",
@@ -245,6 +264,17 @@ export class FakeEvidence {
             ],
             missing: ["git_diff"],
         };
+        if (job.ciFailure) {
+            const summary = JSON.stringify(job.ciFailure);
+            result.items.push({
+                ref: "ci-checks",
+                source: "github.required-checks",
+                summary,
+                digest: digest(summary),
+                trust: "untrusted",
+            });
+        }
+        return result;
     }
     async collect(_job, requests) {
         return requests.map((request, index) => ({

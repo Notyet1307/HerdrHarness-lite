@@ -85,6 +85,8 @@ export type Attempt = {
   round: number;
   baseSha: string;
   expectedHeadSha: string | null;
+  /** Null for the initial Worker; exact published SHA for a post-PR rework Worker. */
+  expectedRemoteHeadSha?: string | null;
   resultPath: string;
   reviewerValidationArgv?: string[];
   promptDigest: string;
@@ -146,6 +148,8 @@ export type BlockClass =
   | "infrastructure_exhausted"
   | "integrity_violation"
   | "stale_task"
+  | "ci_failure"
+  | "ci_rework_exhausted"
   | "analyst_unavailable";
 
 export type RecoveryAction = "retry_fresh_worker" | "retry_fresh_reviewer" | "hold";
@@ -221,6 +225,28 @@ export type PullRequestRef = {
   headSha: string;
 };
 
+export type PullRequestCheck = {
+  name: string;
+  state: string;
+  bucket: "pass" | "fail" | "pending" | "skipping" | "cancel";
+  workflow: string;
+  link: string;
+  completedAt: string | null;
+  diagnostic: string | null;
+};
+
+export type PullRequestObservation = {
+  status: "open" | "merged" | "closed_unmerged";
+  autoMergeEnabled: boolean;
+  requiredChecks: PullRequestCheck[];
+};
+
+export type CiFailure = {
+  headSha: string;
+  observedAt: string;
+  checks: PullRequestCheck[];
+};
+
 export type JobState =
   | "claimed"
   | "worker_ready"
@@ -255,6 +281,10 @@ export type Job = {
   approval: Approval | null;
   reassessments?: Reassessment[];
   pullRequest: PullRequestRef | null;
+  /** Optional for backward compatibility with V1 ledgers created before CI feedback. */
+  ciFailure?: CiFailure | null;
+  /** V1 permits one human-approved post-PR CI rework cycle. */
+  ciReworkCount?: number;
   lastError: string | null;
   createdAt: string;
   updatedAt: string;
@@ -328,6 +358,24 @@ export function assertJobInvariant(job: Job): void {
   if (job.state === "recovery_approved" && !job.approval) {
     throw new Error("recovery_approved job requires an approval");
   }
+  const ciReworkCount = job.ciReworkCount ?? 0;
+  if (!Number.isInteger(ciReworkCount) || ciReworkCount < 0 || ciReworkCount > 1) {
+    throw new Error("job has an invalid CI rework count");
+  }
+  if (job.ciFailure) {
+    if (
+      !job.pullRequest ||
+      job.ciFailure.headSha !== job.pullRequest.headSha ||
+      !Number.isFinite(Date.parse(job.ciFailure.observedAt)) ||
+      job.ciFailure.checks.length === 0 ||
+      job.ciFailure.checks.some((check) => check.bucket !== "fail" && check.bucket !== "cancel")
+    ) {
+      throw new Error("job has invalid CI failure evidence");
+    }
+  }
+  if ((job.incident?.class === "ci_failure" || job.incident?.class === "ci_rework_exhausted") && !job.ciFailure) {
+    throw new Error("CI incident requires failure evidence");
+  }
   if (
     job.incident &&
     (!Array.isArray(job.incident.allowedActions) ||
@@ -376,6 +424,13 @@ export function assertJobInvariant(job: Job): void {
     !["reviewer_running", "blocked", "recovery_approved"].includes(job.state)
   ) {
     throw new Error("reviewer attempt is bound to an invalid state");
+  }
+  if (
+    job.activeAttempt?.expectedRemoteHeadSha !== undefined &&
+    job.activeAttempt.expectedRemoteHeadSha !== null &&
+    !/^[0-9a-f]{40}$/i.test(job.activeAttempt.expectedRemoteHeadSha)
+  ) {
+    throw new Error("attempt has an invalid remote HEAD anchor");
   }
   if ((job.state === "publish_ready" || job.state === "awaiting_merge" || job.state === "done") && !job.headSha) {
     throw new Error(`${job.state} requires headSha`);

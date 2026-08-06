@@ -65,6 +65,41 @@ test("publish recovery disables an existing auto-merge request after head drift"
         args: ["pr", "merge", "42", "--repo", "owner/repo", "--disable-auto"],
     });
 });
+test("observing an open PR returns required check failures with bounded failed logs", async () => {
+    const runner = new FailedChecksRunner();
+    const github = new GitHubGh(runner, true);
+    const observation = await github.observePullRequest("owner/repo", {
+        number: 42,
+        url: "https://github.com/owner/repo/pull/42",
+        headSha,
+    });
+    assert.deepEqual(observation, {
+        status: "open",
+        autoMergeEnabled: true,
+        requiredChecks: [{
+                name: "test-backend",
+                state: "FAILURE",
+                bucket: "fail",
+                workflow: "Backend",
+                link: "https://github.com/owner/repo/actions/runs/123/job/456",
+                completedAt: "2026-08-06T00:00:00Z",
+                diagnostic: "test-backend\tFAIL\nassertion failed\n",
+            }],
+    });
+    assert.deepEqual(runner.calls.at(-1), {
+        command: "gh",
+        args: ["run", "view", "123", "--repo", "owner/repo", "--log-failed"],
+    });
+    await github.suspendAutoMerge("owner/repo", {
+        number: 42,
+        url: "https://github.com/owner/repo/pull/42",
+        headSha,
+    });
+    assert.deepEqual(runner.calls.at(-1), {
+        command: "gh",
+        args: ["pr", "merge", "42", "--repo", "owner/repo", "--disable-auto"],
+    });
+});
 class PublishRunner {
     calls = [];
     run(command, args) {
@@ -132,6 +167,41 @@ class PublishDriftRunner {
                 autoMergeRequest: { enabledAt: "2026-08-05T00:00:00Z" },
             }));
         }
+        if (args[0] === "pr" && args[1] === "merge" && args.includes("--disable-auto"))
+            return ok("");
+        return fail(`unexpected command: ${command} ${args.join(" ")}`);
+    }
+}
+class FailedChecksRunner {
+    calls = [];
+    run(command, args) {
+        this.calls.push({ command, args: [...args] });
+        if (args[0] === "pr" && args[1] === "view") {
+            return ok(JSON.stringify({
+                state: "OPEN",
+                mergedAt: null,
+                headRefOid: headSha,
+                autoMergeRequest: { enabledAt: "2026-08-06T00:00:00Z" },
+            }));
+        }
+        if (args[0] === "pr" && args[1] === "checks") {
+            return {
+                ok: false,
+                code: 1,
+                stdout: JSON.stringify([{
+                        name: "test-backend",
+                        state: "FAILURE",
+                        bucket: "fail",
+                        workflow: "Backend",
+                        link: "https://github.com/owner/repo/actions/runs/123/job/456",
+                        completedAt: "2026-08-06T00:00:00Z",
+                    }]),
+                stderr: "",
+                error: null,
+            };
+        }
+        if (args[0] === "run" && args[1] === "view")
+            return ok("test-backend\tFAIL\nassertion failed\n");
         if (args[0] === "pr" && args[1] === "merge" && args.includes("--disable-auto"))
             return ok("");
         return fail(`unexpected command: ${command} ${args.join(" ")}`);

@@ -72,6 +72,8 @@ export type Attempt = {
     round: number;
     baseSha: string;
     expectedHeadSha: string | null;
+    /** Null for the initial Worker; exact published SHA for a post-PR rework Worker. */
+    expectedRemoteHeadSha?: string | null;
     resultPath: string;
     reviewerValidationArgv?: string[];
     promptDigest: string;
@@ -113,7 +115,7 @@ export type EvidencePack = {
     items: EvidenceItem[];
     missing: string[];
 };
-export type BlockClass = "agent_decision" | "agent_blocked" | "review_uncertain" | "infrastructure_exhausted" | "integrity_violation" | "stale_task" | "analyst_unavailable";
+export type BlockClass = "agent_decision" | "agent_blocked" | "review_uncertain" | "infrastructure_exhausted" | "integrity_violation" | "stale_task" | "ci_failure" | "ci_rework_exhausted" | "analyst_unavailable";
 export type RecoveryAction = "retry_fresh_worker" | "retry_fresh_reviewer" | "hold";
 export declare function isRecoveryAction(value: unknown): value is RecoveryAction;
 export declare function isRetryAction(value: unknown): value is Exclude<RecoveryAction, "hold">;
@@ -175,6 +177,25 @@ export type PullRequestRef = {
     url: string;
     headSha: string;
 };
+export type PullRequestCheck = {
+    name: string;
+    state: string;
+    bucket: "pass" | "fail" | "pending" | "skipping" | "cancel";
+    workflow: string;
+    link: string;
+    completedAt: string | null;
+    diagnostic: string | null;
+};
+export type PullRequestObservation = {
+    status: "open" | "merged" | "closed_unmerged";
+    autoMergeEnabled: boolean;
+    requiredChecks: PullRequestCheck[];
+};
+export type CiFailure = {
+    headSha: string;
+    observedAt: string;
+    checks: PullRequestCheck[];
+};
 export type JobState = "claimed" | "worker_ready" | "worker_running" | "reviewer_ready" | "reviewer_running" | "publish_ready" | "awaiting_merge" | "blocked" | "recovery_approved" | "done" | "cancelled";
 export type Job = {
     id: string;
@@ -197,6 +218,10 @@ export type Job = {
     approval: Approval | null;
     reassessments?: Reassessment[];
     pullRequest: PullRequestRef | null;
+    /** Optional for backward compatibility with V1 ledgers created before CI feedback. */
+    ciFailure?: CiFailure | null;
+    /** V1 permits one human-approved post-PR CI rework cycle. */
+    ciReworkCount?: number;
     lastError: string | null;
     createdAt: string;
     updatedAt: string;

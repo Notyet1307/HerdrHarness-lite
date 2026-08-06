@@ -14,11 +14,13 @@ export function allowedActionsFor(blockClass: BlockClass, lane: Incident["lane"]
     case "agent_decision":
     case "agent_blocked":
     case "review_uncertain":
+    case "ci_failure":
       return ["retry_fresh_worker", "hold"];
     case "infrastructure_exhausted":
       return lane === "reviewer" ? ["retry_fresh_reviewer", "hold"] : ["retry_fresh_worker", "hold"];
     case "integrity_violation":
     case "stale_task":
+    case "ci_rework_exhausted":
     case "analyst_unavailable":
       return ["hold"];
   }

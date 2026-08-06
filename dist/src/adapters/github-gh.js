@@ -170,9 +170,66 @@ export class GitHubGh {
             }
             throw new Error(`PR head changed after review: expected ${pullRequest.headSha}, got ${String(view.headRefOid)}`);
         }
-        if (typeof view.mergedAt === "string" && view.mergedAt)
-            return "merged";
-        return view.state === "OPEN" ? "open" : "closed_unmerged";
+        if (typeof view.mergedAt === "string" && view.mergedAt) {
+            return { status: "merged", autoMergeEnabled: false, requiredChecks: [] };
+        }
+        if (view.state !== "OPEN") {
+            return { status: "closed_unmerged", autoMergeEnabled: false, requiredChecks: [] };
+        }
+        return {
+            status: "open",
+            autoMergeEnabled: Boolean(view.autoMergeRequest),
+            requiredChecks: this.readRequiredChecks(repo, pullRequest.number),
+        };
+    }
+    async suspendAutoMerge(repo, pullRequest) {
+        this.disableAutoMerge(repo, pullRequest.number);
+    }
+    readRequiredChecks(repo, number) {
+        const result = this.runner.run("gh", [
+            "pr",
+            "checks",
+            String(number),
+            "--repo",
+            repo,
+            "--required",
+            "--json",
+            "name,state,bucket,workflow,link,completedAt",
+        ]);
+        if (!result.stdout.trim()) {
+            throw new Error(`gh pr checks #${number} failed: ${(result.error ?? result.stderr.trim()) || `exit ${result.code}`}`);
+        }
+        let checks;
+        try {
+            const raw = JSON.parse(result.stdout);
+            if (!Array.isArray(raw) || raw.length > 100)
+                throw new Error("required checks response is not a bounded array");
+            checks = raw.map(normalizeCheck);
+        }
+        catch (error) {
+            throw new Error(`cannot parse required checks for PR #${number}: ${error instanceof Error ? error.message : String(error)}`);
+        }
+        const logs = new Map();
+        for (const check of checks) {
+            if (check.bucket !== "fail" && check.bucket !== "cancel")
+                continue;
+            const runId = check.link.match(/\/actions\/runs\/(\d+)/)?.[1];
+            if (!runId || (logs.size >= 4 && !logs.has(runId)))
+                continue;
+            if (logs.has(runId))
+                continue;
+            const log = this.readFailedLog(repo, runId);
+            logs.set(runId, log);
+            check.diagnostic = log;
+        }
+        return checks;
+    }
+    readFailedLog(repo, runId) {
+        const result = this.runner.run("gh", ["run", "view", runId, "--repo", repo, "--log-failed"]);
+        if (result.ok)
+            return bounded(result.stdout, 12_000);
+        const diagnostic = (result.error ?? result.stderr.trim()) || result.stdout.trim() || `exit ${result.code}`;
+        return bounded(`failed log unavailable: ${diagnostic}`, 2_000);
     }
     disableAutoMerge(repo, number) {
         requireSuccess(this.runner.run("gh", ["pr", "merge", String(number), "--repo", repo, "--disable-auto"]), `disable auto-merge for drifted PR #${number}`);
@@ -232,5 +289,32 @@ function string(value, name) {
     if (typeof value !== "string" || !value.trim())
         throw new Error(`${name} is invalid`);
     return value;
+}
+function normalizeCheck(value) {
+    if (!value || typeof value !== "object")
+        throw new Error("required check is not an object");
+    const raw = value;
+    const name = string(raw.name, "required check name");
+    const state = string(raw.state, `required check ${name} state`);
+    if (!isCheckBucket(raw.bucket))
+        throw new Error(`required check ${name} has invalid bucket ${String(raw.bucket)}`);
+    if (raw.completedAt !== null && raw.completedAt !== undefined && typeof raw.completedAt !== "string") {
+        throw new Error(`required check ${name} has invalid completedAt`);
+    }
+    return {
+        name: bounded(name, 512),
+        state: bounded(state, 512),
+        bucket: raw.bucket,
+        workflow: typeof raw.workflow === "string" ? bounded(raw.workflow, 512) : "",
+        link: typeof raw.link === "string" ? bounded(raw.link, 2_000) : "",
+        completedAt: typeof raw.completedAt === "string" ? bounded(raw.completedAt, 512) : null,
+        diagnostic: null,
+    };
+}
+function isCheckBucket(value) {
+    return value === "pass" || value === "fail" || value === "pending" || value === "skipping" || value === "cancel";
+}
+function bounded(value, max) {
+    return value.length <= max ? value : `${value.slice(0, max)}\n...[truncated]`;
 }
 //# sourceMappingURL=github-gh.js.map

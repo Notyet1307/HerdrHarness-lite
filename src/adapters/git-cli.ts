@@ -22,6 +22,7 @@ export class GitCli implements GitPort {
     branch: string;
     baseSha: string;
     reportedHeadSha: string;
+    expectedRemoteHeadSha: string | null;
   }): Promise<WorkerVerification> {
     const path = input.worktree.path;
     const head = this.git(path, ["rev-parse", "HEAD"]).trim();
@@ -48,8 +49,16 @@ export class GitCli implements GitPort {
     if (!remote.ok) {
       return { ok: false, class: "stale_task", reason: "cannot prove whether the worker branch was pushed" };
     }
-    if (remote.stdout.trim()) {
+    const remoteHead = remote.stdout.trim().split(/\s+/, 1)[0] || null;
+    if (input.expectedRemoteHeadSha === null && remoteHead) {
       return { ok: false, class: "integrity_violation", reason: "worker pushed the branch before review" };
+    }
+    if (input.expectedRemoteHeadSha !== null && remoteHead !== input.expectedRemoteHeadSha) {
+      return {
+        ok: false,
+        class: remoteHead ? "integrity_violation" : "stale_task",
+        reason: `remote branch ${remoteHead ?? "is missing"} differs from reviewed anchor ${input.expectedRemoteHeadSha}`,
+      };
     }
     return { ok: true, headSha: head };
   }

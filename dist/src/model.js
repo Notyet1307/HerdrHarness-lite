@@ -59,6 +59,22 @@ export function assertJobInvariant(job) {
     if (job.state === "recovery_approved" && !job.approval) {
         throw new Error("recovery_approved job requires an approval");
     }
+    const ciReworkCount = job.ciReworkCount ?? 0;
+    if (!Number.isInteger(ciReworkCount) || ciReworkCount < 0 || ciReworkCount > 1) {
+        throw new Error("job has an invalid CI rework count");
+    }
+    if (job.ciFailure) {
+        if (!job.pullRequest ||
+            job.ciFailure.headSha !== job.pullRequest.headSha ||
+            !Number.isFinite(Date.parse(job.ciFailure.observedAt)) ||
+            job.ciFailure.checks.length === 0 ||
+            job.ciFailure.checks.some((check) => check.bucket !== "fail" && check.bucket !== "cancel")) {
+            throw new Error("job has invalid CI failure evidence");
+        }
+    }
+    if ((job.incident?.class === "ci_failure" || job.incident?.class === "ci_rework_exhausted") && !job.ciFailure) {
+        throw new Error("CI incident requires failure evidence");
+    }
     if (job.incident &&
         (!Array.isArray(job.incident.allowedActions) ||
             job.incident.allowedActions.length === 0 ||
@@ -97,6 +113,11 @@ export function assertJobInvariant(job) {
         job.activeAttempt.lane === "reviewer" &&
         !["reviewer_running", "blocked", "recovery_approved"].includes(job.state)) {
         throw new Error("reviewer attempt is bound to an invalid state");
+    }
+    if (job.activeAttempt?.expectedRemoteHeadSha !== undefined &&
+        job.activeAttempt.expectedRemoteHeadSha !== null &&
+        !/^[0-9a-f]{40}$/i.test(job.activeAttempt.expectedRemoteHeadSha)) {
+        throw new Error("attempt has an invalid remote HEAD anchor");
     }
     if ((job.state === "publish_ready" || job.state === "awaiting_merge" || job.state === "done") && !job.headSha) {
         throw new Error(`${job.state} requires headSha`);

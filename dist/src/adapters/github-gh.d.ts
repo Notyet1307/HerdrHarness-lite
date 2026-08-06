@@ -1,4 +1,4 @@
-import type { IssueSnapshot, PullRequestRef, SelectedTask } from "../model.js";
+import type { IssueSnapshot, PullRequestObservation, PullRequestRef, SelectedTask } from "../model.js";
 import type { GitHubPort } from "../ports.js";
 import { type CommandRunner } from "./command.js";
 /** GitHub adapter built only on `gh` and `git`; mutations are idempotent. */
@@ -24,6 +24,9 @@ export declare class GitHubGh implements GitHubPort {
         title: string;
         worktreePath: string;
     }): Promise<PullRequestRef>;
-    observePullRequest(repo: string, pullRequest: PullRequestRef): Promise<"open" | "merged" | "closed_unmerged">;
+    observePullRequest(repo: string, pullRequest: PullRequestRef): Promise<PullRequestObservation>;
+    suspendAutoMerge(repo: string, pullRequest: PullRequestRef): Promise<void>;
+    private readRequiredChecks;
+    private readFailedLog;
     private disableAutoMerge;
 }
