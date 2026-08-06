@@ -250,12 +250,12 @@ node dist/src/cli.js approve \
 
 该命令受 compare-and-swap 保护。revision、incident、analysis 任一变化都会拒绝。Approval 只记录权限；后续 Controller tick 会重新检查 policy 与 Git，关闭旧 pane，再创建 fresh attempt，绝不恢复旧 agent。
 
-### 3. 重新评估处于 hold 的 Reviewer provider 故障
+### 3. 重新评估处于 hold 的 Worker 或 Reviewer provider 故障
 
-`hold` 不能直接批准。仅当该 hold 精确对应 Reviewer `infrastructure_exhausted`、且没有 durable result，并且运行环境确实发生变化时：
+`hold` 不能直接批准。仅当该 hold 精确对应 Worker 或 Reviewer `infrastructure_exhausted`、且没有 durable result，并且运行环境确实发生变化时：
 
 1. 如果存在连续 `run` 进程，先停止它；
-2. 修复或切换 Reviewer provider/model；
+2. 修复或切换故障角色的 provider/model；
 3. 执行有界、无 session provider 探测；
 4. 用 `reassess` 请求新的 Analyst 判断。
 
@@ -266,12 +266,12 @@ node dist/src/cli.js reassess \
   --incident held-incident-id \
   --analysis held-analysis-id \
   --actor operator-name \
-  --reason "Reviewer provider 已切换，且无 session 只读探测通过"
+  --reason "故障角色 provider 已切换，且无 session 只读探测通过"
 ```
 
 `reassess` 会把旧 revision/incident/analysis、actor 和有界 reason 保留在审计记录中，把 operator statement 标为不可信证据，创建拥有全新 receipt key 的 successor incident，并清空旧 analysis。它本身不授予 retry 权限、不关闭或启动 agent，也不接触 Git。
 
-接着单独执行一次 `tick` 获取新的 Analyst 判断。如果仍为 `hold`，就停止；如果建议 `retry_fresh_reviewer`，必须对新的 revision/incident/analysis 再执行一次精确 `approve`。之后继续手动 tick，或者启动一个新的 `run` 进程；两种方式都会加载修改后的 provider 配置。
+接着单独执行一次 `tick` 获取新的 Analyst 判断。如果仍为 `hold`，就停止；如果建议与 lane 匹配的 `retry_fresh_worker` 或 `retry_fresh_reviewer`，必须对新的 revision/incident/analysis 再执行一次精确 `approve`。之后继续手动 tick，或者启动一个新的 `run` 进程；两种方式都会加载修改后的 provider 配置。
 
 ### 4. 必须保持停止的故障
 

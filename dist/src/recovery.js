@@ -73,16 +73,19 @@ export async function reassessIncident(store, request, dependencies) {
         throw new Error("analysis is not bound to the active incident");
     if (job.analysis.action !== "hold")
         throw new Error("only a held analysis can be reassessed");
-    if (job.incident.class !== "infrastructure_exhausted" ||
-        job.incident.lane !== "reviewer" ||
-        !job.incident.allowedActions.includes("retry_fresh_reviewer") ||
-        !allowedActionsFor(job.incident.class, job.incident.lane).includes("retry_fresh_reviewer") ||
+    const retryAction = job.incident.lane === "worker"
+        ? "retry_fresh_worker"
+        : job.incident.lane === "reviewer" ? "retry_fresh_reviewer" : null;
+    if (retryAction === null ||
+        job.incident.class !== "infrastructure_exhausted" ||
+        !job.incident.allowedActions.includes(retryAction) ||
+        !allowedActionsFor(job.incident.class, job.incident.lane).includes(retryAction) ||
         job.approval !== null ||
-        job.activeAttempt?.lane !== "reviewer" ||
+        job.activeAttempt?.lane !== job.incident.lane ||
         job.activeAttempt.id !== job.incident.attemptId ||
         job.activeAttempt.phase !== "settled" ||
         job.activeAttempt.result !== null) {
-        throw new Error("only an exact held Reviewer infrastructure incident can be reassessed");
+        throw new Error("only an exact held Worker or Reviewer infrastructure incident can be reassessed");
     }
     const successor = makeIncident({
         jobId: job.id,

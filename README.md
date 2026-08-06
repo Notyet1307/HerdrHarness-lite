@@ -250,12 +250,12 @@ node dist/src/cli.js approve \
 
 The command is compare-and-swap protected. Any changed revision, incident, or analysis is rejected. Approval records authority only. A later Controller tick rechecks policy and Git, closes the old pane, and creates a fresh attempt; it never resumes the old agent.
 
-### 3. Reassess a held Reviewer provider failure
+### 3. Reassess a held Worker or Reviewer provider failure
 
-`hold` cannot be approved. If and only if the held incident is an exact Reviewer `infrastructure_exhausted` failure with no durable result, and the environment has materially changed:
+`hold` cannot be approved. If and only if the held incident is an exact Worker or Reviewer `infrastructure_exhausted` failure with no durable result, and the environment has materially changed:
 
 1. stop the existing continuous `run` process, if any;
-2. fix or switch the Reviewer provider/model;
+2. fix or switch the affected role's provider/model;
 3. run a bounded ephemeral provider probe;
 4. request a new Analyst decision with `reassess`.
 
@@ -266,12 +266,12 @@ node dist/src/cli.js reassess \
   --incident held-incident-id \
   --analysis held-analysis-id \
   --actor operator-name \
-  --reason "Reviewer provider changed and an ephemeral read-tool probe passed"
+  --reason "Affected role provider changed and an ephemeral read-tool probe passed"
 ```
 
 `reassess` preserves the old revision/incident/analysis plus actor and bounded reason in the audit record, marks the operator statement as untrusted evidence, creates a successor incident with a fresh receipt key, and clears the old analysis. It does not grant retry authority, close/start an agent, or touch Git.
 
-Run one standalone `tick` for the new Analyst decision. If it again returns `hold`, stop. If it recommends `retry_fresh_reviewer`, issue a new exact `approve` command for the new revision/incident/analysis. Continue with standalone ticks or start a new `run` process; either path now loads the changed provider configuration.
+Run one standalone `tick` for the new Analyst decision. If it again returns `hold`, stop. If it recommends the lane-matched `retry_fresh_worker` or `retry_fresh_reviewer`, issue a new exact `approve` command for the new revision/incident/analysis. Continue with standalone ticks or start a new `run` process; either path now loads the changed provider configuration.
 
 ### 4. Failures that must remain stopped
 

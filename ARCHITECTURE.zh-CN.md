@@ -359,7 +359,7 @@ file_excerpt
 
 Harness 负责路径限制、长度限制和读取；Analyst 不能提交 shell 命令。
 
-Analyst 返回 `hold` 后，Controller 不会自动重试。只有 Reviewer `infrastructure_exhausted` 的运行环境发生变化时，人才能用精确 revision/incident/analysis 和 bounded reason 请求 `reassess`。Harness 将旧 incident/analysis 绑定写入审计记录，把 operator statement 标为 untrusted，创建 successor incident 后重新调用 Analyst；该动作本身不包含 retry 权限。
+Analyst 返回 `hold` 后，Controller 不会自动重试。只有 Worker 或 Reviewer `infrastructure_exhausted` 的运行环境发生变化时，人才能用精确 revision/incident/analysis 和 bounded reason 请求 `reassess`。Harness 将旧 incident/analysis 绑定写入审计记录，把 operator statement 标为 untrusted，创建同 lane 的 successor incident 后重新调用 Analyst；该动作本身不包含 retry 权限。
 
 ### 7.4 人工 Gate
 

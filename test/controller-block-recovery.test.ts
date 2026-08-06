@@ -324,6 +324,74 @@ test("held Reviewer infrastructure incident can be reassessed without granting r
   assert.deepEqual(store.state.terminalJobs[0]?.reassessments, [reassessment]);
 });
 
+test("held Worker infrastructure incident can be reassessed without granting retry authority", async () => {
+  const store = new MemoryStore();
+  const clock = new FakeClock();
+  const ids = new SequenceIds();
+  const herdr = new FakeHerdr([{ lane: "worker", status: "completed", headSha: "b".repeat(40) }]);
+  const analyst = new FakeAnalyst([
+    {
+      kind: "advice",
+      action: "hold",
+      summary: "Wait until Worker provider capacity changes",
+      resolutionBrief: "",
+      evidenceRefs: ["task"],
+      unknowns: ["Worker provider health"],
+    },
+    {
+      kind: "advice",
+      action: "retry_fresh_worker",
+      summary: "A different Worker provider passed a bounded health probe",
+      resolutionBrief: "Retry implementation against the unchanged worktree and review findings.",
+      evidenceRefs: ["task"],
+      unknowns: [],
+    },
+  ]);
+  const controller = new HarnessController({
+    config,
+    store,
+    github: new FakeGitHub([issue({ number: 35, title: "Reassess held Worker infrastructure" })]),
+    git: new FakeGit(),
+    herdr,
+    analyst,
+    evidence: new FakeEvidence(),
+    clock,
+    ids,
+  });
+
+  for (let index = 0; index < 7; index += 1) await controller.tick();
+  herdr.settleWithoutResult = { agentStatus: "idle", diagnostic: "Worker provider overloaded" };
+  await controller.tick();
+  await controller.tick();
+  const held = store.state.activeJob!;
+  assert.equal(held.incident?.lane, "worker");
+  assert.equal(held.analysis?.action, "hold");
+
+  const reassessment = await reassessIncident(
+    store,
+    {
+      expectedRevision: held.revision,
+      incidentId: held.incident!.id,
+      analysisId: held.analysis!.id,
+      actor: "human@example.test",
+      reason: "Worker switched to openai-codex/gpt-5.6-luna; bounded read-tool probe passed.",
+    },
+    { clock, ids },
+  );
+  const reassessed = store.state.activeJob!;
+  assert.equal(reassessment.analysisId, held.analysis!.id);
+  assert.equal(reassessed.state, "blocked");
+  assert.equal(reassessed.analysis, null);
+  assert.equal(reassessed.approval, null);
+  assert.equal(reassessed.incident?.lane, "worker");
+  assert.ok(reassessed.incident?.id !== held.incident?.id);
+  assert.match(reassessed.incident?.summary ?? "", /openai-codex\/gpt-5\.6-luna/);
+
+  assert.equal((await controller.tick()).action, "analysis_recorded");
+  assert.equal(store.state.activeJob?.analysis?.action, "retry_fresh_worker");
+  assert.equal(store.state.activeJob?.approval, null);
+});
+
 test("integrity incidents cannot be converted into retry authority by the Analyst", async () => {
   const store = new MemoryStore();
   const clock = new FakeClock();
@@ -369,7 +437,7 @@ test("integrity incidents cannot be converted into retry authority by the Analys
       },
       { clock, ids },
     ),
-    /only an exact held Reviewer infrastructure incident/,
+    /only an exact held Worker or Reviewer infrastructure incident/,
   );
   await assert.rejects(
     () => approveRecovery(
