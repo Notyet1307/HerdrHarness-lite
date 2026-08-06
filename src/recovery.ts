@@ -89,6 +89,13 @@ export async function reassessIncident(
     && job.activeAttempt.id === job.incident.attemptId && job.activeAttempt.phase === "settled";
   const heldInfrastructure = job.incident.class === "infrastructure_exhausted"
     && job.activeAttempt?.result === null;
+  const heldReviewerBlock = job.incident.class === "review_uncertain"
+    && job.incident.lane === "reviewer"
+    && job.activeAttempt?.lane === "reviewer"
+    && job.activeAttempt.expectedHeadSha === job.headSha
+    && job.activeAttempt.result?.lane === "reviewer"
+    && job.activeAttempt.result.status === "blocked"
+    && job.activeAttempt.result.reviewedHeadSha === job.headSha;
   const analystExecutionFailed = job.analysis.evidenceDigest === job.incident.evidenceDigest
     && isControllerAnalystFailure(job.analysis);
   if (
@@ -96,9 +103,9 @@ export async function reassessIncident(
     !job.incident.allowedActions.includes(retryAction) ||
     !allowedActionsFor(job.incident.class, job.incident.lane).includes(retryAction) ||
     !exactAttempt ||
-    (!heldInfrastructure && !analystExecutionFailed)
+    (!heldInfrastructure && !heldReviewerBlock && !analystExecutionFailed)
   ) {
-    throw new Error("only an exact held infrastructure incident or controller-recorded Analyst execution failure can be reassessed");
+    throw new Error("only an exact held infrastructure incident, HEAD-bound Reviewer block, or controller-recorded Analyst execution failure can be reassessed");
   }
 
   const successor = makeIncident({
@@ -106,7 +113,7 @@ export async function reassessIncident(
     jobRevision: job.revision + 1,
     lane: job.incident.lane,
     attemptId: job.incident.attemptId,
-    blockClass: job.incident.class,
+    blockClass: heldReviewerBlock ? "infrastructure_exhausted" : job.incident.class,
     summary: [
       `Reassessment requested for held incident ${job.incident.id}.`,
       `Previous incident (untrusted):\n${job.incident.summary}`,

@@ -151,18 +151,19 @@ node dist/src/cli.js approve \
 
 Approval is compare-and-swap protected. Continue with standalone ticks through `recovery_applied` and fresh-attempt preparation/dispatch. The Harness closes the old pane and never resumes the old agent.
 
-#### Provider 502, exhausted nodes, or corrected Analyst runtime
+#### Provider, Reviewer validation environment, or Analyst runtime repaired
 
 Use `reassess` only when the incident is exactly one of these retryable cases:
 
 - Worker/Reviewer `infrastructure_exhausted` with no durable result; or
+- Reviewer `review_uncertain` with a durable `blocked` result bound to the current HEAD, after its external validation environment was repaired and probed; or
 - an Analyst execution failure recorded by the Controller itself.
 
 Sequence:
 
 1. stop continuous `run`;
-2. change the failed role's provider/model, or correct the Analyst executable;
-3. pass one bounded no-session probe with the replacement runtime;
+2. change the failed role's provider/model, repair the Reviewer validation environment, or correct the Analyst executable;
+3. pass one bounded probe under the affected isolation boundary;
 4. if the old failure is not yet recorded, run `tick` until it becomes a blocked incident;
 5. if the Analyst returned `hold` based on the old runtime, issue an exact `reassess`;
 6. run one `tick` for the new Analyst decision;

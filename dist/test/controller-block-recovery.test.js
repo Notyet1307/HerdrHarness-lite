@@ -260,6 +260,90 @@ test("held Reviewer infrastructure incident can be reassessed without granting r
     assert.equal((await controller.tick()).action, "archived");
     assert.deepEqual(store.state.terminalJobs[0]?.reassessments, [reassessment]);
 });
+test("held Reviewer validation block can be reassessed and retried on the same HEAD", async () => {
+    const headSha = "b".repeat(40);
+    const store = new MemoryStore();
+    const clock = new FakeClock();
+    const ids = new SequenceIds();
+    const herdr = new FakeHerdr([
+        { lane: "worker", status: "completed", headSha },
+        {
+            lane: "reviewer",
+            status: "blocked",
+            reviewedHeadSha: headSha,
+            summary: "Required validation could not start because Docker Compose was unavailable",
+        },
+        { lane: "reviewer", status: "pass", reviewedHeadSha: headSha },
+    ]);
+    const analyst = new FakeAnalyst([
+        {
+            kind: "advice",
+            action: "hold",
+            summary: "Repair the Reviewer validation environment before retrying",
+            resolutionBrief: "",
+            evidenceRefs: ["task"],
+            unknowns: ["Reviewer validation environment"],
+        },
+        {
+            kind: "advice",
+            action: "retry_fresh_reviewer",
+            summary: "The repaired validation environment passed a bounded probe",
+            resolutionBrief: "Retry independent review against the unchanged HEAD.",
+            evidenceRefs: ["task"],
+            unknowns: [],
+        },
+    ]);
+    const controller = new HarnessController({
+        config,
+        store,
+        github: new FakeGitHub([issue({ number: 37, title: "Reassess blocked Reviewer validation" })]),
+        git: new FakeGit(),
+        herdr,
+        analyst,
+        evidence: new FakeEvidence(),
+        clock,
+        ids,
+    });
+    for (let index = 0; index < 13; index += 1)
+        await controller.tick();
+    assert.equal(store.state.activeJob?.state, "blocked");
+    assert.equal(store.state.activeJob?.incident?.class, "review_uncertain");
+    assert.equal(store.state.activeJob?.activeAttempt?.result?.lane, "reviewer");
+    assert.equal(store.state.activeJob?.activeAttempt?.result?.status, "blocked");
+    const blockedAttemptId = store.state.activeJob.activeAttempt.id;
+    assert.equal((await controller.tick()).action, "analysis_recorded");
+    const held = store.state.activeJob;
+    assert.equal(held.analysis?.action, "hold");
+    await reassessIncident(store, {
+        expectedRevision: held.revision,
+        incidentId: held.incident.id,
+        analysisId: held.analysis.id,
+        actor: "human@example.test",
+        reason: "A credential-free Docker Compose config passed the isolated Reviewer probe.",
+    }, { clock, ids });
+    assert.equal(store.state.activeJob?.analysis, null);
+    assert.equal(store.state.activeJob?.approval, null);
+    assert.equal((await controller.tick()).action, "analysis_recorded");
+    assert.equal(store.state.activeJob?.analysis?.action, "retry_fresh_reviewer");
+    await approveRecovery(store, {
+        expectedRevision: store.state.activeJob.revision,
+        incidentId: store.state.activeJob.incident.id,
+        analysisId: store.state.activeJob.analysis.id,
+        actor: "human@example.test",
+        reason: "Approve one bounded fresh review against the unchanged HEAD.",
+    }, { clock, ids });
+    assert.equal((await controller.tick()).action, "recovery_applied");
+    assert.equal(store.state.activeJob?.state, "reviewer_ready");
+    assert.equal(store.state.activeJob?.headSha, headSha);
+    assert.equal((await controller.tick()).action, "attempt_prepared");
+    const freshAttemptId = store.state.activeJob.activeAttempt.id;
+    assert.ok(freshAttemptId !== blockedAttemptId);
+    assert.equal((await controller.tick()).action, "attempt_pane_ready");
+    assert.equal((await controller.tick()).action, "attempt_agent_ready");
+    assert.equal((await controller.tick()).action, "attempt_dispatched");
+    assert.equal((await controller.tick()).action, "attempt_completed");
+    assert.equal(store.state.activeJob?.state, "publish_ready");
+});
 test("held Worker infrastructure incident can be reassessed without granting retry authority", async () => {
     const store = new MemoryStore();
     const clock = new FakeClock();
@@ -424,7 +508,7 @@ test("integrity incidents cannot be converted into retry authority by the Analys
         analysisId: job.analysis.id,
         actor: "human@example.test",
         reason: "attempted reassessment outside Reviewer infrastructure",
-    }, { clock, ids }), /only an exact held infrastructure incident or controller-recorded Analyst execution failure/);
+    }, { clock, ids }), /only an exact held infrastructure incident, HEAD-bound Reviewer block, or controller-recorded Analyst execution failure/);
     await assert.rejects(() => approveRecovery(store, {
         expectedRevision: job.revision,
         incidentId: job.incident.id,

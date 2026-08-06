@@ -151,18 +151,19 @@ node dist/src/cli.js approve \
 
 Approval 受 compare-and-swap 保护。随后继续单独 `tick`，直到 `recovery_applied`，再依次创建并派发 fresh attempt。Harness 会关闭旧 pane，绝不恢复旧 agent。
 
-#### Provider 502、节点满载或 Analyst 运行时已修复
+#### Provider、Reviewer 验证环境或 Analyst 运行时已修复
 
 仅当 incident 精确对应以下可重评情况时使用 `reassess`：
 
 - Worker/Reviewer `infrastructure_exhausted` 且没有 durable result；或
+- Reviewer `review_uncertain` 已产生与当前 HEAD 绑定的 durable `blocked` 结果，且其外部验证环境已经修复并通过有界探测；或
 - Controller 自己记录的 Analyst 执行失败。
 
 顺序：
 
 1. 停止连续 `run`；
-2. 修改故障角色的 provider/model，或修复 Analyst 可执行文件；
-3. 使用新配置完成一次有界、无 session 探测；
+2. 修改故障角色的 provider/model、修复 Reviewer 验证环境，或修复 Analyst 可执行文件；
+3. 在受影响的隔离边界内完成一次有界探测；
 4. 如果旧故障尚未入账，执行 `tick` 使其成为 blocked incident；
 5. 如果 Analyst 已基于旧运行时返回 `hold`，执行精确 `reassess`；
 6. 再执行一次 `tick` 获取新 Analyst 判断；

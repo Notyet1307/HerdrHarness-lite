@@ -185,7 +185,8 @@ export class FakeHerdr {
             lane: "reviewer",
             status: outcome.status,
             summary: outcome.summary ?? outcome.status,
-            reviewedHeadSha: outcome.status === "pass" || outcome.status === "changes" ? (outcome.reviewedHeadSha ?? "b".repeat(40)) : null,
+            reviewedHeadSha: outcome.reviewedHeadSha
+                ?? (outcome.status === "pass" || outcome.status === "changes" ? "b".repeat(40) : null),
             findings: outcome.findings ?? [],
         };
         return { agentStatus: outcome.agentStatus ?? (outcome.status === "blocked" ? "blocked" : "done"), result, diagnostic: null };
