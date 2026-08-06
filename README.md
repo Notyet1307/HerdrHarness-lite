@@ -27,6 +27,17 @@ blocked incident
   -> fresh Worker or Reviewer attempt
 ```
 
+## Current capability snapshot
+
+| Capability | Current behavior | Problem addressed |
+| --- | --- | --- |
+| Independent runtime selection | Worker and Reviewer pin their own `provider`, `model`, and `thinking`; edits affect only future fresh attempts | An overloaded provider can be replaced for only the affected role |
+| Enforced Reviewer boundary | Reviewer reads an exact-HEAD read-only snapshot; one read-only child checks each of Standards and Spec; validation runs only in a disposable writable copy | Reviewer does not need generic shell or product-worktree write access |
+| Identity-bound results | Validation argv, reviewed HEAD, attempt, and result path are bound in advance; publication is atomic and no-overwrite | Agent exit, terminal output, or a file from the wrong attempt cannot impersonate acceptance |
+| Audited recovery | Retryable runtime failures require a provider probe, Analyst advice, and CAS human approval before a fresh agent is created | Old sessions are never resumed, and repeating a command does not grant recovery authority |
+| Guarded auto-merge | PR auto-merge is requested for the reviewed HEAD; HEAD drift or publish recovery disables it first | CI, required checks, and final merge authority remain with GitHub |
+| Observable continuous operation | `tick` advances one durable transition; `run` uses the same state machine and claims another issue only after merge archive | Background progress retains the single writer, blocked slot, and human gates |
+
 ## What the Harness guarantees
 
 - Each `tick` performs at most one durable state transition.
@@ -95,16 +106,34 @@ The Controller validates the role contracts before doing work:
 
 Both roles require `--no-approve --no-skills`. Reviewer additionally requires `--no-extensions` and exactly two explicit extensions: the declared `pi-subagents` package entrypoint and the bundled `reviewer-tools.js`. Skill/extension identity, Matt Pocock installer provenance, exact tools, and the bundled review code are checked. Only `--provider`, `--model`, and `--no-session` are allowed as optional runtime selectors; session reuse, prompt injection, ambient extensions, and wider tools are rejected.
 
-Each Reviewer gets a read-only exact-HEAD source snapshot. Its `subagent` call is restricted to exactly one foreground launch containing one Standards child and one Spec child, with a runtime ceiling of `read,grep,find,ls`; management actions, repeated launches, failed/incomplete axes, and other agent profiles cannot produce `pass` or `changes`. `review_validate` runs the attempt-bound argv once in a separate writable copy with a minimal environment and private cache/home/temp paths. `review_submit` atomically publishes the sole identity-bound result outside the product worktree. This is a Pi tool boundary, not containment for malicious test code: use a container or separate OS account if the validation command itself is adversarial.
+Each Reviewer gets a read-only exact-HEAD source snapshot. Its `subagent` call is restricted to exactly one foreground launch containing one Standards child and one Spec child, with a runtime ceiling of `read,grep,find,ls`; management actions, repeated launches, failed, incomplete, or non-substantive axes, and other agent profiles cannot produce `pass` or `changes`. `review_validate` runs the attempt-bound argv once in a separate writable copy with a minimal environment and private cache/home/temp paths. Source, validation, state, and result paths are checked in both directions by canonical path, including symlink aliases. `review_submit` atomically publishes the sole identity-bound result outside the product worktree and cannot overwrite an existing result. This is a Pi tool boundary, not containment for malicious test code: use a container or separate OS account if the validation command itself is adversarial.
 
 Pin the Analyst executable too: add `"--codex-bin", "/absolute/path/to/codex"` to `analyst.argv`. Do not rely on an interactive shell's `PATH`; service and SSH-launched ticks may have a different environment.
 
 ### Explicit provider and model selection
 
-Provider/model selection belongs in the role's native Pi argv. This example pins only future Reviewer attempts to Baizhi Chat and DeepSeek V4 Flash:
+Provider/model selection belongs in each role's native Pi argv; Worker and Reviewer may use different runtimes. This example pins future Worker attempts to OpenAI Codex Luna Max through an authenticated ChatGPT subscription, while future Reviewer attempts use Baizhi Chat and DeepSeek V4 Flash:
 
 ```json
 {
+  "workerArgv": [
+    "--provider",
+    "openai-codex",
+    "--model",
+    "gpt-5.6-luna",
+    "--no-approve",
+    "--no-skills",
+    "--skill",
+    "/absolute/path/to/.agents/skills/implement",
+    "--skill",
+    "/absolute/path/to/.agents/skills/tdd",
+    "--skill",
+    "/absolute/path/to/HerdrHarness-lite/pi/skills/code-review",
+    "--tools",
+    "read,bash,edit,write,grep,find,ls,subagent",
+    "--thinking",
+    "max"
+  ],
   "reviewerArgv": [
     "--no-approve",
     "--no-skills",
@@ -127,13 +156,25 @@ Provider/model selection belongs in the role's native Pi argv. This example pins
 }
 ```
 
-Confirm the model exists in Pi's current catalog:
+The two selections are independent examples and do not have to be used together. `openai-codex` requires a valid ChatGPT/OpenAI Codex login in Pi; other providers use their own credentials. Confirm both models in Pi's current catalog:
 
 ```bash
+pi --list-models openai-codex
 pi --list-models baizhi-chat
 ```
 
-Run a bounded ephemeral probe before recovering from a provider outage:
+Before recovering from a provider outage, run a bounded no-session probe with the affected role's replacement runtime. Worker Luna Max example:
+
+```bash
+pi --no-session --no-approve --no-skills \
+  --provider openai-codex \
+  --model gpt-5.6-luna \
+  --thinking max \
+  --tools read \
+  -p "Read package.json and print only its name."
+```
+
+Reviewer DeepSeek V4 Flash example:
 
 ```bash
 pi --no-session --no-approve --no-skills \
@@ -144,7 +185,7 @@ pi --no-session --no-approve --no-skills \
   -p "Read package.json and print only its name."
 ```
 
-Do not put `-p` or probe text in `reviewerArgv`; they are rejected by the Harness. A config edit does not mutate an already-running attempt. Each standalone `tick` process reloads the config, but a continuous `run` process keeps the config loaded at its own startup. After changing provider settings, stop and restart `run` before any Controller transition creates the fresh Reviewer.
+Do not put `-p` or probe text in `workerArgv` / `reviewerArgv`; the Harness rejects them. A config edit does not mutate an already-running attempt. Each standalone `tick` process reloads the config, but a continuous `run` process keeps the config loaded at its own startup. After changing provider settings, stop and restart `run` before the Controller creates a fresh attempt for the affected role.
 
 To verify what a running Pi actually selected, get `activeJob.activeAttempt.handle.agentName` from `status`, then inspect its recent Herdr output:
 

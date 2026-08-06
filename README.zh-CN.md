@@ -27,6 +27,17 @@ blocked incident
   -> fresh Worker 或 Reviewer attempt
 ```
 
+## 当前能力快照
+
+| 能力 | 当前行为 | 解决的问题 |
+| --- | --- | --- |
+| 独立运行时选择 | Worker 与 Reviewer 分别固定 `provider`、`model` 和 `thinking`；修改只作用于未来 fresh attempt | 单一 provider 过载时可只切换受影响角色 |
+| 强制 Reviewer 边界 | Reviewer 读取 exact-HEAD 只读快照；Standards/Spec 各由一个只读子代理检查；验证只在一次性可写副本运行 | Reviewer 无需获得产品 worktree 的通用写入或 shell 权限 |
+| 身份绑定结果 | 验证命令、review HEAD、attempt 和结果路径预先绑定；结果原子写入且不可覆盖 | agent 结束、终端输出或错误 attempt 的文件不能冒充验收结果 |
+| 受审计恢复 | 可重试的运行时故障必须经过 provider 探测、Analyst 判断、CAS 人工审批，再创建 fresh agent | 不恢复旧会话，也不把重复执行命令当成恢复授权 |
+| 安全 auto-merge | PR 绑定已审 HEAD 请求 GitHub 原生 auto-merge；HEAD 漂移或发布恢复会先取消 auto-merge | CI、required checks 和最终 merge 权限仍由 GitHub 控制 |
+| 可观察连续运行 | `tick` 每次推进一个持久迁移；`run` 复用同一状态机，merge 归档后才领取下一个 Issue | 后台自动推进仍保留单写者、blocked slot 和人工门禁 |
+
 ## Harness 保证什么
 
 - 每次 `tick` 至多完成一次持久状态迁移。
@@ -95,16 +106,34 @@ Controller 在领取任务前验证角色契约：
 
 两个角色都必须包含 `--no-approve --no-skills`。Reviewer 还必须包含 `--no-extensions`，并且只显式加载声明过的 `pi-subagents` 入口和 bundled `reviewer-tools.js`。Harness 会核对 skill/extension 真实身份、Matt Pocock installer provenance、精确工具集合和 bundled review 代码。只有 `--provider`、`--model`、`--no-session` 可以作为可选运行时选择器；session 复用、prompt 注入、环境 extension 和扩大工具权限都会被拒绝。
 
-每个 Reviewer 都从只读 exact-HEAD 源码快照启动。其 `subagent` 只能前台启动一次，且必须恰好包含一个 Standards 子代理和一个 Spec 子代理；子代理运行时工具上限为 `read,grep,find,ls`。管理动作、重复启动、失败或未完成的任一轴、以及其他 agent profile 都不能产出 `pass` 或 `changes`。`review_validate` 只在独立可写副本中执行 attempt 已绑定的 argv，并使用最小环境及私有 cache/home/temp 路径；`review_submit` 原子发布产品 worktree 外唯一的身份绑定结果。这是 Pi 工具级边界，不隔离恶意测试代码；验证命令本身不可信时，应再使用容器或独立 OS 账户。
+每个 Reviewer 都从只读 exact-HEAD 源码快照启动。其 `subagent` 只能前台启动一次，且必须恰好包含一个 Standards 子代理和一个 Spec 子代理；子代理运行时工具上限为 `read,grep,find,ls`。管理动作、重复启动、失败、未完成或没有实质输出的任一轴、以及其他 agent profile 都不能产出 `pass` 或 `changes`。`review_validate` 只在独立可写副本中执行 attempt 已绑定的 argv，并使用最小环境及私有 cache/home/temp 路径；源码、验证、状态和结果路径会按真实路径双向检查不得重叠，包括符号链接别名。`review_submit` 在产品 worktree 外原子发布唯一的身份绑定结果，已有结果不可覆盖。这是 Pi 工具级边界，不隔离恶意测试代码；验证命令本身不可信时，应再使用容器或独立 OS 账户。
 
 Analyst 的可执行文件也应固定：在 `analyst.argv` 中加入 `"--codex-bin", "/absolute/path/to/codex"`。不要依赖交互式 shell 的 `PATH`；service 或 SSH 启动的 tick 可能拥有不同环境。
 
 ### Provider 与 model 的显式选择
 
-Provider/model 应写入对应角色的 Pi 原生 argv。下面只把未来 Reviewer attempt 固定到 Baizhi Chat 的 DeepSeek V4 Flash：
+Provider/model 应写入对应角色的 Pi 原生 argv，Worker 与 Reviewer 可以独立选择。下面把未来 Worker attempt 固定到已登录 ChatGPT 订阅的 OpenAI Codex Luna Max，同时把未来 Reviewer attempt 固定到 Baizhi Chat 的 DeepSeek V4 Flash：
 
 ```json
 {
+  "workerArgv": [
+    "--provider",
+    "openai-codex",
+    "--model",
+    "gpt-5.6-luna",
+    "--no-approve",
+    "--no-skills",
+    "--skill",
+    "/absolute/path/to/.agents/skills/implement",
+    "--skill",
+    "/absolute/path/to/.agents/skills/tdd",
+    "--skill",
+    "/absolute/path/to/HerdrHarness-lite/pi/skills/code-review",
+    "--tools",
+    "read,bash,edit,write,grep,find,ls,subagent",
+    "--thinking",
+    "max"
+  ],
   "reviewerArgv": [
     "--no-approve",
     "--no-skills",
@@ -127,13 +156,25 @@ Provider/model 应写入对应角色的 Pi 原生 argv。下面只把未来 Revi
 }
 ```
 
-先确认该 model 存在于 Pi 当前目录：
+两组只是独立示例，不要求配对使用。`openai-codex` 需要 Pi 中有效的 ChatGPT/OpenAI Codex 登录；其他 provider 使用各自凭据。先确认 model 存在于 Pi 当前目录：
 
 ```bash
+pi --list-models openai-codex
 pi --list-models baizhi-chat
 ```
 
-Provider 故障恢复前，执行一次有界、无 session 探测：
+Provider 故障恢复前，使用故障角色的新配置执行一次有界、无 session 探测。例如 Worker Luna Max：
+
+```bash
+pi --no-session --no-approve --no-skills \
+  --provider openai-codex \
+  --model gpt-5.6-luna \
+  --thinking max \
+  --tools read \
+  -p "Read package.json and print only its name."
+```
+
+Reviewer DeepSeek V4 Flash：
 
 ```bash
 pi --no-session --no-approve --no-skills \
@@ -144,7 +185,7 @@ pi --no-session --no-approve --no-skills \
   -p "Read package.json and print only its name."
 ```
 
-不要把 `-p` 或探测文本写进 `reviewerArgv`，Harness 会拒绝。修改配置不会改变正在运行的 attempt。每次单独执行 `tick` 都会重新读取配置，但连续 `run` 进程只保留自身启动时加载的配置。修改 provider 后，必须先停止并重新启动 `run`，再让 Controller 创建 fresh Reviewer。
+不要把 `-p` 或探测文本写进 `workerArgv` / `reviewerArgv`，Harness 会拒绝。修改配置不会改变正在运行的 attempt。每次单独执行 `tick` 都会重新读取配置，但连续 `run` 进程只保留自身启动时加载的配置。修改 provider 后，必须先停止并重新启动 `run`，再让 Controller 创建受影响角色的 fresh attempt。
 
 要核对运行中的 Pi 实际选择了什么，从 `status` 读取 `activeJob.activeAttempt.handle.agentName`，再查看 Herdr 最近输出：
 
