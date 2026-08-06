@@ -870,10 +870,10 @@ function validateConfig(config) {
             throw new Error(`${name} must be an array of strings`);
         }
     }
-    validatePiRoleArgv("workerArgv", config.workerArgv, ["implement", "tdd", "code-review"], ["read", "bash", "edit", "write", "grep", "find", "ls", "subagent"], "high");
-    validatePiRoleArgv("reviewerArgv", config.reviewerArgv, ["code-review"], ["read", "bash", "grep", "find", "ls", "subagent"], "max");
+    validatePiRoleArgv("workerArgv", config.workerArgv, ["implement", "tdd", "code-review"], ["read", "bash", "edit", "write", "grep", "find", "ls", "subagent"], ["high", "max"]);
+    validatePiRoleArgv("reviewerArgv", config.reviewerArgv, ["code-review"], ["read", "bash", "grep", "find", "ls", "subagent"], ["max"]);
 }
-function validatePiRoleArgv(name, argv, skills, tools, expectedThinking) {
+function validatePiRoleArgv(name, argv, skills, tools, allowedThinking) {
     const fail = (reason) => {
         throw new Error(`${name} must enforce the Pi role contract: ${reason}`);
     };
@@ -912,8 +912,8 @@ function validatePiRoleArgv(name, argv, skills, tools, expectedThinking) {
         fail(`tools must be exactly: ${tools.join(",")}`);
     }
     const thinking = flagValues(argv, "--thinking");
-    if (thinking.length !== 1 || thinking[0] !== expectedThinking) {
-        fail(`--thinking ${expectedThinking} is required`);
+    if (thinking.length !== 1 || !allowedThinking.includes(thinking[0])) {
+        fail(`--thinking ${allowedThinking.join(" or ")} is required`);
     }
 }
 function flagValues(argv, flag) {

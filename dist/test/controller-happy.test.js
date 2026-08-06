@@ -30,9 +30,20 @@ test("config rejects non-string native Pi arguments", () => {
         }), new RegExp(`${field} must be an array of strings`));
     }
 });
-test("config requires Worker high and Reviewer max thinking", () => {
+test("config allows Worker high or max and requires Reviewer max thinking", () => {
     new HarnessController({
         config,
+        store: new MemoryStore(),
+        github: new FakeGitHub([]),
+        git: new FakeGit(),
+        herdr: new FakeHerdr([]),
+        analyst: new FakeAnalyst(),
+        evidence: new FakeEvidence(),
+        clock: new FakeClock(),
+        ids: new SequenceIds(),
+    });
+    new HarnessController({
+        config: { ...config, workerArgv: validWorkerArgv.map((value) => value === "high" ? "max" : value) },
         store: new MemoryStore(),
         github: new FakeGitHub([]),
         git: new FakeGit(),

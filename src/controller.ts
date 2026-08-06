@@ -1008,14 +1008,14 @@ function validateConfig(config: HarnessConfig): void {
     config.workerArgv,
     ["implement", "tdd", "code-review"],
     ["read", "bash", "edit", "write", "grep", "find", "ls", "subagent"],
-    "high",
+    ["high", "max"],
   );
   validatePiRoleArgv(
     "reviewerArgv",
     config.reviewerArgv,
     ["code-review"],
     ["read", "bash", "grep", "find", "ls", "subagent"],
-    "max",
+    ["max"],
   );
 }
 
@@ -1024,7 +1024,7 @@ function validatePiRoleArgv(
   argv: string[],
   skills: string[],
   tools: string[],
-  expectedThinking: "high" | "max",
+  allowedThinking: readonly ("high" | "max")[],
 ): void {
   const fail = (reason: string): never => {
     throw new Error(`${name} must enforce the Pi role contract: ${reason}`);
@@ -1058,8 +1058,8 @@ function validatePiRoleArgv(
     fail(`tools must be exactly: ${tools.join(",")}`);
   }
   const thinking = flagValues(argv, "--thinking");
-  if (thinking.length !== 1 || thinking[0] !== expectedThinking) {
-    fail(`--thinking ${expectedThinking} is required`);
+  if (thinking.length !== 1 || !allowedThinking.includes(thinking[0] as "high" | "max")) {
+    fail(`--thinking ${allowedThinking.join(" or ")} is required`);
   }
 }
 
