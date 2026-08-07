@@ -51,6 +51,13 @@ herdr session attach SESSION_NAME
 
 预检完成条件：上述检查全部有真实输出，且不存在未解释的身份、路径、provider 或 active job 不确定性。
 
+Controller 还会自动做真实预检。持久选择 ready Issue 前，它会轻量调用
+Worker 与 Reviewer 的配置 Provider；当
+`preflight.dockerRequired=true` 时，还会解析并验证当前本地 Docker Unix
+socket 和 Compose V2。每个 attempt 创建 pane 前会重检当前角色 Provider
+和 Docker。返回 `preflight_failed` 时不会 claim 或 dispatch agent；`run`
+会退出，修复环境后重新启动即可。
+
 ### 2. 先用手动 `tick`
 
 首次真实任务使用手动模式：
@@ -64,6 +71,7 @@ node dist/src/cli.js tick --config /ABSOLUTE/PATH/harness.config.json
 | 返回状态 | 下一步 |
 | --- | --- |
 | `idle` | 当前没有可执行 Issue；停止或等待队列变化 |
+| `preflight_failed` | 尚未 dispatch agent；修复消息指出的 Provider/Docker 环境后重跑 `tick`，或重新启动 `run` |
 | `selected`、`claimed`、`worktree_created` | 核对消息后再执行一次 `tick` |
 | `attempt_prepared`、`attempt_pane_ready`、`attempt_agent_ready` | 再执行一次 `tick`；下一步可能进入长时间 dispatch |
 | dispatch 阶段命令仍未返回 | 等待；只用 `status` 和 Herdr 只读查看，不并发启动第二个 `tick` |
@@ -73,7 +81,7 @@ node dist/src/cli.js tick --config /ABSOLUTE/PATH/harness.config.json
 | `blocked`、`analysis_recorded`、`waiting_for_approval` | 进入“恢复 blocked job” |
 | `archived` | 当前 slot 已释放；下一次 `tick` 可以选择下一个 Issue |
 
-任意 `ok:false` 都先运行 `status` 并修复消息中的具体条件。重复同一命令不会自动授予恢复权限。
+其他 `ok:false` 都先运行 `status` 并修复消息中的具体条件。重复同一命令不会自动授予恢复权限。
 
 Dispatch 阶段会调用 Herdr `agent prompt --wait`，因此可能在整个 Worker 或 Reviewer 运行期间不返回。命令没有输出不等于 prompt 丢失。
 
@@ -236,10 +244,12 @@ Fresh Worker 不会丢掉已提交改动：它继续使用同一任务 worktree�
 
 ```text
 GitHub ready issue
+  -> live Worker/Reviewer Provider 与可选 Docker 预检
   -> durable selection and claim
   -> task-bound Codex Analyst session
   -> isolated Herdr worktree
   -> fresh Pi Worker
+  -> 针对当前任务 diff 的一次 focused self-check
   -> durable result + Git verification
   -> fresh independent Pi Reviewer
       -> pass: publish PR
@@ -268,8 +278,8 @@ blocked incident
 
 | 角色 | 什么时候运行 | 拥有什么信息 | 权限与完成条件 |
 | --- | --- | --- | --- |
-| Worker | 首次实现、Reviewer actionable findings 后的 rework、获批的 Worker 恢复 | 不可变 Issue snapshot、task digest、base/branch、可选的有界 rework/recovery brief、result path | 可修改任务 worktree、测试和提交；不能 push/建 PR。只有身份绑定 durable result 与 Git 验证同时通过才完成 |
-| Reviewer | 每次 Worker HEAD 被接受后 | Issue 目标、固定 base、精确 HEAD、Harness 生成的 Git evidence、固定验证 argv | 顶层无通用 shell/edit/write；独立检查 Standards 和 Spec，在验证副本运行命令，通过 `review_submit` 返回 `pass/changes/blocked` |
+| Worker | 首次实现、Reviewer actionable findings 后的 rework、获批的 Worker 恢复 | 不可变 Issue snapshot、task digest、base/branch、可选的有界 rework/recovery brief、result path | 可修改任务 worktree、测试、执行一次 focused self-check 并提交；不能启动 review subagent、push 或建 PR。只有身份绑定 durable result 与 Git 验证同时通过才完成 |
+| Reviewer | 每次 Worker HEAD 被接受后 | Issue 目标、固定 base、精确 HEAD、Harness 生成的 Git evidence、固定验证 argv | 顶层无通用 shell/edit/write；先预检实际验证环境，再独立检查 Standards 和 Spec，在验证副本运行命令，通过 `review_submit` 返回 `pass/changes/blocked` |
 | Analyst | claim 后建立任务绑定 session；正常主链不介入，只有 blocked 时执行判断 turn | 任务 snapshot、incident、账本/Git/最近 review 等有界证据；最多请求 `maxAnalystTurns` 轮白名单只读证据 | 只能建议 `hold` 或 policy 允许的 fresh retry；不能写状态、改 Git、操作 Herdr 或批准自己 |
 | 人类 | provider/运行时变更、风险接受和恢复授权时 | 精确 revision、incident、analysis 与证据 | 唯一可签发 retry approval；审批后 Controller 仍会重新检查 policy、身份和 Git |
 
@@ -277,9 +287,18 @@ Worker 与 Reviewer 是两个独立的顶层 Pi agent。Reviewer 不在旧 Worke
 
 ### Review、Rework 与 Reviewer 隔离
 
-Reviewer 针对精确实现 HEAD 创建只读源码快照。它只能前台启动一次 `subagent`，且必须恰好包含一个 Standards 子代理和一个 Spec 子代理；两个子代理的工具上限都是 `read,grep,find,ls`。失败、缺失或没有实质输出的任一轴都不能得到 `pass` 或 `changes`。
+Worker 不再加载 `code-review`，也没有 `subagent` 工具；bundled
+`focused-self-check` 只针对当前任务 diff 做一次有界检查。完整双轴审查仍
+只由 fresh 独立 Reviewer 执行。
+
+Reviewer 针对精确实现 HEAD 创建只读源码快照。它必须先调用 `review_preflight`，从真实 Reviewer 进程内证明源码/验证路径、固定命令和所需 Docker socket 可用；之后才能前台启动一次 `subagent`，且必须恰好包含一个 Standards 子代理和一个 Spec 子代理。两个子代理的工具上限都是 `read,grep,find,ls`。预检失败，或任一轴失败、缺失、没有实质输出，都不能得到 `pass` 或 `changes`。
 
 `review_validate` 在独立可写副本中执行 attempt 已绑定的固定 argv，使用最小环境和私有 cache/home/temp。源码、验证、状态与结果路径按 canonical path 双向检查不得重叠，包括符号链接别名。`review_submit` 在产品 worktree 外原子发布唯一结果，已有结果不可覆盖。
+
+如果 `reviewerValidationArgv` 用 `/usr/bin/env
+DOCKER_CONFIG=/absolute/path` 显式包装验证命令，预检只复用这个声明路径，
+让隔离 HOME 能找到 Compose plugin。该目录必须无凭据；Harness 不会复制
+用户的通用 Docker 配置。
 
 这是 Pi 工具级写权限边界，不是恶意测试代码的 OS 沙箱。验证命令本身不可信时，应使用容器或独立 OS 账户。
 
@@ -321,6 +340,8 @@ Harness 不会：
 | `worktreeRoot` | Herdr 任务 worktree 根目录 |
 | `maxReviewRounds` | Reviewer/rework 最大轮数 |
 | `maxAnalystTurns` | Analyst 可请求的最大证据轮数 |
+| `preflight.piBin` | 有界 Provider 真实探测所用 Pi 可执行文件；默认 `pi` |
+| `preflight.dockerRequired` | 要求本地 Docker daemon 与 Compose V2，并只把解析出的本地 Unix socket 绑定给 Worker/Reviewer 验证环境 |
 | `reviewerValidationArgv` | Harness 直接执行、不经过 shell 拼接的固定验证 argv |
 | `autoMerge` | Reviewer pass 后是否请求 GitHub 原生 auto-merge |
 | `workerArgv` / `reviewerArgv` | 被 Controller 验证的 Pi 角色契约 |
@@ -331,8 +352,8 @@ Harness 不会：
 
 | 角色 | 必需内容 | 工具 | Thinking |
 | --- | --- | --- | --- |
-| Worker | `implement`、`tdd`、bundled `code-review` | `read,bash,edit,write,grep,find,ls,subagent` | `high`、`xhigh` 或 `max` |
-| Reviewer | bundled `code-review`、显式 `pi-subagents` 与 `reviewer-tools.js` extensions | `read,grep,find,ls,subagent,review_validate,review_submit` | `max` |
+| Worker | `implement`、`tdd`、bundled `focused-self-check` | `read,bash,edit,write,grep,find,ls` | `high`、`xhigh` 或 `max` |
+| Reviewer | bundled `code-review`、显式 `pi-subagents` 与 `reviewer-tools.js` extensions | `read,grep,find,ls,subagent,review_preflight,review_validate,review_submit` | `max` |
 | Review-axis 子代理 | fresh context，不继承 skills/extensions | `read,grep,find,ls` | `max` |
 
 Worker 与 Reviewer 都必须包含 `--no-approve --no-skills`；Reviewer 还必须包含 `--no-extensions` 和示例配置声明的两个 extension。Controller 会核对 skill/extension 身份、工具集合和 bundled review 代码。可选运行时选择器仅限 `--provider`、`--model`、`--no-session`。
@@ -355,7 +376,8 @@ Worker 与 Reviewer 都必须包含 `--no-approve --no-skills`；Reviewer 还必
 "--thinking", "max"
 ```
 
-两者独立，不要求配对。先确认 model，再进行故障恢复：
+两者独立，不要求配对。自动预检会在选择任务前分别轻量调用两个
+Provider，并在 attempt 前重检当前角色。手工排障时可先确认 catalog：
 
 ```bash
 pi --list-models openai-codex

@@ -51,6 +51,13 @@ Confirm every item:
 
 Preflight is complete only when every check has real output and no identity, path, provider, or active-job uncertainty remains.
 
+The Controller also performs automatic live preflight. Before it durably
+selects a ready issue, it probes both configured Pi Providers and, when
+`preflight.dockerRequired=true`, resolves and verifies the active local Docker
+Unix socket plus Compose V2. It repeats the relevant Provider and Docker check
+before each attempt pane is created. `preflight_failed` makes no claim or agent
+dispatch; `run` exits so the operator can repair the environment and restart.
+
 ### 2. Start with manual `tick`
 
 Use manual mode for the first real task:
@@ -64,6 +71,7 @@ Each successful `tick` writes at most one durable transition. Continue from its 
 | Result | Next action |
 | --- | --- |
 | `idle` | No executable issue exists; stop or wait for the queue to change |
+| `preflight_failed` | No agent was dispatched; repair the named Provider/Docker environment and rerun `tick`, or restart `run` |
 | `selected`, `claimed`, `worktree_created` | Check the message, then run one more `tick` |
 | `attempt_prepared`, `attempt_pane_ready`, `attempt_agent_ready` | Run one more `tick`; the next dispatch may remain attached for a long time |
 | dispatch command has not returned | Wait; inspect with `status` and read-only Herdr commands only, and do not start a concurrent `tick` |
@@ -73,7 +81,7 @@ Each successful `tick` writes at most one durable transition. Continue from its 
 | `blocked`, `analysis_recorded`, `waiting_for_approval` | Follow **Recover a blocked job** |
 | `archived` | The slot is free; the next `tick` may select another issue |
 
-For any `ok:false`, run `status` first and correct the exact condition in the message. Repeating a command does not grant recovery authority.
+For any other `ok:false`, run `status` first and correct the exact condition in the message. Repeating a command does not grant recovery authority.
 
 Dispatch calls Herdr `agent prompt --wait` and may remain attached for the entire Worker or Reviewer run. Silence does not mean the prompt was lost.
 
@@ -236,10 +244,12 @@ No layer substitutes for another. Herdr `idle/done`, a Pi final reply, or a term
 
 ```text
 GitHub ready issue
+  -> live Worker/Reviewer Provider and optional Docker preflight
   -> durable selection and claim
   -> task-bound Codex Analyst session
   -> isolated Herdr worktree
   -> fresh Pi Worker
+  -> one focused self-check over the task diff
   -> durable result + Git verification
   -> fresh independent Pi Reviewer
       -> pass: publish PR
@@ -268,8 +278,8 @@ Each `tick` performs at most one durable transition. A restarted process continu
 
 | Role | When it runs | Information available | Authority and completion |
 | --- | --- | --- | --- |
-| Worker | Initial implementation, rework after actionable Reviewer findings, or approved Worker recovery | Immutable issue snapshot, task digest, base/branch, optional bounded rework/recovery brief, and result path | May modify the task worktree, validate, and commit; cannot push or open a PR. Completion requires an identity-bound durable result plus Git verification |
-| Reviewer | After each Worker HEAD is accepted | Issue objective, fixed base, exact HEAD, Harness-generated Git evidence, and fixed validation argv | Has no generic shell/edit/write at the top level; independently reviews Standards and Spec, validates in a disposable copy, and returns `pass/changes/blocked` through `review_submit` |
+| Worker | Initial implementation, rework after actionable Reviewer findings, or approved Worker recovery | Immutable issue snapshot, task digest, base/branch, optional bounded rework/recovery brief, and result path | May modify the task worktree, validate, run one focused self-check, and commit; cannot launch review subagents, push, or open a PR. Completion requires an identity-bound durable result plus Git verification |
+| Reviewer | After each Worker HEAD is accepted | Issue objective, fixed base, exact HEAD, Harness-generated Git evidence, and fixed validation argv | Has no generic shell/edit/write at the top level; preflights its real validation environment, independently reviews Standards and Spec, validates in a disposable copy, and returns `pass/changes/blocked` through `review_submit` |
 | Analyst | A task-bound session starts after claim; it does not join the normal path and receives a decision turn only when blocked | Task snapshot, incident, and bounded ledger/Git/last-review evidence; may request at most `maxAnalystTurns` of whitelisted read-only evidence | May recommend `hold` or a policy-allowed fresh retry; cannot write state, mutate Git, operate Herdr, or approve itself |
 | Human | Runtime/provider changes, risk acceptance, and recovery authorization | Exact revision, incident, analysis, and evidence | Sole authority for retry approval; the Controller still rechecks policy, identity, and Git after approval |
 
@@ -277,9 +287,18 @@ Worker and Reviewer are separate top-level Pi agents. Review never continues ins
 
 ### Review, rework, and Reviewer isolation
 
-The Reviewer receives a read-only snapshot of the exact implementation HEAD. It may launch `subagent` once in the foreground, containing exactly one Standards child and one Spec child. Both children are limited to `read,grep,find,ls`. A failed, missing, or non-substantive axis cannot produce `pass` or `changes`.
+The Worker does not load `code-review` or receive `subagent`. Its bundled
+`focused-self-check` performs one bounded pass over the current task diff;
+the fresh Reviewer remains the only complete two-axis review.
+
+The Reviewer receives a read-only snapshot of the exact implementation HEAD. It must first call `review_preflight`, which proves its source/validation paths, configured executable, and required Docker socket from inside the actual Reviewer process. Only then may it launch `subagent` once in the foreground, containing exactly one Standards child and one Spec child. Both children are limited to `read,grep,find,ls`. A failed preflight or failed, missing, or non-substantive axis cannot produce `pass` or `changes`.
 
 `review_validate` executes the attempt-bound argv in a separate writable copy with a minimal environment and private cache/home/temp paths. Source, validation, state, and result paths are checked for two-way canonical overlap, including symlink aliases. `review_submit` atomically publishes the sole result outside the product worktree and cannot overwrite an existing result.
+
+If `reviewerValidationArgv` explicitly wraps its command with `/usr/bin/env
+DOCKER_CONFIG=/absolute/path`, preflight reuses only that declared path so an
+isolated HOME can find Compose plugins. Keep that directory credential-free;
+the Harness does not copy the user's general Docker configuration.
 
 This is a Pi tool-level write boundary, not an OS sandbox for malicious test code. Use a container or separate OS account when the validation command itself is untrusted.
 
@@ -321,6 +340,8 @@ Treat [`harness.config.example.json`](./harness.config.example.json) as the sing
 | `worktreeRoot` | Root for Herdr task worktrees |
 | `maxReviewRounds` | Maximum Reviewer/rework rounds |
 | `maxAnalystTurns` | Maximum Analyst evidence turns |
+| `preflight.piBin` | Pi executable used for bounded live Provider probes; defaults to `pi` |
+| `preflight.dockerRequired` | Require local Docker daemon and Compose V2; bind only the resolved local Unix socket into Worker/Reviewer validation |
 | `reviewerValidationArgv` | Fixed validation argv executed directly by the Harness without shell interpolation |
 | `autoMerge` | Request GitHub native auto-merge after Reviewer pass |
 | `workerArgv` / `reviewerArgv` | Pi role contracts validated by the Controller |
@@ -331,8 +352,8 @@ Role contracts:
 
 | Role | Required content | Tools | Thinking |
 | --- | --- | --- | --- |
-| Worker | `implement`, `tdd`, bundled `code-review` | `read,bash,edit,write,grep,find,ls,subagent` | `high`, `xhigh`, or `max` |
-| Reviewer | bundled `code-review` plus explicit `pi-subagents` and `reviewer-tools.js` extensions | `read,grep,find,ls,subagent,review_validate,review_submit` | `max` |
+| Worker | `implement`, `tdd`, bundled `focused-self-check` | `read,bash,edit,write,grep,find,ls` | `high`, `xhigh`, or `max` |
+| Reviewer | bundled `code-review` plus explicit `pi-subagents` and `reviewer-tools.js` extensions | `read,grep,find,ls,subagent,review_preflight,review_validate,review_submit` | `max` |
 | Review-axis child | Fresh context with no inherited skills/extensions | `read,grep,find,ls` | `max` |
 
 Worker and Reviewer both require `--no-approve --no-skills`. Reviewer additionally requires `--no-extensions` and the two extensions declared by the example config. The Controller verifies skill/extension identity, exact tools, and bundled review code. Optional runtime selectors are limited to `--provider`, `--model`, and `--no-session`.
@@ -355,7 +376,9 @@ Inside the complete `reviewerArgv`:
 "--thinking", "max"
 ```
 
-The selections are independent. Confirm models before recovery:
+The selections are independent. Automatic preflight makes one bounded live
+call against each configured Provider before selection and repeats the current
+lane before an attempt starts. For manual troubleshooting, confirm catalogs:
 
 ```bash
 pi --list-models openai-codex

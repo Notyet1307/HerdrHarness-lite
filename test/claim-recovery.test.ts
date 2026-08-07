@@ -9,6 +9,7 @@ import {
   FakeGit,
   FakeGitHub,
   FakeHerdr,
+  FakeRuntimePreflight,
   MemoryStore,
   SequenceIds,
   issue,
@@ -45,6 +46,7 @@ test("a durable claim intent recovers when GitHub label mutation succeeded befor
     evidence: new FakeEvidence(),
     clock: new FakeClock(),
     ids: new SequenceIds(),
+    preflight: new FakeRuntimePreflight(),
   });
 
   await controller.tick();

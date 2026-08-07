@@ -29,6 +29,7 @@ export declare class GitCli implements GitPort {
         baseSha: string;
         expectedHeadSha: string;
         validationArgv: string[];
+        dockerHost: string | null;
     }): Promise<{
         reviewPath: string;
         descriptorPath: string;

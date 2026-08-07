@@ -407,13 +407,13 @@ Worker 使用 Pi，拥有 worktree 写权限，但必须遵守：
 
 ```text
 dispatch 强制从 /skill:implement 开始
-显式加载 Matt Pocock implement、tdd 与 Harness code-review
+显式加载 Matt Pocock implement、tdd 与 Harness focused-self-check
 只处理一个 issue
 不 push
 不创建 PR
 运行验证
-提交 implementation checkpoint 后执行双轴 code-review 自审
-提交改动
+只针对当前 attempt diff 执行一次 focused self-check，不启动 subagent
+提交最终 clean state
 写入 exact attempt result JSON
 ```
 
@@ -436,6 +436,7 @@ tracked worktree clean
 
 ```text
 dispatch 强制从 /skill:code-review 开始
+先从真实 Reviewer 进程内执行 review_preflight
 在当前 turn 内用 pi-subagents 前台并行检查 Standards 与 Spec
 两个 child 均为 fresh、无写工具、无 skills、无递归 subagent
 reviewedHeadSha == 当前 head
@@ -446,7 +447,9 @@ tracked worktree clean
 
 Herdr 只管理顶层 Worker/Reviewer Pi。子审查器由顶层 Pi 在同一 foreground turn 内拥有；它们继承父 Pi 的工作目录、环境和未覆写模型，但 `thinking=max` 显式固定，工具、skills、扩展和递归深度按只读职责收窄。禁止 async child，避免顶层 Pi 提前完成而留下未被 Harness 生命周期覆盖的后台执行。
 
-Controller 直接校验原生 role argv：解析每个 `SKILL.md` 的真实 `name`，用 installer `.skill-lock.json` 核对 Matt Pocock `implement/tdd` 来源，并要求 bundled `code-review` 是唯一同名 skill；精确工具集合、Worker 的 `thinking=high|xhigh|max` 与 Reviewer 的 `thinking=max` 缺一不可。除可选 `provider/model/no-session` 外，extension、system prompt、session 复用和 positional prompt 等参数全部拒绝。因此 fresh attempt 不能被路径伪装或配置降级，且没有引入另一套 profile DSL。
+Controller 直接校验原生 role argv：解析每个 `SKILL.md` 的真实 `name`，用 installer `.skill-lock.json` 核对 Matt Pocock `implement/tdd` 来源；Worker 必须使用 bundled `focused-self-check` 且不得加载 `code-review`/`subagent`，Reviewer 必须使用唯一 bundled `code-review`。精确工具集合、Worker 的 `thinking=high|xhigh|max` 与 Reviewer 的 `thinking=max` 缺一不可。除可选 `provider/model/no-session` 外，extension、system prompt、session 复用和 positional prompt 等参数全部拒绝。因此 fresh attempt 不能被路径伪装或配置降级，且没有引入另一套 profile DSL。
+
+任务选择前会对两个角色做轻量 Provider 真实探测；配置要求 Docker 时，同时解析当前本地 Unix socket 并验证 daemon/Compose V2。attempt pane 创建前重检当前角色，并把同一个 socket 显式绑定给 Worker 或 Reviewer 验证副本。Reviewer 内部必须先通过 `review_preflight`，才能启动双轴 child 或执行完整验证；预检失败不会被解释为代码审查通过。
 
 结果：
 
@@ -577,9 +580,9 @@ Tests: 45 passed, 0 failed
 10. approval 后关闭旧 agent、创建新 attempt；
 11. Herdr 0.8 原生命令、响应 identity、错误分类与 pane-ready 竞态，不使用 `pane run` 模拟 agent；
 12. prompt at-most-once、关闭后崩溃恢复、成功 pane 关闭与官方 `agent get/read` 诊断。
-13. Worker/Reviewer 强制 skill dispatch、Pi package 资源、fail-fast role argv、foreground 双轴 child reviewer 与 untracked 文件 gate。
+13. Worker focused self-check、Reviewer 强制双轴 skill dispatch、Pi package 资源、fail-fast role argv、Provider/Docker/Reviewer 环境预检与 untracked 文件 gate。
 
-真实验证：在 `Notyet1307/harness-sandbox@fd9defa` 上，以 Herdr 0.8.0、Pi 0.83.0、Pi integration v8 完成独立命名 session canary；Pi 到达 `done`、写出预期 durable result、tracked tree 未改，自有 attempt pane 关闭后已从 workspace 消失。另以 issue #12 从基线 `b0fd0b0` 运行角色 canary：强制 `implement` 的 Worker 生成本地 `1285f52` 并完成 `2/2` foreground 双轴自审，fresh Reviewer 再完成独立 `2/2` 双轴审查并返回 `pass`；两条结果均绑定精确 SHA，四条指定验证退出 0，两个自有 pane 已关闭，worktree clean，分支未 push。
+历史真实验证：在 `Notyet1307/harness-sandbox@fd9defa` 上，以 Herdr 0.8.0、Pi 0.83.0、Pi integration v8 完成独立命名 session canary；Pi 到达 `done`、写出预期 durable result、tracked tree 未改，自有 attempt pane 关闭后已从 workspace 消失。另以 issue #12 从基线 `b0fd0b0` 运行角色 canary：当时的 Worker 生成本地 `1285f52` 并完成旧版双轴自审，fresh Reviewer 再完成独立 `2/2` 双轴审查并返回 `pass`。该记录只证明旧版链路；当前 Worker 已改为 focused self-check，仍需下一次真实 canary 补充运行证据。
 
 完整 controller 随后以 issue #14 做了真实端到端 canary。第一次运行因 Reviewer 的 `.pi-subagents` 产物进入 worktree 而 fail closed；产物目录与 gate 绑定修复后，从 `fd9defa` 重跑，Worker 生成 `b0c0f7e`，fresh Reviewer 对同一 SHA 返回 `pass`，Controller 发布 PR #15、观察到 merge commit `7454feb`，再迁移到 `done` 并归档；Codex Analyst receipt 最终为 `closed`。最终 tracked tree clean，仅保留该 Job 已知的 `.harness` result JSON。GitHub issue、claim、Analyst、Herdr worktree、Worker、Reviewer、PR、merge observation 与 archive 的完整主链路已经验收。
 

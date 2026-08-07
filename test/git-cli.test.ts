@@ -54,6 +54,7 @@ test("Reviewer preparation exports a read-only exact-HEAD snapshot and writable 
       baseSha,
       expectedHeadSha,
       validationArgv: ["npm", "run", "verify"],
+      dockerHost: "unix:///tmp/docker.sock",
     };
 
     const workspace = await new GitCli(runner).prepareReviewer(input);
@@ -61,6 +62,7 @@ test("Reviewer preparation exports a read-only exact-HEAD snapshot and writable 
     assert.equal(lstatSync(join(workspace.reviewPath, "product.txt")).mode & 0o222, 0);
     writeFileSync(join(attemptRoot, "validation", "product.txt"), "validation mutation\n");
     assert.match(readFileSync(workspace.evidencePath, "utf8"), new RegExp(`Head SHA: ${expectedHeadSha}`));
+    assert.equal(JSON.parse(readFileSync(join(attemptRoot, "descriptor.json"), "utf8")).dockerHost, "unix:///tmp/docker.sock");
     assert.deepEqual(await new GitCli(runner).prepareReviewer(input), workspace);
     await assert.rejects(() => new GitCli(runner).prepareReviewer({
       ...input,

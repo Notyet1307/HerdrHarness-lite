@@ -1,6 +1,7 @@
 import { join, resolve } from "node:path";
 import { digest } from "../src/model.js";
 export const validCodeReviewSkillPath = resolve("pi/skills/code-review");
+export const validFocusedSelfCheckSkillPath = resolve("pi/skills/focused-self-check");
 export const validPiSubagentsExtensionPath = resolve("test/fixtures/pi-subagents/index.js");
 export const validReviewerToolsExtensionPath = resolve("pi/extensions/reviewer-tools.js");
 export const validImplementSkillPath = resolve("test/fixtures/pi-skills/skills/implement");
@@ -12,8 +13,8 @@ export const validWorkerArgv = [
     "--no-skills",
     "--skill", validImplementSkillPath,
     "--skill", validTddSkillPath,
-    "--skill", validCodeReviewSkillPath,
-    "--tools", "read,bash,edit,write,grep,find,ls,subagent",
+    "--skill", validFocusedSelfCheckSkillPath,
+    "--tools", "read,bash,edit,write,grep,find,ls",
     "--thinking", "high",
 ];
 export const validReviewerArgv = [
@@ -23,7 +24,7 @@ export const validReviewerArgv = [
     "--extension", validPiSubagentsExtensionPath,
     "--extension", validReviewerToolsExtensionPath,
     "--skill", validCodeReviewSkillPath,
-    "--tools", "read,grep,find,ls,subagent,review_validate,review_submit",
+    "--tools", "read,grep,find,ls,subagent,review_preflight,review_validate,review_submit",
     "--thinking", "max",
 ];
 export class FakeClock {
@@ -38,6 +39,24 @@ export class SequenceIds {
     next(prefix) {
         this.count += 1;
         return `${prefix}-${String(this.count).padStart(3, "0")}`;
+    }
+}
+export class FakeRuntimePreflight {
+    providerCalls = [];
+    dockerCalls = [];
+    providerFailure = null;
+    dockerFailure = null;
+    dockerHost = "unix:///tmp/docker.sock";
+    async probeProvider(input) {
+        this.providerCalls.push({ ...input, roleArgv: [...input.roleArgv] });
+        if (this.providerFailure)
+            throw this.providerFailure;
+    }
+    async probeDocker(input) {
+        this.dockerCalls.push(input.cwd);
+        if (this.dockerFailure)
+            throw this.dockerFailure;
+        return { host: this.dockerHost };
     }
 }
 export class MemoryStore {
@@ -108,6 +127,7 @@ export class FakeGit {
     workerFailure = null;
     reviewerFailure = null;
     reviewerValidationArgv = [];
+    reviewerDockerHosts = [];
     workerVerifications = [];
     async refreshBase() {
         return this.baseSha;
@@ -121,6 +141,7 @@ export class FakeGit {
     }
     async prepareReviewer(input) {
         this.reviewerValidationArgv.push([...input.validationArgv]);
+        this.reviewerDockerHosts.push(input.dockerHost);
         return {
             reviewPath: join(input.rootPath, "source"),
             descriptorPath: join(input.rootPath, "descriptor.json"),

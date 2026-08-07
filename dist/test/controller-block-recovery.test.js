@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { HarnessController } from "../src/controller.js";
 import { assertJobInvariant } from "../src/model.js";
 import { approveRecovery, reassessIncident, resolveDecision } from "../src/recovery.js";
-import { FakeAnalyst, FakeClock, FakeEvidence, FakeGit, FakeGitHub, FakeHerdr, MemoryStore, SequenceIds, issue, validReviewerArgv, validWorkerArgv, } from "./fakes.js";
+import { FakeAnalyst, FakeClock, FakeEvidence, FakeGit, FakeGitHub, FakeHerdr, FakeRuntimePreflight, MemoryStore, SequenceIds, issue, validReviewerArgv, validWorkerArgv, } from "./fakes.js";
 const config = {
     repo: "owner/repo",
     localPath: "/repo",
@@ -51,6 +51,7 @@ test("blocked work cannot resume before exact human approval and recovery always
         evidence: new FakeEvidence(),
         clock,
         ids,
+        preflight: new FakeRuntimePreflight(),
     });
     for (let index = 0; index < 8; index += 1)
         await controller.tick();
@@ -118,6 +119,7 @@ test("Reviewer infrastructure failure resumes with a fresh Reviewer on the same 
         evidence: new FakeEvidence(),
         clock,
         ids,
+        preflight: new FakeRuntimePreflight(),
     });
     for (let index = 0; index < 12; index += 1)
         await controller.tick();
@@ -201,6 +203,7 @@ test("held Reviewer infrastructure incident can be reassessed without granting r
         evidence: new FakeEvidence(),
         clock,
         ids,
+        preflight: new FakeRuntimePreflight(),
     });
     for (let index = 0; index < 12; index += 1)
         await controller.tick();
@@ -303,6 +306,7 @@ test("held Reviewer validation block can be reassessed and retried on the same H
         evidence: new FakeEvidence(),
         clock,
         ids,
+        preflight: new FakeRuntimePreflight(),
     });
     for (let index = 0; index < 13; index += 1)
         await controller.tick();
@@ -382,6 +386,7 @@ test("legacy pre-start Reviewer residue is reassessed through an auditable compa
         evidence: new FakeEvidence(),
         clock,
         ids,
+        preflight: new FakeRuntimePreflight(),
     });
     for (let index = 0; index < 9; index += 1)
         await controller.tick();
@@ -451,6 +456,7 @@ test("held Worker infrastructure incident can be reassessed without granting ret
         evidence: new FakeEvidence(),
         clock,
         ids,
+        preflight: new FakeRuntimePreflight(),
     });
     for (let index = 0; index < 7; index += 1)
         await controller.tick();
@@ -501,6 +507,7 @@ test("controller-recorded Analyst execution failure can be reassessed without gr
         evidence: new FakeEvidence(),
         clock,
         ids,
+        preflight: new FakeRuntimePreflight(),
     });
     for (let index = 0; index < 14; index += 1)
         await controller.tick();
@@ -579,6 +586,7 @@ test("an exact human decision can recover an exhausted major Reviewer change int
         evidence: new FakeEvidence(),
         clock,
         ids,
+        preflight: new FakeRuntimePreflight(),
     });
     for (let index = 0; index < 14; index += 1)
         await controller.tick();
@@ -660,6 +668,7 @@ test("integrity incidents cannot be converted into retry authority by the Analys
         evidence: new FakeEvidence(),
         clock,
         ids,
+        preflight: new FakeRuntimePreflight(),
     });
     for (let index = 0; index < 8; index += 1)
         await controller.tick();

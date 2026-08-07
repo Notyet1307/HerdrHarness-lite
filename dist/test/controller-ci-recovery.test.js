@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { HarnessController } from "../src/controller.js";
 import { approveRecovery } from "../src/recovery.js";
-import { FakeAnalyst, FakeClock, FakeEvidence, FakeGit, FakeGitHub, FakeHerdr, MemoryStore, SequenceIds, issue, validReviewerArgv, validWorkerArgv, } from "./fakes.js";
+import { FakeAnalyst, FakeClock, FakeEvidence, FakeGit, FakeGitHub, FakeHerdr, FakeRuntimePreflight, MemoryStore, SequenceIds, issue, validReviewerArgv, validWorkerArgv, } from "./fakes.js";
 const oldHead = "b".repeat(40);
 const newHead = "c".repeat(40);
 const failedCheck = {
@@ -59,6 +59,7 @@ test("failed required CI blocks, then permits one human-approved fresh Worker cy
         evidence: new FakeEvidence(),
         clock,
         ids,
+        preflight: new FakeRuntimePreflight(),
     });
     await driveUntil(controller, store, "awaiting_merge");
     github.autoMergeEnabled = true;

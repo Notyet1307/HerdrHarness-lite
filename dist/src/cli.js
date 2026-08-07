@@ -9,6 +9,7 @@ import { HerdrCli } from "./adapters/herdr-cli.js";
 import { JsonCommandAnalyst } from "./adapters/json-command-analyst.js";
 import { JsonStateStore } from "./adapters/json-store.js";
 import { LocalEvidence } from "./adapters/local-evidence.js";
+import { RuntimePreflightCli } from "./adapters/runtime-preflight.js";
 import { HarnessController } from "./controller.js";
 import { approveRecovery, reassessIncident, resolveDecision } from "./recovery.js";
 const usage = `Usage:
@@ -72,6 +73,7 @@ async function main(argv) {
         herdr: new HerdrCli(config.herdr),
         analyst: new JsonCommandAnalyst(config.analyst.command, config.analyst.argv ?? []),
         evidence: new LocalEvidence(),
+        preflight: new RuntimePreflightCli(),
         clock,
         ids,
     });
@@ -89,6 +91,8 @@ async function main(argv) {
         cycle += 1;
         const output = await controller.tick();
         process.stdout.write(`${JSON.stringify({ cycle, ...output })}\n`);
+        if (output.action === "preflight_failed")
+            return 1;
         if (maxCycles !== null && cycle >= maxCycles)
             return output.ok ? 0 : 1;
         Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, pollMs);
@@ -102,6 +106,12 @@ function loadConfig(path) {
     }
     if (parsed.autoMerge !== undefined && typeof parsed.autoMerge !== "boolean") {
         throw new Error("invalid Harness config: autoMerge must be boolean");
+    }
+    if (parsed.preflight !== undefined && (!parsed.preflight
+        || typeof parsed.preflight !== "object"
+        || (parsed.preflight.piBin !== undefined && typeof parsed.preflight.piBin !== "string")
+        || (parsed.preflight.dockerRequired !== undefined && typeof parsed.preflight.dockerRequired !== "boolean"))) {
+        throw new Error("invalid Harness config: preflight must contain optional piBin and dockerRequired values");
     }
     return parsed;
 }

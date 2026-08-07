@@ -15,7 +15,26 @@ export type HarnessConfig = {
     /** Native Pi arguments only; Herdr selects `pi` and Controller validates the role contract. */
     workerArgv: string[];
     reviewerArgv: string[];
+    preflight?: {
+        /** Command used for bounded live Provider probes. Defaults to `pi`. */
+        piBin?: string;
+        /** Require a local Docker daemon plus Compose V2 and bind its Unix socket into attempts. */
+        dockerRequired?: boolean;
+    };
 };
+export interface RuntimePreflightPort {
+    probeProvider(input: {
+        lane: Attempt["lane"];
+        cwd: string;
+        roleArgv: string[];
+        piBin: string;
+    }): Promise<void>;
+    probeDocker(input: {
+        cwd: string;
+    }): Promise<{
+        host: string;
+    }>;
+}
 export interface Clock {
     now(): string;
 }
@@ -83,6 +102,7 @@ export interface GitPort {
         baseSha: string;
         expectedHeadSha: string;
         validationArgv: string[];
+        dockerHost: string | null;
     }): Promise<{
         reviewPath: string;
         descriptorPath: string;

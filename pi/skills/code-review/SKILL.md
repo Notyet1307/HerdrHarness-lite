@@ -1,6 +1,6 @@
 ---
 name: code-review
-description: Pi-adapted Matt Pocock two-axis code review using fresh foreground subagents for Standards and Spec; required for HerdrHarness worker self-review and independent reviewer attempts.
+description: Pi-adapted Matt Pocock two-axis code review using fresh foreground subagents for the independent HerdrHarness Reviewer.
 metadata:
   upstream: mattpocock/skills
   upstream-path: skills/engineering/code-review/SKILL.md
@@ -9,34 +9,27 @@ metadata:
 
 # Pi two-axis code review
 
-Preserve the Matt Pocock `code-review` contract: review the committed diff from
-one fixed point along two independent axes, **Standards** and **Spec**. This
-file only adapts the subagent interface and Harness result handoff to Pi.
+Preserve the Matt Pocock `code-review` contract: independently review the
+committed diff from one fixed point along two axes, **Standards** and **Spec**.
+Workers use `focused-self-check`; this complete review belongs only to the
+fresh top-level Reviewer.
+
+## 0. Preflight the Reviewer environment
+
+Call `review_preflight` exactly once before reading the full evidence or
+launching either review axis. It verifies the read-only source, writable
+validation copy, configured validation executable, and required Docker daemon
+from inside the actual Reviewer process. If it fails, call `review_submit` with
+`status=blocked`, include the concrete failed check, and do not launch
+subagents or call `review_validate`.
 
 ## 1. Pin the review identity
 
-Use the Base SHA supplied by the Harness dispatch as the fixed point and the
-supplied Head SHA (or current committed `HEAD` inside a worker self-review) as
-the review target.
-
-In a Worker self-review, run and record:
-
-```bash
-git rev-parse <base-sha>^{commit}
-git rev-parse HEAD
-git merge-base --is-ancestor <base-sha> HEAD
-git diff <base-sha>...HEAD
-git log <base-sha>..HEAD --oneline
-```
-
-Fail closed if the refs do not resolve, ancestry fails, the requested Head SHA
-does not equal `HEAD`, or the three-dot diff is empty. A worker must create its
-implementation checkpoint commit before this review.
-
-In a top-level Reviewer attempt, generic shell access is unavailable. Read the
-Harness-generated `review-evidence.txt` named in the dispatch instead. It binds
-the Base SHA, exact Head SHA, ancestry, clean tracked state, commit list, and
-three-dot diff. Missing or inconsistent evidence is a blocking gap.
+Use the Base SHA and Head SHA supplied by the Harness dispatch. Generic shell
+access is unavailable, so read the Harness-generated `review-evidence.txt`
+named in the dispatch. It binds the fixed point, exact Head SHA, ancestry,
+clean tracked state, commit list, and three-dot diff. Missing or inconsistent
+evidence is a blocking gap.
 
 ## 2. Resolve evidence
 
@@ -114,18 +107,13 @@ opinion.
 ## 4. Aggregate without collapsing the axes
 
 Keep the two reports under `Standards` and `Spec`. Do not merge or rerank across
-axes. In a Worker self-review, run the required validation normally. In a
-top-level Reviewer attempt, call `review_validate` exactly once; it runs the
-Harness-configured argv in a disposable writable copy and returns the exact
-exit status.
+axes. Call `review_validate` exactly once; it runs the Harness-configured argv
+in a disposable writable copy and returns the exact exit status.
 
-- In a Worker attempt, return the reports to the Worker. The Worker applies
-  accepted fixes, commits the final clean state, then writes its own worker
-  result. This skill never writes a reviewer result during worker self-review.
-- In a top-level Reviewer attempt, never edit product source or write a result
-  file directly. Call `review_submit` exactly once with only status, summary,
-  and findings; the Harness-owned tool binds the job, attempt, lane, and exact
-  reviewed Head SHA before writing the external result channel.
+Never edit product source or write a result file directly. Call
+`review_submit` exactly once with only status, summary, and findings; the
+Harness-owned tool binds the job, attempt, lane, and exact reviewed Head SHA
+before writing the external result channel.
 
 For a top-level Reviewer result:
 

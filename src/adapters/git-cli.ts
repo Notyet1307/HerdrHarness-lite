@@ -77,6 +77,7 @@ export class GitCli implements GitPort {
     baseSha: string;
     expectedHeadSha: string;
     validationArgv: string[];
+    dockerHost: string | null;
   }): Promise<{ reviewPath: string; descriptorPath: string; evidencePath: string }> {
     const rootPath = resolve(input.rootPath);
     if (pathsOverlap(input.worktree.path, rootPath)) throw new Error("Reviewer state must be outside the product worktree");
@@ -93,6 +94,7 @@ export class GitCli implements GitPort {
       attemptId: input.attemptId,
       reviewedHeadSha: input.expectedHeadSha,
       validationArgv: input.validationArgv,
+      dockerHost: input.dockerHost,
       validationPath,
       scratchPath,
       resultPath: resolve(input.resultPath),

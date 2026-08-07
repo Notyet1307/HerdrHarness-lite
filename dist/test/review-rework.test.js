@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { HarnessController } from "../src/controller.js";
-import { FakeAnalyst, FakeClock, FakeEvidence, FakeGit, FakeGitHub, FakeHerdr, MemoryStore, SequenceIds, issue, validReviewerArgv, validWorkerArgv, } from "./fakes.js";
+import { FakeAnalyst, FakeClock, FakeEvidence, FakeGit, FakeGitHub, FakeHerdr, FakeRuntimePreflight, MemoryStore, SequenceIds, issue, validReviewerArgv, validWorkerArgv, } from "./fakes.js";
 const config = {
     repo: "owner/repo",
     localPath: "/repo",
@@ -40,6 +40,7 @@ test("actionable review findings create a fresh worker and a fresh reviewer", as
         evidence: new FakeEvidence(),
         clock: new FakeClock(),
         ids: new SequenceIds(),
+        preflight: new FakeRuntimePreflight(),
     });
     for (let index = 0; index < 23; index += 1)
         await controller.tick();

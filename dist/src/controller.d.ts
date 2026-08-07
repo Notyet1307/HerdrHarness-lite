@@ -1,5 +1,5 @@
-import type { AnalystPort, Clock, EvidencePort, GitHubPort, GitPort, HarnessConfig, HerdrPort, IdGenerator, StateStore } from "./ports.js";
-export type TickAction = "idle" | "selected" | "claimed" | "worktree_created" | "attempt_prepared" | "attempt_pane_ready" | "attempt_agent_ready" | "attempt_dispatched" | "attempt_completed" | "analysis_recorded" | "waiting_for_approval" | "recovery_applied" | "published" | "publish_retry" | "waiting_for_merge" | "merged" | "archived" | "blocked";
+import type { AnalystPort, Clock, EvidencePort, GitHubPort, GitPort, HarnessConfig, HerdrPort, IdGenerator, RuntimePreflightPort, StateStore } from "./ports.js";
+export type TickAction = "idle" | "preflight_failed" | "selected" | "claimed" | "worktree_created" | "attempt_prepared" | "attempt_pane_ready" | "attempt_agent_ready" | "attempt_dispatched" | "attempt_completed" | "analysis_recorded" | "waiting_for_approval" | "recovery_applied" | "published" | "publish_retry" | "waiting_for_merge" | "merged" | "archived" | "blocked";
 export type TickResult = {
     ok: boolean;
     action: TickAction;
@@ -16,6 +16,7 @@ type Dependencies = {
     evidence: EvidencePort;
     clock: Clock;
     ids: IdGenerator;
+    preflight: RuntimePreflightPort;
 };
 /**
  * One controller owns all writes. Each tick performs at most one durable state
@@ -30,6 +31,7 @@ export declare class HarnessController {
     private advanceClaim;
     private prepareAttempt;
     private driveAttempt;
+    private runRuntimePreflight;
     private verifyReviewerIntegrity;
     private verifyReviewerPreflight;
     private finishWorker;

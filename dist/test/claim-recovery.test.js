@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { HarnessController } from "../src/controller.js";
-import { FakeAnalyst, FakeClock, FakeEvidence, FakeGit, FakeGitHub, FakeHerdr, MemoryStore, SequenceIds, issue, validReviewerArgv, validWorkerArgv, } from "./fakes.js";
+import { FakeAnalyst, FakeClock, FakeEvidence, FakeGit, FakeGitHub, FakeHerdr, FakeRuntimePreflight, MemoryStore, SequenceIds, issue, validReviewerArgv, validWorkerArgv, } from "./fakes.js";
 const config = {
     repo: "owner/repo",
     localPath: "/repo",
@@ -30,6 +30,7 @@ test("a durable claim intent recovers when GitHub label mutation succeeded befor
         evidence: new FakeEvidence(),
         clock: new FakeClock(),
         ids: new SequenceIds(),
+        preflight: new FakeRuntimePreflight(),
     });
     await controller.tick();
     assert.equal(store.state.activeJob?.claimConfirmed, false);

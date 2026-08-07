@@ -1,13 +1,14 @@
-import { closeSync, existsSync, fsyncSync, linkSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { accessSync, closeSync, constants, existsSync, fsyncSync, linkSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { dirname, isAbsolute, join } from "node:path";
+import { basename, delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 
 const DESCRIPTOR_ENV = "HERDR_HARNESS_REVIEW_DESCRIPTOR";
 const OUTPUT_LIMIT = 50_000;
 
 export default function reviewerTools(pi) {
   const descriptor = readDescriptor();
+  let environmentPreflight = null;
   let validation = null;
   let submitted = false;
   let axesCall = null;
@@ -15,6 +16,9 @@ export default function reviewerTools(pi) {
 
   pi.on("tool_call", async (event) => {
     if (event.toolName !== "subagent") return undefined;
+    if (!environmentPreflight?.ok) {
+      return { block: true, reason: "Reviewer must complete review_preflight successfully before launching review axes" };
+    }
     if (axesCall) {
       return { block: true, reason: "Reviewer may launch the two review axes only once" };
     }
@@ -34,20 +38,62 @@ export default function reviewerTools(pi) {
   });
 
   pi.registerTool({
+    name: "review_preflight",
+    label: "Preflight Reviewer environment",
+    description: "Verify the actual Reviewer source, validation copy, command path, and required Docker daemon before review axes start.",
+    parameters: { type: "object", properties: {}, additionalProperties: false },
+    execute: async () => {
+      if (environmentPreflight) return toolResult(environmentPreflight);
+      try {
+        const env = reviewerEnv(descriptor);
+        if (!existsSync(process.cwd())) throw new Error("read-only Reviewer source is missing");
+        if (!existsSync(descriptor.validationPath)) throw new Error("Reviewer validation copy is missing");
+        if (!existsSync(descriptor.scratchPath)) throw new Error("Reviewer scratch directory is missing");
+        const executables = validationExecutables(descriptor.validationArgv)
+          .map((command) => resolveExecutable(command, descriptor.validationPath, env.PATH));
+        proveWritable(descriptor.validationPath);
+
+        let docker = null;
+        if (descriptor.dockerHost) {
+          const version = spawnSync("docker", ["version", "--format", "{{.Server.Version}}"], {
+            cwd: descriptor.validationPath,
+            env,
+            encoding: "utf8",
+            maxBuffer: 1024 * 1024,
+            timeout: 15_000,
+          });
+          if (version.error || version.status !== 0 || !version.stdout.trim()) {
+            throw new Error(`Docker daemon is unavailable: ${processFailure(version)}`);
+          }
+          const compose = spawnSync("docker", ["compose", "version", "--short"], {
+            cwd: descriptor.validationPath,
+            env,
+            encoding: "utf8",
+            maxBuffer: 1024 * 1024,
+            timeout: 15_000,
+          });
+          if (compose.error || compose.status !== 0 || !compose.stdout.trim()) {
+            throw new Error(`Docker Compose V2 is unavailable: ${processFailure(compose)}`);
+          }
+          docker = { host: descriptor.dockerHost, serverVersion: version.stdout.trim(), composeVersion: compose.stdout.trim() };
+        }
+        environmentPreflight = { ok: true, validationExecutable: executables.at(-1), docker };
+      } catch (error) {
+        environmentPreflight = { ok: false, error: error instanceof Error ? error.message : String(error) };
+      }
+      return toolResult(environmentPreflight);
+    },
+  });
+
+  pi.registerTool({
     name: "review_validate",
     label: "Run fixed review validation",
     description: "Run the single Harness-configured validation command in the disposable writable validation copy.",
     parameters: { type: "object", properties: {}, additionalProperties: false },
     execute: async () => {
+      if (!environmentPreflight?.ok) throw new Error("review_validate requires a successful review_preflight run");
       if (validation) return toolResult(validation);
-      const env = validationEnv({
-        HOME: join(descriptor.scratchPath, "home"),
-        TMPDIR: join(descriptor.scratchPath, "tmp"),
-        TMP: join(descriptor.scratchPath, "tmp"),
-        TEMP: join(descriptor.scratchPath, "tmp"),
-        XDG_CACHE_HOME: join(descriptor.scratchPath, "cache"),
-        PYTHONPYCACHEPREFIX: join(descriptor.scratchPath, "pycache"),
-      });
+      const env = reviewerEnv(descriptor);
       const [command, ...args] = descriptor.validationArgv;
       const output = spawnSync(command, args, {
         cwd: descriptor.validationPath,
@@ -99,6 +145,9 @@ export default function reviewerTools(pi) {
       if (submitted) throw new Error("Reviewer result was already submitted");
       if ((params.status === "pass" || params.status === "changes") && !axesCompleted) {
         throw new Error("Reviewer pass or changes requires one completed Standards and Spec subagent run");
+      }
+      if ((params.status === "pass" || params.status === "changes") && !environmentPreflight?.ok) {
+        throw new Error("Reviewer pass or changes requires a successful review_preflight run");
       }
       if ((params.status === "pass" || params.status === "changes") && !validation) {
         throw new Error("Reviewer pass or changes requires a review_validate run");
@@ -162,12 +211,91 @@ function completedReviewAxes(event, expectedTasks) {
   return tasks.size === 2;
 }
 
-function validationEnv(scratch) {
+function reviewerEnv(descriptor) {
+  const env = validationEnv({
+    HOME: join(descriptor.scratchPath, "home"),
+    TMPDIR: join(descriptor.scratchPath, "tmp"),
+    TMP: join(descriptor.scratchPath, "tmp"),
+    TEMP: join(descriptor.scratchPath, "tmp"),
+    XDG_CACHE_HOME: join(descriptor.scratchPath, "cache"),
+    PYTHONPYCACHEPREFIX: join(descriptor.scratchPath, "pycache"),
+  }, descriptor.dockerHost);
+  const wrapped = envAssignments(descriptor.validationArgv);
+  const configuredHost = wrapped.get("DOCKER_HOST");
+  if (configuredHost && configuredHost !== descriptor.dockerHost) {
+    throw new Error("Reviewer validation argv attempts to override the bound Docker host");
+  }
+  const dockerConfig = wrapped.get("DOCKER_CONFIG");
+  if (dockerConfig) {
+    if (!isAbsolute(dockerConfig) || /[\0\r\n]/.test(dockerConfig)) {
+      throw new Error("Reviewer validation DOCKER_CONFIG must be an absolute safe path");
+    }
+    env.DOCKER_CONFIG = dockerConfig;
+  }
+  return env;
+}
+
+function validationEnv(scratch, dockerHost) {
   const env = { PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin", ...scratch };
+  if (dockerHost) env.DOCKER_HOST = dockerHost;
   for (const name of ["LANG", "LC_ALL", "LC_CTYPE"]) {
     if (process.env[name]) env[name] = process.env[name];
   }
   return env;
+}
+
+function envAssignments(argv) {
+  const values = new Map();
+  if (basename(argv[0] ?? "") !== "env") return values;
+  for (const argument of argv.slice(1)) {
+    const match = /^([A-Za-z_][A-Za-z0-9_]*)=([^\0\r\n]*)$/.exec(argument);
+    if (!match) break;
+    values.set(match[1], match[2]);
+  }
+  return values;
+}
+
+function validationExecutables(argv) {
+  const commands = [argv[0]];
+  if (basename(argv[0] ?? "") !== "env") return commands;
+  const target = argv.slice(1).find((argument) => !/^[A-Za-z_][A-Za-z0-9_]*=[^\0\r\n]*$/.test(argument));
+  if (!target || target.startsWith("-")) throw new Error("Reviewer validation env wrapper has no supported command");
+  commands.push(target);
+  return commands;
+}
+
+function resolveExecutable(command, cwd, pathValue) {
+  const candidates = command.includes("/")
+    ? [isAbsolute(command) ? command : resolve(cwd, command)]
+    : (pathValue ?? "").split(delimiter).filter(Boolean).map((entry) => join(entry, command));
+  for (const candidate of candidates) {
+    try {
+      accessSync(candidate, constants.X_OK);
+      return candidate;
+    } catch {
+      // Try the next PATH entry.
+    }
+  }
+  throw new Error(`Reviewer validation executable is unavailable: ${command}`);
+}
+
+function proveWritable(path) {
+  const probe = join(path, `.herdr-harness-preflight-${randomUUID()}`);
+  let fd = null;
+  try {
+    fd = openSync(probe, "wx", 0o600);
+    closeSync(fd);
+    fd = null;
+    unlinkSync(probe);
+  } finally {
+    if (fd !== null) closeSync(fd);
+    if (existsSync(probe)) unlinkSync(probe);
+  }
+}
+
+function processFailure(output) {
+  const detail = (output.error?.message ?? output.stderr?.trim()) || output.stdout?.trim() || `exit ${output.status}`;
+  return detail.length <= 4_000 ? detail : `[truncated]\n${detail.slice(-4_000)}`;
 }
 
 function publishResult(path, body) {
@@ -202,6 +330,7 @@ function readDescriptor() {
   const path = process.env[DESCRIPTOR_ENV];
   if (!path || !isAbsolute(path)) throw new Error(`${DESCRIPTOR_ENV} must name an absolute descriptor path`);
   const value = JSON.parse(readFileSync(path, "utf8"));
+  if (value?.dockerHost === undefined) value.dockerHost = null;
   if (
     value?.version !== 1
     || typeof value.jobId !== "string" || !value.jobId
@@ -212,10 +341,15 @@ function readDescriptor() {
     || !isAbsolute(value.validationPath ?? "")
     || !isAbsolute(value.scratchPath ?? "")
     || !isAbsolute(value.resultPath ?? "")
+    || (value.dockerHost !== null && (typeof value.dockerHost !== "string" || !safeDockerHost(value.dockerHost)))
   ) {
     throw new Error("invalid Harness Reviewer descriptor");
   }
   return value;
+}
+
+function safeDockerHost(host) {
+  return host.startsWith("unix:///") && !/[\0\r\n]/.test(host);
 }
 
 function tail(value) {

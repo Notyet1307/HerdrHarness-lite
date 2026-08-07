@@ -10,6 +10,7 @@ import {
   FakeGit,
   FakeGitHub,
   FakeHerdr,
+  FakeRuntimePreflight,
   MemoryStore,
   SequenceIds,
   issue,
@@ -75,6 +76,7 @@ test("failed required CI blocks, then permits one human-approved fresh Worker cy
     evidence: new FakeEvidence(),
     clock,
     ids,
+    preflight: new FakeRuntimePreflight(),
   });
 
   await driveUntil(controller, store, "awaiting_merge");

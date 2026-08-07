@@ -1,6 +1,7 @@
 import { type AnalystSession, type AnalystTurn, type AttemptResult, type EvidenceItem, type EvidenceRequest, type HarnessState, type IssueSnapshot, type Job, type PullRequestCheck, type PullRequestObservation, type PullRequestRef, type SelectedTask } from "../src/model.js";
-import type { AnalystPort, Clock, EvidencePort, GitHubPort, GitPort, HerdrPort, IdGenerator, StateStore } from "../src/ports.js";
+import type { AnalystPort, Clock, EvidencePort, GitHubPort, GitPort, HerdrPort, IdGenerator, RuntimePreflightPort, StateStore } from "../src/ports.js";
 export declare const validCodeReviewSkillPath: string;
+export declare const validFocusedSelfCheckSkillPath: string;
 export declare const validPiSubagentsExtensionPath: string;
 export declare const validReviewerToolsExtensionPath: string;
 export declare const validImplementSkillPath: string;
@@ -16,6 +17,29 @@ export declare class FakeClock implements Clock {
 export declare class SequenceIds implements IdGenerator {
     private count;
     next(prefix: string): string;
+}
+export declare class FakeRuntimePreflight implements RuntimePreflightPort {
+    providerCalls: Array<{
+        lane: "worker" | "reviewer";
+        cwd: string;
+        roleArgv: string[];
+        piBin: string;
+    }>;
+    dockerCalls: string[];
+    providerFailure: Error | null;
+    dockerFailure: Error | null;
+    dockerHost: string;
+    probeProvider(input: {
+        lane: "worker" | "reviewer";
+        cwd: string;
+        roleArgv: string[];
+        piBin: string;
+    }): Promise<void>;
+    probeDocker(input: {
+        cwd: string;
+    }): Promise<{
+        host: string;
+    }>;
 }
 export declare class MemoryStore implements StateStore {
     state: HarnessState;
@@ -65,6 +89,7 @@ export declare class FakeGit implements GitPort {
     } | null;
     reviewerFailure: string | null;
     reviewerValidationArgv: string[][];
+    reviewerDockerHosts: Array<string | null>;
     workerVerifications: Array<{
         reportedHeadSha: string;
         expectedRemoteHeadSha: string | null;
@@ -84,6 +109,7 @@ export declare class FakeGit implements GitPort {
     prepareReviewer(input: {
         rootPath: string;
         validationArgv: string[];
+        dockerHost: string | null;
     }): Promise<{
         reviewPath: string;
         descriptorPath: string;

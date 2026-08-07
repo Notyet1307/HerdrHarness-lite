@@ -9,6 +9,10 @@
   "worktreeRoot": "/absolute/path/to/worktrees",
   "maxReviewRounds": 3,
   "maxAnalystTurns": 3,
+  "preflight": {
+    "piBin": "pi",
+    "dockerRequired": false
+  },
   "reviewerValidationArgv": [
     "npm",
     "run",
@@ -22,9 +26,9 @@
     "--skill",
     "/absolute/path/to/.agents/skills/tdd",
     "--skill",
-    "/absolute/path/to/HerdrHarness-lite/pi/skills/code-review",
+    "/absolute/path/to/HerdrHarness-lite/pi/skills/focused-self-check",
     "--tools",
-    "read,bash,edit,write,grep,find,ls,subagent",
+    "read,bash,edit,write,grep,find,ls",
     "--thinking",
     "high"
   ],
@@ -39,7 +43,7 @@
     "--skill",
     "/absolute/path/to/HerdrHarness-lite/pi/skills/code-review",
     "--tools",
-    "read,grep,find,ls,subagent,review_validate,review_submit",
+    "read,grep,find,ls,subagent,review_preflight,review_validate,review_submit",
     "--thinking",
     "max"
   ],

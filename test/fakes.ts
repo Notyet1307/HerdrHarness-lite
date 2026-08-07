@@ -1,8 +1,9 @@
 import { join, resolve } from "node:path";
 import { digest, type AnalystSession, type AnalystTurn, type AttemptResult, type EvidenceItem, type EvidenceRequest, type HarnessState, type IssueSnapshot, type Job, type PullRequestCheck, type PullRequestObservation, type PullRequestRef, type SelectedTask } from "../src/model.js";
-import type { AnalystPort, Clock, EvidencePort, GitHubPort, GitPort, HerdrPort, IdGenerator, StateStore } from "../src/ports.js";
+import type { AnalystPort, Clock, EvidencePort, GitHubPort, GitPort, HerdrPort, IdGenerator, RuntimePreflightPort, StateStore } from "../src/ports.js";
 
 export const validCodeReviewSkillPath = resolve("pi/skills/code-review");
+export const validFocusedSelfCheckSkillPath = resolve("pi/skills/focused-self-check");
 export const validPiSubagentsExtensionPath = resolve("test/fixtures/pi-subagents/index.js");
 export const validReviewerToolsExtensionPath = resolve("pi/extensions/reviewer-tools.js");
 export const validImplementSkillPath = resolve("test/fixtures/pi-skills/skills/implement");
@@ -15,8 +16,8 @@ export const validWorkerArgv = [
   "--no-skills",
   "--skill", validImplementSkillPath,
   "--skill", validTddSkillPath,
-  "--skill", validCodeReviewSkillPath,
-  "--tools", "read,bash,edit,write,grep,find,ls,subagent",
+  "--skill", validFocusedSelfCheckSkillPath,
+  "--tools", "read,bash,edit,write,grep,find,ls",
   "--thinking", "high",
 ];
 
@@ -27,7 +28,7 @@ export const validReviewerArgv = [
   "--extension", validPiSubagentsExtensionPath,
   "--extension", validReviewerToolsExtensionPath,
   "--skill", validCodeReviewSkillPath,
-  "--tools", "read,grep,find,ls,subagent,review_validate,review_submit",
+  "--tools", "read,grep,find,ls,subagent,review_preflight,review_validate,review_submit",
   "--thinking", "max",
 ];
 
@@ -44,6 +45,25 @@ export class SequenceIds implements IdGenerator {
   next(prefix: string): string {
     this.count += 1;
     return `${prefix}-${String(this.count).padStart(3, "0")}`;
+  }
+}
+
+export class FakeRuntimePreflight implements RuntimePreflightPort {
+  providerCalls: Array<{ lane: "worker" | "reviewer"; cwd: string; roleArgv: string[]; piBin: string }> = [];
+  dockerCalls: string[] = [];
+  providerFailure: Error | null = null;
+  dockerFailure: Error | null = null;
+  dockerHost = "unix:///tmp/docker.sock";
+
+  async probeProvider(input: { lane: "worker" | "reviewer"; cwd: string; roleArgv: string[]; piBin: string }): Promise<void> {
+    this.providerCalls.push({ ...input, roleArgv: [...input.roleArgv] });
+    if (this.providerFailure) throw this.providerFailure;
+  }
+
+  async probeDocker(input: { cwd: string }): Promise<{ host: string }> {
+    this.dockerCalls.push(input.cwd);
+    if (this.dockerFailure) throw this.dockerFailure;
+    return { host: this.dockerHost };
   }
 }
 
@@ -127,6 +147,7 @@ export class FakeGit implements GitPort {
   workerFailure: { class: "integrity_violation" | "stale_task"; reason: string } | null = null;
   reviewerFailure: string | null = null;
   reviewerValidationArgv: string[][] = [];
+  reviewerDockerHosts: Array<string | null> = [];
   workerVerifications: Array<{
     reportedHeadSha: string;
     expectedRemoteHeadSha: string | null;
@@ -144,8 +165,9 @@ export class FakeGit implements GitPort {
     return this.workerFailure ? { ok: false, ...this.workerFailure } : { ok: true, headSha: input.reportedHeadSha };
   }
 
-  async prepareReviewer(input: { rootPath: string; validationArgv: string[] }): Promise<{ reviewPath: string; descriptorPath: string; evidencePath: string }> {
+  async prepareReviewer(input: { rootPath: string; validationArgv: string[]; dockerHost: string | null }): Promise<{ reviewPath: string; descriptorPath: string; evidencePath: string }> {
     this.reviewerValidationArgv.push([...input.validationArgv]);
+    this.reviewerDockerHosts.push(input.dockerHost);
     return {
       reviewPath: join(input.rootPath, "source"),
       descriptorPath: join(input.rootPath, "descriptor.json"),

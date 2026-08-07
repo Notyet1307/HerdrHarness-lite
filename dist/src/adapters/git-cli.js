@@ -70,6 +70,7 @@ export class GitCli {
             attemptId: input.attemptId,
             reviewedHeadSha: input.expectedHeadSha,
             validationArgv: input.validationArgv,
+            dockerHost: input.dockerHost,
             validationPath,
             scratchPath,
             resultPath: resolve(input.resultPath),

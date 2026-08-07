@@ -30,12 +30,14 @@ import type {
   HarnessConfig,
   HerdrPort,
   IdGenerator,
+  RuntimePreflightPort,
   StateStore,
 } from "./ports.js";
 import { reviewerPrompt, workerPrompt } from "./prompts.js";
 import { pathIsWithin, pathsOverlap } from "./path-safety.js";
 
 const BUNDLED_CODE_REVIEW_SKILL = resolve(import.meta.dirname, "../../pi/skills/code-review");
+const BUNDLED_FOCUSED_SELF_CHECK_SKILL = resolve(import.meta.dirname, "../../pi/skills/focused-self-check");
 const BUNDLED_REVIEWER_TOOLS_EXTENSION = resolve(import.meta.dirname, "../../pi/extensions/reviewer-tools.js");
 const REVIEW_DESCRIPTOR_ENV = "HERDR_HARNESS_REVIEW_DESCRIPTOR";
 const REVIEW_SUBAGENT_CEILING_ENV = "PI_SUBAGENT_CAPABILITY_CEILING_V1";
@@ -49,6 +51,7 @@ const REVIEW_SUBAGENT_CEILING = Buffer.from(JSON.stringify({
 
 export type TickAction =
   | "idle"
+  | "preflight_failed"
   | "selected"
   | "claimed"
   | "worktree_created"
@@ -84,6 +87,7 @@ type Dependencies = {
   evidence: EvidencePort;
   clock: Clock;
   ids: IdGenerator;
+  preflight: RuntimePreflightPort;
 };
 
 /**
@@ -135,6 +139,9 @@ export class HarnessController {
       claimedIssueNumbers: claimed,
     }).selected;
     if (!selected) return result(true, "idle", null, "no executable ready-for-agent issue");
+
+    const preflight = await this.runRuntimePreflight(["worker", "reviewer"], null);
+    if (!preflight.ok) return preflight.result;
 
     const baseSha = await this.deps.git.refreshBase(this.deps.config.localPath, this.deps.config.baseRef);
     const now = this.deps.clock.now();
@@ -365,10 +372,13 @@ export class HarnessController {
         );
         if (integrityBlock) return integrityBlock;
       }
+      const preflight = await this.runRuntimePreflight([lane], job.id);
+      if (!preflight.ok) return preflight.result;
       let handle;
       try {
         let cwd = job.worktree.path;
         let env: Record<string, string> = lane === "worker" ? { PYTHONDONTWRITEBYTECODE: "1" } : {};
+        if (lane === "worker" && preflight.dockerHost) env.DOCKER_HOST = preflight.dockerHost;
         if (lane === "reviewer") {
           if (!attempt.expectedHeadSha) throw new Error("Reviewer attempt has no expected HEAD");
           if (!validReviewerValidationArgv(attempt.reviewerValidationArgv)) {
@@ -388,6 +398,7 @@ export class HarnessController {
             baseSha: attempt.baseSha,
             expectedHeadSha: attempt.expectedHeadSha,
             validationArgv: attempt.reviewerValidationArgv,
+            dockerHost: preflight.dockerHost,
           });
           cwd = workspace.reviewPath;
           env = {
@@ -520,6 +531,35 @@ export class HarnessController {
     }
     if (lane === "worker") return this.finishWorker(state, job, attempt, validated.result as WorkerResult, observation.diagnostic);
     return this.finishReviewer(state, job, attempt, validated.result as ReviewerResult, observation.diagnostic);
+  }
+
+  private async runRuntimePreflight(
+    lanes: Attempt["lane"][],
+    jobId: string | null,
+  ): Promise<
+    | { ok: true; dockerHost: string | null }
+    | { ok: false; result: TickResult }
+  > {
+    let dockerHost: string | null = null;
+    try {
+      if (this.deps.config.preflight?.dockerRequired === true) {
+        dockerHost = (await this.deps.preflight.probeDocker({ cwd: this.deps.config.localPath })).host;
+      }
+      for (const lane of lanes) {
+        await this.deps.preflight.probeProvider({
+          lane,
+          cwd: this.deps.config.localPath,
+          roleArgv: lane === "worker" ? this.deps.config.workerArgv : this.deps.config.reviewerArgv,
+          piBin: this.deps.config.preflight?.piBin ?? "pi",
+        });
+      }
+      return { ok: true, dockerHost };
+    } catch (error) {
+      return {
+        ok: false,
+        result: result(false, "preflight_failed", jobId, message(error)),
+      };
+    }
   }
 
   private async verifyReviewerIntegrity(
@@ -1206,18 +1246,29 @@ function validateConfig(config: HarnessConfig): void {
   if (!validReviewerValidationArgv(config.reviewerValidationArgv)) {
     throw new Error("reviewerValidationArgv must contain 1 to 32 non-empty arguments");
   }
+  if (config.preflight !== undefined) {
+    if (!config.preflight || typeof config.preflight !== "object") {
+      throw new Error("preflight must be an object");
+    }
+    if (config.preflight.piBin !== undefined && !config.preflight.piBin.trim()) {
+      throw new Error("preflight.piBin must not be empty");
+    }
+    if (config.preflight.dockerRequired !== undefined && typeof config.preflight.dockerRequired !== "boolean") {
+      throw new Error("preflight.dockerRequired must be boolean");
+    }
+  }
   validatePiRoleArgv(
     "workerArgv",
     config.workerArgv,
-    ["implement", "tdd", "code-review"],
-    ["read", "bash", "edit", "write", "grep", "find", "ls", "subagent"],
+    ["implement", "tdd", "focused-self-check"],
+    ["read", "bash", "edit", "write", "grep", "find", "ls"],
     ["high", "xhigh", "max"],
   );
   validatePiRoleArgv(
     "reviewerArgv",
     config.reviewerArgv,
     ["code-review"],
-    ["read", "grep", "find", "ls", "subagent", "review_validate", "review_submit"],
+    ["read", "grep", "find", "ls", "subagent", "review_preflight", "review_validate", "review_submit"],
     ["max"],
   );
 }
@@ -1251,8 +1302,18 @@ function validatePiRoleArgv(
   const loadedSkills = new Set(loadedSkillIdentities.map((skill) => skill.name));
   if (skills.some((skill) => !loadedSkills.has(skill))) fail(`required skills: ${skills.join(",")}`);
   const reviewSkills = loadedSkillIdentities.filter((skill) => skill.name === "code-review");
-  if (reviewSkills.length !== 1 || reviewSkills[0]!.directory !== BUNDLED_CODE_REVIEW_SKILL) {
-    fail("code-review must resolve to the bundled Harness skill");
+  if (skills.includes("code-review")) {
+    if (reviewSkills.length !== 1 || reviewSkills[0]!.directory !== BUNDLED_CODE_REVIEW_SKILL) {
+      fail("code-review must resolve to the bundled Harness skill");
+    }
+  } else if (reviewSkills.length > 0) {
+    fail("Worker must leave complete code-review to the independent Reviewer");
+  }
+  const selfCheckSkills = loadedSkillIdentities.filter((skill) => skill.name === "focused-self-check");
+  if (skills.includes("focused-self-check") && (
+    selfCheckSkills.length !== 1 || selfCheckSkills[0]!.directory !== BUNDLED_FOCUSED_SELF_CHECK_SKILL
+  )) {
+    fail("focused-self-check must resolve to the bundled Harness skill");
   }
   for (const skillName of ["implement", "tdd"]) {
     if (!skills.includes(skillName)) continue;

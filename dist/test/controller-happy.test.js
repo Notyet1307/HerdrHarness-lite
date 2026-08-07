@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { Buffer } from "node:buffer";
 import { HarnessController } from "../src/controller.js";
-import { FakeAnalyst, FakeClock, FakeEvidence, FakeGit, FakeGitHub, FakeHerdr, MemoryStore, SequenceIds, issue, substituteCodeReviewSkillPath, untrustedImplementSkillPath, validCodeReviewSkillPath, validImplementSkillPath, validReviewerArgv, validWorkerArgv, } from "./fakes.js";
+import { FakeAnalyst, FakeClock, FakeEvidence, FakeGit, FakeGitHub, FakeHerdr, FakeRuntimePreflight, MemoryStore, SequenceIds, issue, substituteCodeReviewSkillPath, untrustedImplementSkillPath, validCodeReviewSkillPath, validImplementSkillPath, validReviewerArgv, validWorkerArgv, } from "./fakes.js";
 const config = {
     repo: "owner/repo",
     localPath: "/repo",
@@ -30,6 +30,7 @@ test("config rejects non-string native Pi arguments", () => {
             evidence: new FakeEvidence(),
             clock: new FakeClock(),
             ids: new SequenceIds(),
+            preflight: new FakeRuntimePreflight(),
         }), new RegExp(`${field} must be an array of strings`));
     }
 });
@@ -44,6 +45,7 @@ test("config allows Worker high, xhigh, or max and requires Reviewer max thinkin
         evidence: new FakeEvidence(),
         clock: new FakeClock(),
         ids: new SequenceIds(),
+        preflight: new FakeRuntimePreflight(),
     });
     new HarnessController({
         config: { ...config, workerArgv: validWorkerArgv.map((value) => value === "high" ? "max" : value) },
@@ -55,6 +57,7 @@ test("config allows Worker high, xhigh, or max and requires Reviewer max thinkin
         evidence: new FakeEvidence(),
         clock: new FakeClock(),
         ids: new SequenceIds(),
+        preflight: new FakeRuntimePreflight(),
     });
     new HarnessController({
         config: { ...config, workerArgv: validWorkerArgv.map((value) => value === "high" ? "xhigh" : value) },
@@ -66,6 +69,7 @@ test("config allows Worker high, xhigh, or max and requires Reviewer max thinkin
         evidence: new FakeEvidence(),
         clock: new FakeClock(),
         ids: new SequenceIds(),
+        preflight: new FakeRuntimePreflight(),
     });
     assert.throws(() => new HarnessController({
         config: { ...config, reviewerArgv: validReviewerArgv.map((value) => value === "max" ? "high" : value) },
@@ -77,6 +81,7 @@ test("config allows Worker high, xhigh, or max and requires Reviewer max thinkin
         evidence: new FakeEvidence(),
         clock: new FakeClock(),
         ids: new SequenceIds(),
+        preflight: new FakeRuntimePreflight(),
     }), /reviewerArgv must enforce the Pi role contract: --thinking max is required/);
 });
 test("config rejects incomplete Pi role contracts", () => {
@@ -93,6 +98,7 @@ test("config rejects incomplete Pi role contracts", () => {
             reviewerArgv: validReviewerArgv.map((value) => value === validCodeReviewSkillPath ? "/tmp/code-review" : value),
         },
         { ...config, reviewerArgv: [...validReviewerArgv, "--skill", "/tmp/code-review"] },
+        { ...config, workerArgv: [...validWorkerArgv, "--skill", validCodeReviewSkillPath] },
         { ...config, reviewerArgv: [...validReviewerArgv, "--skill", substituteCodeReviewSkillPath] },
         {
             ...config,
@@ -100,7 +106,7 @@ test("config rejects incomplete Pi role contracts", () => {
         },
         {
             ...config,
-            reviewerArgv: validReviewerArgv.map((value) => (value === "read,grep,find,ls,subagent,review_validate,review_submit" ? `${value},write` : value)),
+            reviewerArgv: validReviewerArgv.map((value) => (value === "read,grep,find,ls,subagent,review_preflight,review_validate,review_submit" ? `${value},write` : value)),
         },
     ]) {
         assert.throws(() => new HarnessController({
@@ -113,8 +119,60 @@ test("config rejects incomplete Pi role contracts", () => {
             evidence: new FakeEvidence(),
             clock: new FakeClock(),
             ids: new SequenceIds(),
+            preflight: new FakeRuntimePreflight(),
         }), /(?:workerArgv|reviewerArgv) must enforce the Pi role contract/);
     }
+});
+test("runtime preflight fails before claim and does not reserve an issue", async () => {
+    const store = new MemoryStore();
+    const github = new FakeGitHub([issue({ number: 30, title: "Preflight before claim" })]);
+    const preflight = new FakeRuntimePreflight();
+    preflight.providerFailure = new Error("provider sessions are full");
+    const controller = new HarnessController({
+        config,
+        store,
+        github,
+        git: new FakeGit(),
+        herdr: new FakeHerdr([]),
+        analyst: new FakeAnalyst(),
+        evidence: new FakeEvidence(),
+        clock: new FakeClock(),
+        ids: new SequenceIds(),
+        preflight,
+    });
+    const output = await controller.tick();
+    assert.equal(output.action, "preflight_failed");
+    assert.equal(output.ok, false);
+    assert.match(output.message, /provider sessions are full/);
+    assert.equal(store.state.activeJob, null);
+    assert.equal(github.claims.length, 0);
+});
+test("Docker and lane Provider preflights bind the local socket before Worker and Reviewer panes", async () => {
+    const store = new MemoryStore();
+    const git = new FakeGit();
+    const herdr = new FakeHerdr([
+        { lane: "worker", status: "completed", headSha: "b".repeat(40) },
+    ]);
+    const preflight = new FakeRuntimePreflight();
+    const controller = new HarnessController({
+        config: { ...config, preflight: { piBin: "/opt/pi", dockerRequired: true } },
+        store,
+        github: new FakeGitHub([issue({ number: 31, title: "Bind Docker preflight" })]),
+        git,
+        herdr,
+        analyst: new FakeAnalyst(),
+        evidence: new FakeEvidence(),
+        clock: new FakeClock(),
+        ids: new SequenceIds(),
+        preflight,
+    });
+    for (let index = 0; index < 10; index += 1)
+        await controller.tick();
+    assert.deepEqual(preflight.providerCalls.map((call) => call.lane), ["worker", "reviewer", "worker", "reviewer"]);
+    assert.equal(preflight.providerCalls.every((call) => call.piBin === "/opt/pi"), true);
+    assert.equal(preflight.dockerCalls.length, 3);
+    assert.equal(herdr.prepared.find((entry) => entry.lane === "worker")?.env.DOCKER_HOST, preflight.dockerHost);
+    assert.deepEqual(git.reviewerDockerHosts, [preflight.dockerHost]);
 });
 test("config rejects state paths that overlap source or worktree roots", () => {
     for (const invalidConfig of [
@@ -132,6 +190,7 @@ test("config rejects state paths that overlap source or worktree roots", () => {
             evidence: new FakeEvidence(),
             clock: new FakeClock(),
             ids: new SequenceIds(),
+            preflight: new FakeRuntimePreflight(),
         }), /must not overlap/);
     }
 });
@@ -148,6 +207,7 @@ test("Reviewer attempt binds validation argv before later config changes", async
         evidence: new FakeEvidence(),
         clock: new FakeClock(),
         ids: new SequenceIds(),
+        preflight: new FakeRuntimePreflight(),
     });
     for (let index = 0; index < 9; index += 1)
         await controller.tick();
@@ -171,6 +231,7 @@ test("Reviewer preflight attributes pre-existing worktree residue before any Rev
         evidence: new FakeEvidence(),
         clock: new FakeClock(),
         ids: new SequenceIds(),
+        preflight: new FakeRuntimePreflight(),
     });
     for (let index = 0; index < 9; index += 1)
         await controller.tick();
@@ -198,6 +259,7 @@ test("blocked Reviewer cannot bypass worktree verification", async () => {
         evidence: new FakeEvidence(),
         clock: new FakeClock(),
         ids: new SequenceIds(),
+        preflight: new FakeRuntimePreflight(),
     });
     for (let index = 0; index < 12; index += 1)
         await controller.tick();
@@ -222,6 +284,7 @@ test("Reviewer wait failure cannot bypass worktree verification", async () => {
         evidence: new FakeEvidence(),
         clock: new FakeClock(),
         ids: new SequenceIds(),
+        preflight: new FakeRuntimePreflight(),
     });
     for (let index = 0; index < 12; index += 1)
         await controller.tick();
@@ -249,6 +312,7 @@ test("happy path claims, starts Analyst, runs fresh Pi worker/reviewer, publishe
         evidence: new FakeEvidence(),
         clock: new FakeClock(),
         ids: new SequenceIds(),
+        preflight: new FakeRuntimePreflight(),
     });
     const actions = [];
     for (let index = 0; index < 14; index += 1)
@@ -300,6 +364,9 @@ test("happy path claims, starts Analyst, runs fresh Pi worker/reviewer, publishe
     });
     assert.ok(herdr.prepared[0]?.attemptId !== herdr.prepared[1]?.attemptId);
     assert.deepEqual(herdr.prompts.map((prompt) => prompt.skill), ["implement", "code-review"]);
+    assert.match(herdr.prompts[0]?.text ?? "", /focused-self-check exactly once/);
+    assert.match(herdr.prompts[0]?.text ?? "", /Do not run code-review or launch review subagents/);
+    assert.match(herdr.prompts[1]?.text ?? "", /Call review_preflight before/);
     assert.deepEqual(herdr.closed, [
         herdr.prepared[0].handle.agentName,
         herdr.prepared[1].handle.agentName,
@@ -324,6 +391,7 @@ test("an ambiguous prompt failure never replays the same dispatch", async () => 
         evidence: new FakeEvidence(),
         clock: new FakeClock(),
         ids: new SequenceIds(),
+        preflight: new FakeRuntimePreflight(),
     });
     for (let index = 0; index < 4; index += 1)
         await controller.tick();
@@ -358,6 +426,7 @@ test("a durable valid result completes even when the closed agent is no longer k
         evidence: new FakeEvidence(),
         clock: new FakeClock(),
         ids: new SequenceIds(),
+        preflight: new FakeRuntimePreflight(),
     });
     for (let index = 0; index < 8; index += 1)
         await controller.tick();
@@ -382,6 +451,7 @@ test("a terminal job is retained when its exact Analyst session cannot be closed
         evidence: new FakeEvidence(),
         clock: new FakeClock(),
         ids: new SequenceIds(),
+        preflight: new FakeRuntimePreflight(),
     });
     for (let index = 0; index < 14; index += 1)
         await controller.tick();

@@ -3,9 +3,13 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 const packageJson = JSON.parse(readFileSync("package.json", "utf8"));
 const exampleConfig = JSON.parse(readFileSync("harness.config.example.json", "utf8"));
-test("Pi package exposes the Harness review skill and child agent", () => {
+test("Pi package exposes the focused Worker check, independent review skill, and child agent", () => {
     assert.deepEqual(packageJson.pi?.skills, ["./pi/skills"]);
     assert.deepEqual(packageJson.pi?.subagents?.agents, ["./pi/agents"]);
+    const focused = readFileSync("pi/skills/focused-self-check/SKILL.md", "utf8");
+    assert.match(focused, /^---\nname: focused-self-check\n/m);
+    assert.match(focused, /must not launch subagents/);
+    assert.match(focused, /independent Reviewer owns the complete Standards and Spec review/);
 });
 test("Pi review adapter uses fresh foreground user-scope reviewers", () => {
     const skill = readFileSync("pi/skills/code-review/SKILL.md", "utf8");
@@ -34,13 +38,13 @@ test("example config pins the Worker and Reviewer Pi role contracts", () => {
     assert.deepEqual(flagValues(exampleConfig.workerArgv, "--skill").map(lastPathPart), [
         "implement",
         "tdd",
-        "code-review",
+        "focused-self-check",
     ]);
     assert.deepEqual(flagValues(exampleConfig.reviewerArgv, "--skill").map(lastPathPart), ["code-review"]);
     assert.equal(exampleConfig.reviewerArgv.includes("--no-extensions"), true);
     assert.deepEqual(flagValues(exampleConfig.reviewerArgv, "--extension").map(lastPathPart), ["index.ts", "reviewer-tools.js"]);
-    assert.deepEqual(flagValues(exampleConfig.workerArgv, "--tools"), ["read,bash,edit,write,grep,find,ls,subagent"]);
-    assert.deepEqual(flagValues(exampleConfig.reviewerArgv, "--tools"), ["read,grep,find,ls,subagent,review_validate,review_submit"]);
+    assert.deepEqual(flagValues(exampleConfig.workerArgv, "--tools"), ["read,bash,edit,write,grep,find,ls"]);
+    assert.deepEqual(flagValues(exampleConfig.reviewerArgv, "--tools"), ["read,grep,find,ls,subagent,review_preflight,review_validate,review_submit"]);
     assert.deepEqual(flagValues(exampleConfig.workerArgv, "--thinking"), ["high"]);
     assert.deepEqual(flagValues(exampleConfig.reviewerArgv, "--thinking"), ["max"]);
 });
