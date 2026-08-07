@@ -174,6 +174,8 @@ export default function reviewerTools(pi) {
 
 function reviewAxisTasks(input) {
   if (!input || typeof input !== "object" || Array.isArray(input)) return null;
+  // pi-subagents defaults this optional field to "both"; pin the safe scope before it executes.
+  if (!Object.hasOwn(input, "agentScope")) input.agentScope = "user";
   const keys = Object.keys(input).sort();
   if (keys.join(",") !== "agentScope,artifacts,async,context,tasks") return null;
   if (input.artifacts !== false || input.agentScope !== "user" || input.context !== "fresh" || input.async !== false) return null;

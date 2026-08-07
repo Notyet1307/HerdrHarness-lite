@@ -102,6 +102,11 @@ test("Reviewer tools isolate validation and write one identity-bound result", as
     assert.equal(preflightResult.ok, true);
     assert.equal((await toolCallHook({ toolCallId: "wrong", toolName: "subagent", input: { action: "create" } }))?.block, true);
     assert.equal((await toolCallHook({
+      toolCallId: "unsafe-scope",
+      toolName: "subagent",
+      input: { ...reviewCall, agentScope: "both" },
+    }))?.block, true);
+    assert.equal((await toolCallHook({
       toolCallId: "wrong-agent",
       toolName: "subagent",
       input: {
@@ -115,17 +120,24 @@ test("Reviewer tools isolate validation and write one identity-bound result", as
         ],
       },
     }))?.block, true);
+    const defaultedScopeReviewCall: Record<string, unknown> = {
+      artifacts: false,
+      context: "fresh",
+      async: false,
+      tasks: reviewTasks,
+    };
     assert.equal((await toolCallHook({
       toolCallId: "axes",
       toolName: "subagent",
-      input: reviewCall,
+      input: defaultedScopeReviewCall,
     })), undefined);
+    assert.equal(defaultedScopeReviewCall.agentScope, "user");
     assert.equal((await toolCallHook({ toolCallId: "axes-again", toolName: "subagent", input: reviewCall }))?.block, true);
 
     await toolResultHook({
       toolCallId: "axes",
       toolName: "subagent",
-      input: reviewCall,
+      input: defaultedScopeReviewCall,
       content: [],
       isError: false,
       details: {
