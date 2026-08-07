@@ -183,6 +183,7 @@ node dist/src/cli.js resolve-decision \
 - Worker/Reviewer `infrastructure_exhausted` 且没有 durable result；或
 - Reviewer `review_uncertain` 已产生与当前 HEAD 绑定的 durable `blocked` 结果，且其外部验证环境已经修复并通过有界探测；或
 - Reviewer 尚未获得 pane/agent 时，启动前检查发现并已人工保全或清理的 `reviewer_preflight_dirty`；或
+- 首次 `ci_failure` 仍与当前 PR HEAD 精确绑定，且此前缺失或截断的外部诊断已经取回；或
 - Controller 自己记录的 Analyst 执行失败。
 
 顺序：
@@ -428,7 +429,7 @@ GitHub 必须允许 auto-merge，目标分支 ruleset 必须配置 required chec
 PR 仍为 OPEN 时，Controller 会读取精确 reviewed HEAD 上的 GitHub required checks。若 check 明确为失败或取消，它会：
 
 1. 在修改 ledger 状态前先取消原生 auto-merge；
-2. 记录 `ci_failure` incident，其中包含 check 身份、状态、链接，以及有界的 `gh run view --log-failed` 输出；
+2. 记录 `ci_failure` incident，其中包含 check 身份、状态、链接，以及 `gh run view --log-failed` 的有界尾部，使最终错误不会被冗长启动日志截掉；
 3. 保留 active slot，并让任务绑定的 Analyst 给出建议；
 4. 只有精确人工批准后，才允许一个 fresh Worker 在同一分支回修；
 5. 先验证远端分支仍指向此前已审的 PR HEAD，再要求 fresh Reviewer，通过后更新同一 PR。

@@ -831,7 +831,7 @@ test("integrity incidents cannot be converted into retry authority by the Analys
       },
       { clock, ids },
     ),
-    /only an exact held infrastructure incident, HEAD-bound Reviewer block, pre-start Reviewer residue, or controller-recorded Analyst execution failure/,
+    /HEAD-bound first CI failure/,
   );
   await assert.rejects(
     () => approveRecovery(

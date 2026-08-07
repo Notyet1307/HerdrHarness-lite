@@ -319,7 +319,7 @@ export class GitHubGh implements GitHubPort {
 
   private readFailedLog(repo: string, runId: string): string {
     const result = this.runner.run("gh", ["run", "view", runId, "--repo", repo, "--log-failed"]);
-    if (result.ok) return bounded(result.stdout, 12_000);
+    if (result.ok) return boundedTail(result.stdout, 12_000);
     const diagnostic = (result.error ?? result.stderr.trim()) || result.stdout.trim() || `exit ${result.code}`;
     return bounded(`failed log unavailable: ${diagnostic}`, 2_000);
   }
@@ -413,4 +413,8 @@ function isCheckBucket(value: unknown): value is PullRequestCheck["bucket"] {
 
 function bounded(value: string, max: number): string {
   return value.length <= max ? value : `${value.slice(0, max)}\n...[truncated]`;
+}
+
+function boundedTail(value: string, max: number): string {
+  return value.length <= max ? value : `...[truncated]\n${value.slice(-max)}`;
 }

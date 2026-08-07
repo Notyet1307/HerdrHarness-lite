@@ -147,15 +147,26 @@ export async function reassessIncident(store, request, dependencies) {
         && job.activeAttempt.result === null
         && job.activeAttempt.expectedHeadSha === job.headSha
         && job.incident.summary.startsWith("reviewer modified the worktree outside Harness result files:");
+    const heldCiFailure = job.approval === null
+        && job.incident.class === "ci_failure"
+        && job.incident.lane === "controller"
+        && job.incident.attemptId === null
+        && job.activeAttempt === null
+        && job.pullRequest !== null
+        && job.ciFailure !== null
+        && job.ciFailure !== undefined
+        && job.ciFailure.headSha === job.pullRequest.headSha
+        && job.headSha === job.pullRequest.headSha
+        && (job.ciReworkCount ?? 0) < 1;
     const effectiveRetryAction = legacyReviewerPreflight ? "retry_fresh_reviewer" : retryAction;
     const analystExecutionFailed = job.analysis.evidenceDigest === job.incident.evidenceDigest
         && isControllerAnalystFailure(job.analysis);
     if (effectiveRetryAction === null ||
         (!legacyReviewerPreflight && !job.incident.allowedActions.includes(effectiveRetryAction)) ||
         (!legacyReviewerPreflight && !allowedActionsFor(job.incident.class, job.incident.lane).includes(effectiveRetryAction)) ||
-        !exactAttempt ||
-        (!heldInfrastructure && !heldReviewerBlock && !heldReviewerPreflight && !legacyReviewerPreflight && !analystExecutionFailed)) {
-        throw new Error("only an exact held infrastructure incident, HEAD-bound Reviewer block, pre-start Reviewer residue, or controller-recorded Analyst execution failure can be reassessed");
+        (!exactAttempt && !heldCiFailure) ||
+        (!heldInfrastructure && !heldReviewerBlock && !heldReviewerPreflight && !legacyReviewerPreflight && !analystExecutionFailed && !heldCiFailure)) {
+        throw new Error("only an exact held infrastructure incident, HEAD-bound Reviewer block, pre-start Reviewer residue, controller-recorded Analyst execution failure, or HEAD-bound first CI failure can be reassessed");
     }
     const successor = makeIncident({
         jobId: job.id,

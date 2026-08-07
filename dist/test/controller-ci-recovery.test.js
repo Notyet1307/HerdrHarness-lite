@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { HarnessController } from "../src/controller.js";
-import { approveRecovery } from "../src/recovery.js";
+import { approveRecovery, reassessIncident } from "../src/recovery.js";
 import { FakeAnalyst, FakeClock, FakeEvidence, FakeGit, FakeGitHub, FakeHerdr, FakeRuntimePreflight, MemoryStore, SequenceIds, issue, validReviewerArgv, validWorkerArgv, } from "./fakes.js";
 const oldHead = "b".repeat(40);
 const newHead = "c".repeat(40);
@@ -29,7 +29,7 @@ const config = {
     workerArgv: validWorkerArgv,
     reviewerArgv: validReviewerArgv,
 };
-test("failed required CI blocks, then permits one human-approved fresh Worker cycle on the same PR", async () => {
+test("failed required CI permits one exact held reassessment and one human-approved fresh Worker cycle", async () => {
     const store = new MemoryStore();
     const clock = new FakeClock();
     const ids = new SequenceIds();
@@ -41,14 +41,24 @@ test("failed required CI blocks, then permits one human-approved fresh Worker cy
         { lane: "worker", status: "completed", headSha: newHead },
         { lane: "reviewer", status: "pass", reviewedHeadSha: newHead },
     ]);
-    const analyst = new FakeAnalyst([{
+    const analyst = new FakeAnalyst([
+        {
+            kind: "advice",
+            action: "hold",
+            summary: "The captured CI diagnostic ends before the failing assertion",
+            resolutionBrief: "",
+            evidenceRefs: ["ci-checks"],
+            unknowns: ["actual failure cause"],
+        },
+        {
             kind: "advice",
             action: "retry_fresh_worker",
             summary: "The required backend check found a bounded implementation defect",
             resolutionBrief: "Fix the backend assertion from required CI, commit, and rerun focused validation.",
             evidenceRefs: ["task", "ci-checks"],
             unknowns: [],
-        }]);
+        },
+    ]);
     const controller = new HarnessController({
         config,
         store,
@@ -78,6 +88,18 @@ test("failed required CI blocks, then permits one human-approved fresh Worker cy
     assert.equal(store.state.activeJob?.pullRequest?.headSha, oldHead);
     assert.deepEqual(store.state.activeJob?.ciFailure?.checks, [failedCheck]);
     assert.deepEqual(github.suspended, [42]);
+    assert.equal((await controller.tick()).action, "analysis_recorded");
+    const held = store.state.activeJob;
+    assert.equal(held.analysis?.action, "hold");
+    await reassessIncident(store, {
+        expectedRevision: held.revision,
+        incidentId: held.incident.id,
+        analysisId: held.analysis.id,
+        actor: "human@example.test",
+        reason: "The complete failed log shows the Playwright login used credentials that differ from the backend.",
+    }, { clock, ids });
+    assert.equal(store.state.activeJob?.incident?.class, "ci_failure");
+    assert.equal(store.state.activeJob?.analysis, null);
     assert.equal((await controller.tick()).action, "analysis_recorded");
     const blocked = store.state.activeJob;
     assert.equal(blocked.analysis?.action, "retry_fresh_worker");

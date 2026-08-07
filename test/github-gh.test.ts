@@ -118,6 +118,22 @@ test("observing an open PR returns required check failures with bounded failed l
   });
 });
 
+test("bounded failed logs retain the failure tail instead of build startup noise", async () => {
+  const runner = new FailedChecksRunner(`${"build startup noise\n".repeat(1_000)}playwright timeout\nlogin returned 400\n`);
+  const github = new GitHubGh(runner, true);
+
+  const observation = await github.observePullRequest("owner/repo", {
+    number: 42,
+    url: "https://github.com/owner/repo/pull/42",
+    headSha,
+  });
+
+  const diagnostic = observation.requiredChecks[0]?.diagnostic ?? "";
+  assert.match(diagnostic, /^\.\.\.\[truncated\]\n/);
+  assert.equal(diagnostic.startsWith("build startup noise"), false);
+  assert.match(diagnostic, /playwright timeout\nlogin returned 400\n$/);
+});
+
 class PublishRunner implements CommandRunner {
   calls: Array<{ command: string; args: string[] }> = [];
 
@@ -192,6 +208,8 @@ class PublishDriftRunner implements CommandRunner {
 class FailedChecksRunner implements CommandRunner {
   calls: Array<{ command: string; args: string[] }> = [];
 
+  constructor(private readonly failedLog = "test-backend\tFAIL\nassertion failed\n") {}
+
   run(command: string, args: string[]): CommandResult {
     this.calls.push({ command, args: [...args] });
     if (args[0] === "pr" && args[1] === "view") {
@@ -218,7 +236,7 @@ class FailedChecksRunner implements CommandRunner {
         error: null,
       };
     }
-    if (args[0] === "run" && args[1] === "view") return ok("test-backend\tFAIL\nassertion failed\n");
+    if (args[0] === "run" && args[1] === "view") return ok(this.failedLog);
     if (args[0] === "pr" && args[1] === "merge" && args.includes("--disable-auto")) return ok("");
     return fail(`unexpected command: ${command} ${args.join(" ")}`);
   }

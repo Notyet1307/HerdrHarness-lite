@@ -227,7 +227,7 @@ export class GitHubGh {
     readFailedLog(repo, runId) {
         const result = this.runner.run("gh", ["run", "view", runId, "--repo", repo, "--log-failed"]);
         if (result.ok)
-            return bounded(result.stdout, 12_000);
+            return boundedTail(result.stdout, 12_000);
         const diagnostic = (result.error ?? result.stderr.trim()) || result.stdout.trim() || `exit ${result.code}`;
         return bounded(`failed log unavailable: ${diagnostic}`, 2_000);
     }
@@ -316,5 +316,8 @@ function isCheckBucket(value) {
 }
 function bounded(value, max) {
     return value.length <= max ? value : `${value.slice(0, max)}\n...[truncated]`;
+}
+function boundedTail(value, max) {
+    return value.length <= max ? value : `...[truncated]\n${value.slice(-max)}`;
 }
 //# sourceMappingURL=github-gh.js.map

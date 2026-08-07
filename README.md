@@ -183,6 +183,7 @@ Use `reassess` only when the incident is exactly one of these retryable cases:
 - Worker/Reviewer `infrastructure_exhausted` with no durable result; or
 - Reviewer `review_uncertain` with a durable `blocked` result bound to the current HEAD, after its external validation environment was repaired and probed; or
 - `reviewer_preflight_dirty` discovered before the Reviewer received a pane/agent, after the residue was preserved or cleaned by an operator; or
+- the first `ci_failure` remains bound to the current PR HEAD, after a previously missing or truncated external diagnostic was retrieved; or
 - an Analyst execution failure recorded by the Controller itself.
 
 Sequence:
@@ -429,7 +430,7 @@ GitHub must allow auto-merge, and the target branch ruleset must define required
 While the PR is open, the Controller reads GitHub's required checks for the exact reviewed HEAD. An explicit failed or cancelled check causes it to:
 
 1. disable native auto-merge before changing ledger state;
-2. record a `ci_failure` incident with check identity, state, link, and bounded `gh run view --log-failed` output;
+2. record a `ci_failure` incident with check identity, state, link, and the bounded tail of `gh run view --log-failed` so the final error survives long setup logs;
 3. retain the active slot and ask the task-bound Analyst for advice;
 4. require exact human approval before one fresh Worker may rework the same branch;
 5. verify that the remote branch still points to the previously reviewed PR HEAD, then require a fresh Reviewer before updating the same PR.
