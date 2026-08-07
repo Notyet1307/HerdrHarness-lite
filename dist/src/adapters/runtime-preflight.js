@@ -21,7 +21,7 @@ export class RuntimePreflightCli {
             "--no-tools",
             ...runtimeSelectors(input.roleArgv),
             "-p",
-            `Reply with exactly ${PROVIDER_MARKER}.`,
+            `Reply with exactly ${PROVIDER_MARKER}`,
         ], { cwd: input.cwd, timeoutMs: PROVIDER_TIMEOUT_MS });
         if (!result.ok) {
             throw new Error(`${input.lane} Provider probe failed: ${diagnostic(result)}`);

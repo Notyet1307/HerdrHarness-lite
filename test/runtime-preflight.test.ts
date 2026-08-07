@@ -38,7 +38,7 @@ test("Provider preflight runs a bounded isolated live probe with only runtime se
       "--no-session", "--no-approve", "--no-skills", "--no-extensions",
       "--no-context-files", "--no-prompt-templates", "--no-themes", "--no-tools",
       "--provider", "provider-a", "--model", "model-a", "--thinking", "max",
-      "-p", "Reply with exactly HERDR_HARNESS_PROVIDER_OK.",
+      "-p", "Reply with exactly HERDR_HARNESS_PROVIDER_OK",
     ],
     cwd: "/repo",
     timeoutMs: 120_000,
