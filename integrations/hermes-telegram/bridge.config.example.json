@@ -1,5 +1,12 @@
 {
   "harnessConfig": "/absolute/path/to/harness.config.json",
   "nodeBin": "/absolute/path/to/node",
-  "statusScript": "/absolute/path/to/HerdrHarness-lite/dist/src/hermes-status.js"
+  "statusScript": "/absolute/path/to/HerdrHarness-lite/dist/src/hermes-status.js",
+  "hermesBin": "/absolute/path/to/hermes",
+  "hermesProfile": "harness",
+  "target": "telegram",
+  "observerState": "/absolute/path/to/telegram-observer/state.json",
+  "controllerLog": "/absolute/path/to/controller.log",
+  "pollMs": 5000,
+  "heartbeatTimeoutMs": 60000
 }

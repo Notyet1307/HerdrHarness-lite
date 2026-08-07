@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>ai.herdr-harness.telegram-observer</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__NODE_BIN__</string>
+    <string>__OBSERVER_SCRIPT__</string>
+    <string>run</string>
+    <string>--config</string>
+    <string>__BRIDGE_CONFIG__</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>__WORKING_DIRECTORY__</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>StandardOutPath</key>
+  <string>__OBSERVER_LOG__</string>
+  <key>StandardErrorPath</key>
+  <string>__OBSERVER_ERROR_LOG__</string>
+</dict>
+</plist>

@@ -27,6 +27,10 @@ declare module "node:crypto" {
 
 declare module "node:buffer" {
   export const Buffer: {
+    alloc(size: number): {
+      toString(encoding: "utf8", start?: number, end?: number): string;
+    };
+    byteLength(value: string, encoding?: "utf8"): number;
     from(value: string, encoding: "utf8" | "base64url"): { toString(encoding: "utf8" | "base64url"): string };
   };
 }
@@ -60,12 +64,14 @@ declare module "node:fs" {
   export function mkdirSync(path: string, options?: { recursive?: boolean; mode?: number }): string | undefined;
   export function mkdtempSync(prefix: string): string;
   export function readFileSync(path: string | number, encoding: "utf8"): string;
+  export function readSync(fd: number, buffer: unknown, offset: number, length: number, position: number): number;
   export function readdirSync(path: string): string[];
   export function lstatSync(path: string): {
     mode: number;
     isDirectory(): boolean;
     isSymbolicLink(): boolean;
   };
+  export function statSync(path: string): { size: number; mtimeMs: number };
   export function realpathSync(path: string): string;
   export function writeFileSync(
     path: string,
