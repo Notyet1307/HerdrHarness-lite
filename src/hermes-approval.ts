@@ -31,7 +31,7 @@ type ApprovalConfigFile = {
 type ApprovalConfig = ApprovalConfigFile & { harnessStateDir: string };
 
 type Challenge = {
-  version: 1;
+  version: 2;
   tokenDigest: string;
   jobId: string;
   revision: number;
@@ -43,19 +43,28 @@ type Challenge = {
   createdAt: string;
   expiresAt: string;
   consumedAt: string | null;
+  decision: "approved" | "held" | null;
+  actor: string | null;
 };
+
+class ApprovalCommandError extends Error {
+  constructor(readonly code: string, message: string, readonly terminal: boolean) {
+    super(message);
+  }
+}
 
 async function main(argv: string[]): Promise<number> {
   const command = argv[2];
-  if (command !== "request" && command !== "confirm") {
-    throw new Error("usage: hermes-approval request|confirm --config /absolute/bridge.json");
+  if (command !== "request" && command !== "confirm" && command !== "hold") {
+    throw new Error("usage: hermes-approval request|confirm|hold --config /absolute/bridge.json [--json]");
   }
   const config = loadConfig(requiredFlag(argv, "--config"));
-  if (command === "request") return requestChallenge(config);
-  return confirmChallenge(config);
+  const json = argv.includes("--json");
+  if (command === "request") return requestChallenge(config, json);
+  return decideChallenge(config, command, json);
 }
 
-async function requestChallenge(config: ApprovalConfig): Promise<number> {
+async function requestChallenge(config: ApprovalConfig, json: boolean): Promise<number> {
   const ledger = await new JsonStateStore(config.harnessStateDir).load();
   const job = ledger.activeJob;
   if (!job) throw new Error("当前没有活跃任务");
@@ -72,7 +81,7 @@ async function requestChallenge(config: ApprovalConfig): Promise<number> {
   const token = randomUUID().replaceAll("-", "").slice(0, 16).toUpperCase();
   const createdAt = new Date();
   const challenge: Challenge = {
-    version: 1,
+    version: 2,
     tokenDigest: digestToken(token),
     jobId: job.id,
     revision: job.revision,
@@ -84,10 +93,12 @@ async function requestChallenge(config: ApprovalConfig): Promise<number> {
     createdAt: createdAt.toISOString(),
     expiresAt: new Date(createdAt.getTime() + CHALLENGE_TTL_MS).toISOString(),
     consumedAt: null,
+    decision: null,
+    actor: null,
   };
   saveChallenge(config.approvalState, challenge);
 
-  process.stdout.write([
+  const humanMessage = [
     "⚠️ 待批准 Harness fresh retry",
     `任务：${clean(job.task.repo, 160)}#${job.task.issueNumber}`,
     `阻塞：${job.incident.class} · ${job.incident.lane}`,
@@ -99,11 +110,22 @@ async function requestChallenge(config: ApprovalConfig): Promise<number> {
     "有效期：10 分钟；新的挑战会使旧挑战失效。",
     `确认命令：/harness approve ${token}`,
     "不想批准就不要发送确认命令。",
-  ].join("\n") + "\n");
+  ].join("\n");
+  if (json) {
+    process.stdout.write(`${JSON.stringify({
+      ok: true,
+      action: "challenge_created",
+      analysisId: challenge.analysisId,
+      expiresAt: challenge.expiresAt,
+      card: approvalCard(job, token),
+    })}\n`);
+  } else {
+    process.stdout.write(`${humanMessage}\n`);
+  }
   return 0;
 }
 
-async function confirmChallenge(config: ApprovalConfig): Promise<number> {
+async function decideChallenge(config: ApprovalConfig, decision: "confirm" | "hold", json: boolean): Promise<number> {
   const token = readToken();
   const challenge = loadChallenge(config.approvalState);
   if (
@@ -111,13 +133,27 @@ async function confirmChallenge(config: ApprovalConfig): Promise<number> {
     || Date.parse(challenge.expiresAt) <= Date.now()
     || digestToken(token) !== challenge.tokenDigest
   ) {
-    throw new Error("挑战码无效、已过期或已使用；请重新发送 /harness approve");
+    throw new ApprovalCommandError("challenge_invalid", "挑战码无效、已过期或已使用；请重新发送 /harness approve", true);
   }
 
   const store = new JsonStateStore(config.harnessStateDir);
   const before = await store.load();
   assertChallengeCurrent(before.activeJob, challenge);
   const actor = `telegram:${config.telegramAllowedUser}`;
+  if (decision === "hold") {
+    challenge.consumedAt = new Date().toISOString();
+    challenge.decision = "held";
+    challenge.actor = actor;
+    saveChallenge(config.approvalState, challenge);
+    const output = {
+      ok: true,
+      action: "held",
+      message: `任务 ${clean(challenge.repo, 160)}#${challenge.issueNumber} 保持 blocked；未写入恢复批准。`,
+    };
+    process.stdout.write(json ? `${JSON.stringify(output)}\n` : `⏸️ ${output.message}\n`);
+    return 0;
+  }
+
   const reason = "Approved through a Telegram challenge bound to the exact job revision, incident, analysis, and retry action.";
   const approved = spawnSync(config.nodeBin, [
     config.harnessCliScript,
@@ -130,7 +166,11 @@ async function confirmChallenge(config: ApprovalConfig): Promise<number> {
     "--reason", reason,
   ], { encoding: "utf8", timeout: 15_000, maxBuffer: 1024 * 1024 });
   if (approved.status !== 0) {
-    throw new Error(`Harness 拒绝批准：${clean(approved.error?.message || approved.stderr || approved.stdout || `exit ${approved.status}`, 700)}`);
+    throw new ApprovalCommandError(
+      "harness_rejected",
+      `Harness 拒绝批准：${clean(approved.error?.message || approved.stderr || approved.stdout || `exit ${approved.status}`, 700)}`,
+      false,
+    );
   }
 
   const after = await store.load();
@@ -143,22 +183,27 @@ async function confirmChallenge(config: ApprovalConfig): Promise<number> {
     || approval.action !== challenge.action
     || approval.actor !== actor
   ) {
-    throw new Error("Harness 命令返回成功，但 ledger 中没有精确匹配的 durable approval");
+    throw new ApprovalCommandError("approval_mismatch", "Harness 命令返回成功，但 ledger 中没有精确匹配的 durable approval", true);
   }
 
   challenge.consumedAt = new Date().toISOString();
+  challenge.decision = "approved";
+  challenge.actor = actor;
   let auditWarning = "";
   try {
     saveChallenge(config.approvalState, challenge);
   } catch (error) {
     auditWarning = `\n⚠️ approval 已写入 ledger，但挑战状态落盘失败：${clean(message(error), 300)}`;
   }
-  process.stdout.write([
+  const humanMessage = [
     "✅ Harness 已记录精确恢复批准",
     `任务：${clean(challenge.repo, 160)}#${challenge.issueNumber}`,
     `动作：${actionLabel(challenge.action)}`,
     "Controller 会重新校验并只启动全新的 Worker/Reviewer。",
-  ].join("\n") + auditWarning + "\n");
+  ].join("\n") + auditWarning;
+  process.stdout.write(json
+    ? `${JSON.stringify({ ok: true, action: "approved", message: clean(humanMessage, 1_500) })}\n`
+    : `${humanMessage}\n`);
   return 0;
 }
 
@@ -173,8 +218,48 @@ function assertChallengeCurrent(job: Job | null, challenge: Challenge): void {
     || job.analysis.incidentId !== job.incident.id
     || job.analysis.action !== challenge.action
   ) {
-    throw new Error("任务、revision、incident 或 analysis 已变化；请重新发送 /harness approve");
+    throw new ApprovalCommandError("binding_stale", "任务、revision、incident 或 analysis 已变化；请重新发送 /harness approve", true);
   }
+}
+
+function approvalCard(job: Job, token: string): { text: string; approveLabel: string; approveCallback: string; holdCallback: string } {
+  const incident = job.incident!;
+  const analysis = job.analysis!;
+  if (!isRetryAction(analysis.action)) throw new Error("approval card requires a fresh retry action");
+  const unknowns = analysis.unknowns.length === 0
+    ? "无"
+    : analysis.unknowns.slice(0, 3).map((value) => `• ${html(clean(value, 220), 140)}`).join("\n");
+  const head = job.headSha ? job.headSha.slice(0, 12) : "尚无 HEAD";
+  return {
+    text: [
+      "🚨 <b>Harness 需要人工决定</b>",
+      `<code>${html(clean(job.task.repo, 160), 140)}#${job.task.issueNumber}</code> · <code>HEAD ${html(head, 40)}</code>`,
+      "━━━━━━━━━━━━━━",
+      "📍 <b>发生了什么</b>",
+      html(clean(incident.summary, 600), 450),
+      "",
+      "🧭 <b>Analyst 判断</b>",
+      html(clean(analysis.summary, 600), 450),
+      "",
+      "⚠️ <b>当前影响</b>",
+      "任务保持 blocked；Harness 尚未启动恢复 agent。批准后 Controller 仍会重新校验全部绑定。",
+      "",
+      "🛠️ <b>建议恢复</b>",
+      `<b>${html(actionLabel(analysis.action), 80)}</b>`,
+      html(clean(analysis.resolutionBrief, 700), 550),
+      "",
+      "❓ <b>未决信息</b>",
+      unknowns,
+      "━━━━━━━━━━━━━━",
+      `🔗 <code>${html(clean(incident.id, 80), 60)}</code> · revision <code>${job.revision}</code>`,
+      "⏱️ 按钮 10 分钟有效；新卡片会使旧卡片失效。",
+    ].join("\n"),
+    approveLabel: analysis.action === "retry_fresh_worker"
+      ? "✅ 批准并启动全新 Worker"
+      : "✅ 批准并启动全新 Reviewer",
+    approveCallback: `hh:a:${token}`,
+    holdCallback: `hh:h:${token}`,
+  };
 }
 
 function readToken(): string {
@@ -214,7 +299,7 @@ function loadChallenge(path: string): Challenge {
   assertSecureAbsoluteFile(path, "approval challenge");
   const value = JSON.parse(readFileSync(path, "utf8")) as Challenge;
   if (
-    value.version !== 1
+    value.version !== 2
     || !/^[0-9a-f]{64}$/.test(value.tokenDigest)
     || !value.jobId?.trim()
     || !Number.isInteger(value.revision)
@@ -229,6 +314,9 @@ function loadChallenge(path: string): Challenge {
     || !Number.isFinite(Date.parse(value.createdAt))
     || !Number.isFinite(Date.parse(value.expiresAt))
     || (value.consumedAt !== null && !Number.isFinite(Date.parse(value.consumedAt)))
+    || (value.decision !== null && value.decision !== "approved" && value.decision !== "held")
+    || (value.actor !== null && !value.actor.trim())
+    || ((value.decision === null) !== (value.consumedAt === null))
   ) {
     throw new Error("approval challenge state is invalid");
   }
@@ -273,6 +361,16 @@ function clean(value: string, max: number): string {
   return value.replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim().slice(0, max);
 }
 
+function html(value: string, max: number): string {
+  let output = "";
+  for (const char of value) {
+    const escaped = char === "&" ? "&amp;" : char === "<" ? "&lt;" : char === ">" ? "&gt;" : char;
+    if (output.length + escaped.length > max) break;
+    output += escaped;
+  }
+  return output;
+}
+
 function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -282,6 +380,16 @@ main(process.argv)
     process.exitCode = code;
   })
   .catch((error) => {
-    process.stderr.write(`FAIL: ${message(error)}\n`);
+    if (process.argv.includes("--json")) {
+      const typed = error instanceof ApprovalCommandError ? error : null;
+      process.stdout.write(`${JSON.stringify({
+        ok: false,
+        code: typed?.code ?? "command_failed",
+        terminal: typed?.terminal ?? false,
+        message: clean(message(error), 700),
+      })}\n`);
+    } else {
+      process.stderr.write(`FAIL: ${message(error)}\n`);
+    }
     process.exitCode = 1;
   });

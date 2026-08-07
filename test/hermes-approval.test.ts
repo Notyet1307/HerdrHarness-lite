@@ -64,8 +64,68 @@ test("Telegram approval challenge is one-use and bound to exact durable recovery
   }
 });
 
-function run(command: "request" | "confirm", config: string, token?: string) {
-  return spawnSync(process.execPath, [resolve("dist/src/hermes-approval.js"), command, "--config", config], {
+test("Telegram approval card exposes bounded decisions and hold consumes only the challenge", () => {
+  const root = mkdtempSync(join(tmpdir(), "herdr-hermes-card-"));
+  try {
+    const stateDir = join(root, "harness-state");
+    const harnessConfig = join(root, "harness.json");
+    const bridgeConfig = join(root, "bridge.json");
+    const approvalState = join(root, "approval", "state.json");
+    const ledgerPath = join(stateDir, "state.json");
+    mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+    writeFileSync(harnessConfig, JSON.stringify({ stateDir, herdr: { session: "test" }, analyst: { command: "/usr/bin/false" } }), { encoding: "utf8", mode: 0o600 });
+    writeFileSync(bridgeConfig, JSON.stringify({
+      harnessConfig,
+      nodeBin: process.execPath,
+      harnessCliScript: resolve("dist/src/cli.js"),
+      approvalState,
+      telegramAllowedUser: "123456789",
+    }), { encoding: "utf8", mode: 0o600 });
+    const state = blockedState();
+    state.activeJob.incident.summary = "provider <script> & down ".repeat(100);
+    state.activeJob.analysis.summary = "retry <only> & verify ".repeat(100);
+    state.activeJob.analysis.resolutionBrief = "start <fresh> & keep HEAD ".repeat(100);
+    state.activeJob.analysis.unknowns = ["unknown <one> & detail ".repeat(100)];
+    writeFileSync(ledgerPath, `${JSON.stringify(state)}\n`, { encoding: "utf8", mode: 0o600 });
+
+    const requested = run("request", bridgeConfig, undefined, true);
+    assert.equal(requested.status, 0);
+    const payload = JSON.parse(requested.stdout);
+    assert.equal(payload.ok, true);
+    assert.equal(payload.analysisId, "analysis-001");
+    assert.match(payload.card.text, /发生了什么/);
+    assert.match(payload.card.text, /Analyst 判断/);
+    assert.match(payload.card.text, /建议恢复/);
+    assert.ok(payload.card.text.length <= 3_900);
+    assert.ok(!payload.card.text.includes("<script>"));
+    assert.match(payload.card.text, /&lt;script&gt;/);
+    assert.equal(payload.card.approveLabel, "✅ 批准并启动全新 Reviewer");
+    assert.match(payload.card.approveCallback, /^hh:a:[0-9A-F]{16}$/);
+    assert.match(payload.card.holdCallback, /^hh:h:[0-9A-F]{16}$/);
+
+    const token = payload.card.holdCallback.split(":")[2];
+    const held = run("hold", bridgeConfig, token, true);
+    assert.equal(held.status, 0);
+    assert.equal(JSON.parse(held.stdout).action, "held");
+    assert.equal(readLedger(ledgerPath).activeJob.state, "blocked");
+    const audit = JSON.parse(readFileSync(approvalState, "utf8"));
+    assert.equal(audit.decision, "held");
+    assert.equal(audit.actor, "telegram:123456789");
+    assert.ok(audit.consumedAt);
+
+    const replay = run("confirm", bridgeConfig, token, true);
+    assert.equal(replay.status, 1);
+    assert.equal(JSON.parse(replay.stdout).code, "challenge_invalid");
+    assert.equal(JSON.parse(replay.stdout).terminal, true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+function run(command: "request" | "confirm" | "hold", config: string, token?: string, json = false) {
+  return spawnSync(process.execPath, [
+    resolve("dist/src/hermes-approval.js"), command, "--config", config, ...(json ? ["--json"] : []),
+  ], {
     encoding: "utf8",
     timeout: 10_000,
     ...(token ? { input: JSON.stringify({ token }) } : {}),
@@ -143,7 +203,7 @@ function blockedState() {
         summary: "Retry only after provider recovery",
         resolutionBrief: "Start a fresh Reviewer against the unchanged HEAD.",
         evidenceRefs: ["attempt_result"],
-        unknowns: [],
+        unknowns: [] as string[],
         createdAt: "2026-08-07T00:02:00.000Z",
       },
       approval: null,
