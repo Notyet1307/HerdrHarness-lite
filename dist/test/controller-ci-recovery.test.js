@@ -5,6 +5,7 @@ import { approveRecovery, reassessIncident } from "../src/recovery.js";
 import { FakeAnalyst, FakeClock, FakeEvidence, FakeGit, FakeGitHub, FakeHerdr, FakeRuntimePreflight, MemoryStore, SequenceIds, issue, validReviewerArgv, validWorkerArgv, } from "./fakes.js";
 const oldHead = "b".repeat(40);
 const newHead = "c".repeat(40);
+const newestHead = "d".repeat(40);
 const failedCheck = {
     name: "test-backend",
     state: "FAILURE",
@@ -29,7 +30,7 @@ const config = {
     workerArgv: validWorkerArgv,
     reviewerArgv: validReviewerArgv,
 };
-test("failed required CI permits one exact held reassessment and one human-approved fresh Worker cycle", async () => {
+test("failed required CI permits two exact human-approved Worker cycles before exhaustion", async () => {
     const store = new MemoryStore();
     const clock = new FakeClock();
     const ids = new SequenceIds();
@@ -40,6 +41,8 @@ test("failed required CI permits one exact held reassessment and one human-appro
         { lane: "reviewer", status: "pass", reviewedHeadSha: oldHead },
         { lane: "worker", status: "completed", headSha: newHead },
         { lane: "reviewer", status: "pass", reviewedHeadSha: newHead },
+        { lane: "worker", status: "completed", headSha: newestHead },
+        { lane: "reviewer", status: "pass", reviewedHeadSha: newestHead },
     ]);
     const analyst = new FakeAnalyst([
         {
@@ -57,6 +60,30 @@ test("failed required CI permits one exact held reassessment and one human-appro
             resolutionBrief: "Fix the backend assertion from required CI, commit, and rerun focused validation.",
             evidenceRefs: ["task", "ci-checks"],
             unknowns: [],
+        },
+        {
+            kind: "advice",
+            action: "hold",
+            summary: "The old runtime exhausted CI recovery after one cycle",
+            resolutionBrief: "",
+            evidenceRefs: ["ci-checks"],
+            unknowns: ["whether the newly approved second cycle is available"],
+        },
+        {
+            kind: "advice",
+            action: "retry_fresh_worker",
+            summary: "The second CI defect is bounded to the exact reviewed head",
+            resolutionBrief: "Propagate the remaining CI credentials and repair container-owned cleanup.",
+            evidenceRefs: ["task", "ci-checks"],
+            unknowns: [],
+        },
+        {
+            kind: "advice",
+            action: "hold",
+            summary: "Both approved CI rework cycles are exhausted",
+            resolutionBrief: "",
+            evidenceRefs: ["ci-checks"],
+            unknowns: ["maintainer follow-up"],
         },
     ]);
     const controller = new HarnessController({
@@ -123,9 +150,56 @@ test("failed required CI permits one exact held reassessment and one human-appro
     github.autoMergeEnabled = true;
     github.requiredChecks = [failedCheck];
     assert.equal((await controller.tick()).action, "blocked");
+    assert.equal(store.state.activeJob?.incident?.class, "ci_failure");
+    assert.equal(store.state.activeJob?.ciReworkCount, 1);
+    // Simulate a V1 ledger blocked by the old one-cycle runtime before deployment.
+    store.state.activeJob.incident.class = "ci_rework_exhausted";
+    store.state.activeJob.incident.allowedActions = ["hold"];
+    assert.equal((await controller.tick()).action, "analysis_recorded");
+    const legacyExhausted = store.state.activeJob;
+    assert.equal(legacyExhausted.analysis?.action, "hold");
+    await reassessIncident(store, {
+        expectedRevision: legacyExhausted.revision,
+        incidentId: legacyExhausted.incident.id,
+        analysisId: legacyExhausted.analysis.id,
+        actor: "human@example.test",
+        reason: "A second human-approved CI cycle is now bounded and the exact failure has been diagnosed.",
+    }, { clock, ids });
+    assert.equal(store.state.activeJob?.incident?.class, "ci_failure");
+    assert.deepEqual(store.state.activeJob?.incident?.allowedActions, ["retry_fresh_worker", "hold"]);
+    assert.equal(store.state.activeJob?.analysis, null);
+    assert.equal((await controller.tick()).action, "analysis_recorded");
+    const secondBlocked = store.state.activeJob;
+    assert.equal(secondBlocked.analysis?.action, "retry_fresh_worker");
+    await approveRecovery(store, {
+        expectedRevision: secondBlocked.revision,
+        incidentId: secondBlocked.incident.id,
+        analysisId: secondBlocked.analysis.id,
+        actor: "human@example.test",
+        reason: "The exact PR head has one final bounded CI rework available",
+    }, { clock, ids });
+    assert.equal((await controller.tick()).action, "recovery_applied");
+    assert.equal(store.state.activeJob?.ciReworkCount, 2);
+    assert.equal((await controller.tick()).action, "attempt_prepared");
+    assert.equal(store.state.activeJob?.activeAttempt?.expectedRemoteHeadSha, newHead);
+    await driveUntil(controller, store, "awaiting_merge");
+    assert.equal(store.state.activeJob?.pullRequest?.headSha, newestHead);
+    assert.equal(git.workerVerifications.at(-1)?.expectedRemoteHeadSha, newHead);
+    github.autoMergeEnabled = true;
+    github.requiredChecks = [failedCheck];
+    assert.equal((await controller.tick()).action, "blocked");
     assert.equal(store.state.activeJob?.incident?.class, "ci_rework_exhausted");
     assert.deepEqual(store.state.activeJob?.incident?.allowedActions, ["hold"]);
-    assert.equal(store.state.activeJob?.ciReworkCount, 1);
+    assert.equal(store.state.activeJob?.ciReworkCount, 2);
+    assert.equal((await controller.tick()).action, "analysis_recorded");
+    const exhausted = store.state.activeJob;
+    await assert.rejects(() => reassessIncident(store, {
+        expectedRevision: exhausted.revision,
+        incidentId: exhausted.incident.id,
+        analysisId: exhausted.analysis.id,
+        actor: "human@example.test",
+        reason: "A third cycle must remain forbidden.",
+    }, { clock, ids }), /within the rework limit/);
 });
 async function driveUntil(controller, store, state) {
     for (let tick = 0; tick < 40; tick += 1) {

@@ -36,7 +36,7 @@ export class FakeClock implements Clock {
   private tick = 0;
   now(): string {
     this.tick += 1;
-    return `2026-08-03T00:00:${String(this.tick).padStart(2, "0")}.000Z`;
+    return new Date(Date.UTC(2026, 7, 3, 0, 0, this.tick)).toISOString();
   }
 }
 

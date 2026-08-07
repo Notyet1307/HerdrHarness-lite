@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { Buffer } from "node:buffer";
 import { basename, dirname, isAbsolute, resolve } from "node:path";
 import { selectNextTask } from "./eligibility.js";
-import { assertJobInvariant, digest, evolveJob, isRetryAction, taskFromSelection, } from "./model.js";
+import { assertJobInvariant, digest, evolveJob, isRetryAction, MAX_CI_REWORKS, taskFromSelection, } from "./model.js";
 import { allowedActionsFor, buildEvidencePack, isDecisionResolutionEligible, makeIncident, validateAttemptResult } from "./policy.js";
 import { reviewerPrompt, workerPrompt } from "./prompts.js";
 import { pathIsWithin, pathsOverlap } from "./path-safety.js";
@@ -730,7 +730,7 @@ export class HarnessController {
                 checks: failedChecks,
             };
             return this.block(state, job, {
-                class: (job.ciReworkCount ?? 0) >= 1 ? "ci_rework_exhausted" : "ci_failure",
+                class: (job.ciReworkCount ?? 0) >= MAX_CI_REWORKS ? "ci_rework_exhausted" : "ci_failure",
                 lane: "controller",
                 summary: summarizeCiFailure(job.pullRequest.number, ciFailure),
                 attemptResult: null,
@@ -886,7 +886,7 @@ export class HarnessController {
                 !job.ciFailure ||
                 job.ciFailure.headSha !== job.pullRequest.headSha ||
                 job.headSha !== job.pullRequest.headSha ||
-                (job.ciReworkCount ?? 0) >= 1) {
+                (job.ciReworkCount ?? 0) >= MAX_CI_REWORKS) {
                 return this.block(state, job, {
                     class: "integrity_violation",
                     lane: "controller",

@@ -5,6 +5,7 @@ export function isRecoveryAction(value) {
 export function isRetryAction(value) {
     return value === "retry_fresh_worker" || value === "retry_fresh_reviewer";
 }
+export const MAX_CI_REWORKS = 2;
 export function taskFromSelection(repo, selected) {
     const value = {
         repo,
@@ -60,7 +61,7 @@ export function assertJobInvariant(job) {
         throw new Error("recovery_approved job requires an approval");
     }
     const ciReworkCount = job.ciReworkCount ?? 0;
-    if (!Number.isInteger(ciReworkCount) || ciReworkCount < 0 || ciReworkCount > 1) {
+    if (!Number.isInteger(ciReworkCount) || ciReworkCount < 0 || ciReworkCount > MAX_CI_REWORKS) {
         throw new Error("job has an invalid CI rework count");
     }
     if (job.ciFailure) {

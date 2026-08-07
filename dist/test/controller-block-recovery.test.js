@@ -682,7 +682,7 @@ test("integrity incidents cannot be converted into retry authority by the Analys
         analysisId: job.analysis.id,
         actor: "human@example.test",
         reason: "attempted reassessment outside Reviewer infrastructure",
-    }, { clock, ids }), /HEAD-bound first CI failure/);
+    }, { clock, ids }), /HEAD-bound CI incident within the rework limit/);
     await assert.rejects(() => approveRecovery(store, {
         expectedRevision: job.revision,
         incidentId: job.incident.id,

@@ -198,6 +198,7 @@ export type CiFailure = {
     observedAt: string;
     checks: PullRequestCheck[];
 };
+export declare const MAX_CI_REWORKS = 2;
 export type JobState = "claimed" | "worker_ready" | "worker_running" | "reviewer_ready" | "reviewer_running" | "publish_ready" | "awaiting_merge" | "blocked" | "recovery_approved" | "done" | "cancelled";
 export type Job = {
     id: string;
@@ -222,7 +223,7 @@ export type Job = {
     pullRequest: PullRequestRef | null;
     /** Optional for backward compatibility with V1 ledgers created before CI feedback. */
     ciFailure?: CiFailure | null;
-    /** V1 permits one human-approved post-PR CI rework cycle. */
+    /** V1 permits two separately human-approved post-PR CI rework cycles. */
     ciReworkCount?: number;
     lastError: string | null;
     createdAt: string;

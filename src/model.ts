@@ -250,6 +250,8 @@ export type CiFailure = {
   checks: PullRequestCheck[];
 };
 
+export const MAX_CI_REWORKS = 2;
+
 export type JobState =
   | "claimed"
   | "worker_ready"
@@ -286,7 +288,7 @@ export type Job = {
   pullRequest: PullRequestRef | null;
   /** Optional for backward compatibility with V1 ledgers created before CI feedback. */
   ciFailure?: CiFailure | null;
-  /** V1 permits one human-approved post-PR CI rework cycle. */
+  /** V1 permits two separately human-approved post-PR CI rework cycles. */
   ciReworkCount?: number;
   lastError: string | null;
   createdAt: string;
@@ -362,7 +364,7 @@ export function assertJobInvariant(job: Job): void {
     throw new Error("recovery_approved job requires an approval");
   }
   const ciReworkCount = job.ciReworkCount ?? 0;
-  if (!Number.isInteger(ciReworkCount) || ciReworkCount < 0 || ciReworkCount > 1) {
+  if (!Number.isInteger(ciReworkCount) || ciReworkCount < 0 || ciReworkCount > MAX_CI_REWORKS) {
     throw new Error("job has an invalid CI rework count");
   }
   if (job.ciFailure) {

@@ -7,6 +7,7 @@ import {
   digest,
   evolveJob,
   isRetryAction,
+  MAX_CI_REWORKS,
   taskFromSelection,
   type AnalystAdvice,
   type Attempt,
@@ -864,7 +865,7 @@ export class HarnessController {
         checks: failedChecks,
       };
       return this.block(state, job, {
-        class: (job.ciReworkCount ?? 0) >= 1 ? "ci_rework_exhausted" : "ci_failure",
+        class: (job.ciReworkCount ?? 0) >= MAX_CI_REWORKS ? "ci_rework_exhausted" : "ci_failure",
         lane: "controller",
         summary: summarizeCiFailure(job.pullRequest.number, ciFailure),
         attemptResult: null,
@@ -1029,7 +1030,7 @@ export class HarnessController {
         !job.ciFailure ||
         job.ciFailure.headSha !== job.pullRequest.headSha ||
         job.headSha !== job.pullRequest.headSha ||
-        (job.ciReworkCount ?? 0) >= 1
+        (job.ciReworkCount ?? 0) >= MAX_CI_REWORKS
       ) {
         return this.block(state, job, {
           class: "integrity_violation",

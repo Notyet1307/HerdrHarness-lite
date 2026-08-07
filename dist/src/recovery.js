@@ -1,4 +1,4 @@
-import { evolveJob, isBoundedText, isRetryAction } from "./model.js";
+import { evolveJob, isBoundedText, isRetryAction, MAX_CI_REWORKS } from "./model.js";
 import { allowedActionsFor, isDecisionResolutionEligible, makeIncident } from "./policy.js";
 /** Human gate: records authority, but never talks to an old agent or mutates Git. */
 export async function approveRecovery(store, request, dependencies) {
@@ -147,8 +147,8 @@ export async function reassessIncident(store, request, dependencies) {
         && job.activeAttempt.result === null
         && job.activeAttempt.expectedHeadSha === job.headSha
         && job.incident.summary.startsWith("reviewer modified the worktree outside Harness result files:");
-    const heldCiFailure = job.approval === null
-        && job.incident.class === "ci_failure"
+    const heldCiIncident = job.approval === null
+        && (job.incident.class === "ci_failure" || job.incident.class === "ci_rework_exhausted")
         && job.incident.lane === "controller"
         && job.incident.attemptId === null
         && job.activeAttempt === null
@@ -157,16 +157,25 @@ export async function reassessIncident(store, request, dependencies) {
         && job.ciFailure !== undefined
         && job.ciFailure.headSha === job.pullRequest.headSha
         && job.headSha === job.pullRequest.headSha
-        && (job.ciReworkCount ?? 0) < 1;
-    const effectiveRetryAction = legacyReviewerPreflight ? "retry_fresh_reviewer" : retryAction;
+        && (job.ciReworkCount ?? 0) < MAX_CI_REWORKS;
+    const heldCiFailure = heldCiIncident && job.incident.class === "ci_failure";
+    const legacyCiExhausted = heldCiIncident
+        && job.incident.class === "ci_rework_exhausted"
+        && job.incident.allowedActions.length === 1
+        && job.incident.allowedActions[0] === "hold";
+    const effectiveRetryAction = legacyReviewerPreflight
+        ? "retry_fresh_reviewer"
+        : legacyCiExhausted
+            ? "retry_fresh_worker"
+            : retryAction;
     const analystExecutionFailed = job.analysis.evidenceDigest === job.incident.evidenceDigest
         && isControllerAnalystFailure(job.analysis);
     if (effectiveRetryAction === null ||
-        (!legacyReviewerPreflight && !job.incident.allowedActions.includes(effectiveRetryAction)) ||
-        (!legacyReviewerPreflight && !allowedActionsFor(job.incident.class, job.incident.lane).includes(effectiveRetryAction)) ||
-        (!exactAttempt && !heldCiFailure) ||
-        (!heldInfrastructure && !heldReviewerBlock && !heldReviewerPreflight && !legacyReviewerPreflight && !analystExecutionFailed && !heldCiFailure)) {
-        throw new Error("only an exact held infrastructure incident, HEAD-bound Reviewer block, pre-start Reviewer residue, controller-recorded Analyst execution failure, or HEAD-bound first CI failure can be reassessed");
+        (!legacyReviewerPreflight && !legacyCiExhausted && !job.incident.allowedActions.includes(effectiveRetryAction)) ||
+        (!legacyReviewerPreflight && !legacyCiExhausted && !allowedActionsFor(job.incident.class, job.incident.lane).includes(effectiveRetryAction)) ||
+        (!exactAttempt && !heldCiIncident) ||
+        (!heldInfrastructure && !heldReviewerBlock && !heldReviewerPreflight && !legacyReviewerPreflight && !analystExecutionFailed && !heldCiFailure && !legacyCiExhausted)) {
+        throw new Error("only an exact held infrastructure incident, HEAD-bound Reviewer block, pre-start Reviewer residue, controller-recorded Analyst execution failure, or HEAD-bound CI incident within the rework limit can be reassessed");
     }
     const successor = makeIncident({
         jobId: job.id,
@@ -177,7 +186,9 @@ export async function reassessIncident(store, request, dependencies) {
             ? "infrastructure_exhausted"
             : legacyReviewerPreflight
                 ? "reviewer_preflight_dirty"
-                : job.incident.class,
+                : legacyCiExhausted
+                    ? "ci_failure"
+                    : job.incident.class,
         summary: [
             `Reassessment requested for held incident ${job.incident.id}.`,
             `Previous incident (untrusted):\n${job.incident.summary}`,

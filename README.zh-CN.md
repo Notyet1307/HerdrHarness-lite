@@ -431,10 +431,10 @@ PR 仍为 OPEN 时，Controller 会读取精确 reviewed HEAD 上的 GitHub requ
 1. 在修改 ledger 状态前先取消原生 auto-merge；
 2. 记录 `ci_failure` incident，其中包含 check 身份、状态、链接，以及 `gh run view --log-failed` 的有界尾部，使最终错误不会被冗长启动日志截掉；
 3. 保留 active slot，并让任务绑定的 Analyst 给出建议；
-4. 只有精确人工批准后，才允许一个 fresh Worker 在同一分支回修；
+4. 每次都需精确人工批准，最多允许两个 fresh Worker 在同一分支回修；
 5. 先验证远端分支仍指向此前已审的 PR HEAD，再要求 fresh Reviewer，通过后更新同一 PR。
 
-Controller 不会自动 rerun CI，也不会自动 rebase。获批的 CI 回修完成后若 required check 再次失败，会进入 `ci_rework_exhausted`，只允许 `hold`。
+Controller 不会自动 rerun CI，也不会自动 rebase。每轮 CI 回修都需要独立 Analyst 建议和精确人工批准。两轮获批回修后若 required check 第三次失败，会进入 `ci_rework_exhausted`，只允许 `hold`。
 
 ## 状态与审计数据
 

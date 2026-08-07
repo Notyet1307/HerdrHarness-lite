@@ -432,10 +432,10 @@ While the PR is open, the Controller reads GitHub's required checks for the exac
 1. disable native auto-merge before changing ledger state;
 2. record a `ci_failure` incident with check identity, state, link, and the bounded tail of `gh run view --log-failed` so the final error survives long setup logs;
 3. retain the active slot and ask the task-bound Analyst for advice;
-4. require exact human approval before one fresh Worker may rework the same branch;
+4. require exact human approval before each of at most two fresh Workers may rework the same branch;
 5. verify that the remote branch still points to the previously reviewed PR HEAD, then require a fresh Reviewer before updating the same PR.
 
-The Controller does not auto-rerun CI or auto-rebase. A second required-check failure after the approved CI rework becomes `ci_rework_exhausted` and permits only `hold`.
+The Controller does not auto-rerun CI or auto-rebase. Each CI rework needs separate Analyst advice and exact human approval. A third required-check failure after two approved CI reworks becomes `ci_rework_exhausted` and permits only `hold`.
 
 ## State and audit data
 

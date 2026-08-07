@@ -831,7 +831,7 @@ test("integrity incidents cannot be converted into retry authority by the Analys
       },
       { clock, ids },
     ),
-    /HEAD-bound first CI failure/,
+    /HEAD-bound CI incident within the rework limit/,
   );
   await assert.rejects(
     () => approveRecovery(
