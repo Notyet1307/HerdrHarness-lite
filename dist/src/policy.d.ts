@@ -1,6 +1,8 @@
-import type { Attempt, AttemptResult, BlockClass, EvidencePack, Incident, RecoveryAction } from "./model.js";
+import type { Attempt, AttemptResult, BlockClass, EvidencePack, Incident, Job, RecoveryAction } from "./model.js";
 import type { Clock, IdGenerator } from "./ports.js";
 export declare function allowedActionsFor(blockClass: BlockClass, lane: Incident["lane"]): RecoveryAction[];
+/** Exact evidence boundary for a maintainer resolving an exhausted Reviewer architecture decision. */
+export declare function isDecisionResolutionEligible(job: Job): boolean;
 export declare function makeIncident(input: {
     jobId: string;
     jobRevision: number;

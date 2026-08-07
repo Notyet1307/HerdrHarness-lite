@@ -88,6 +88,17 @@ export function assertJobInvariant(job) {
     if (job.approval && !isRetryAction(job.approval.action)) {
         throw new Error("approval has an invalid recovery action");
     }
+    if (job.approval?.basis !== undefined &&
+        job.approval.basis !== "analyst_advice" &&
+        job.approval.basis !== "human_decision") {
+        throw new Error("approval has an invalid basis");
+    }
+    if (job.approval?.basis === "human_decision" &&
+        (!isBoundedText(job.approval.actor, 512) ||
+            !isBoundedText(job.approval.reason, 2_000) ||
+            !Number.isFinite(Date.parse(job.approval.createdAt)))) {
+        throw new Error("human decision approval is not auditable");
+    }
     if (job.reassessments !== undefined &&
         (!Array.isArray(job.reassessments) || job.reassessments.some((entry) => (!entry ||
             !Number.isInteger(entry.jobRevision) ||

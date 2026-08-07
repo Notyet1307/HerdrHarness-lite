@@ -152,6 +152,22 @@ node dist/src/cli.js approve \
 
 Approval 受 compare-and-swap 保护。随后继续单独 `tick`，直到 `recovery_applied`，再依次创建并派发 fresh attempt。Harness 会关闭旧 pane，绝不恢复旧 agent。
 
+#### 维护者已解决耗尽轮次的架构决策
+
+`resolve-decision` 不是绕过 Analyst `hold` 的通用开关。只有同时满足以下条件才接受：当前 Reviewer attempt 与当前 HEAD 精确绑定、Reviewer 在最后允许轮次返回 `changes`、至少有一条 `major`/`critical` finding，并且 Analyst 因未决问题返回 `hold`。`--reason` 必须写具体维护者决策，不能只写“重试”：
+
+```bash
+node dist/src/cli.js resolve-decision \
+  --config /ABSOLUTE/PATH/harness.config.json \
+  --revision REVISION \
+  --incident INCIDENT_ID \
+  --analysis ANALYSIS_ID \
+  --actor OPERATOR \
+  --reason "Rerun-only supersedes ADR-0003；更新 ADR 和架构文档，再验证精确 HEAD"
+```
+
+账本会记录 `basis=human_decision`，并绑定 actor、决策内容、时间、revision、incident 和 analysis。下一次 `tick` 会把它消费为 fresh Worker brief，同时带上该决策和阻塞 Reviewer findings。绑定过期、尚未耗尽轮次、结果不是 `changes`、只有低严重度 finding、Analyst 没有未决问题或 HEAD 不一致，都会 fail closed。
+
 #### Provider、Reviewer 验证环境或 Analyst 运行时已修复
 
 仅当 incident 精确对应以下可重评情况时使用 `reassess`：

@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { HarnessController } from "../src/controller.js";
 import { assertJobInvariant } from "../src/model.js";
-import { approveRecovery, reassessIncident } from "../src/recovery.js";
+import { approveRecovery, reassessIncident, resolveDecision } from "../src/recovery.js";
 import { FakeAnalyst, FakeClock, FakeEvidence, FakeGit, FakeGitHub, FakeHerdr, MemoryStore, SequenceIds, issue, validReviewerArgv, validWorkerArgv, } from "./fakes.js";
 const config = {
     repo: "owner/repo",
@@ -542,6 +542,97 @@ test("controller-recorded Analyst execution failure can be reassessed without gr
     assert.equal((await controller.tick()).action, "analysis_recorded");
     assert.equal(store.state.activeJob?.analysis?.action, "retry_fresh_worker");
     assert.equal(store.state.activeJob?.approval, null);
+});
+test("an exact human decision can recover an exhausted major Reviewer change into a fresh Worker", async () => {
+    const headSha = "b".repeat(40);
+    const store = new MemoryStore();
+    const clock = new FakeClock();
+    const ids = new SequenceIds();
+    const herdr = new FakeHerdr([
+        { lane: "worker", status: "completed", headSha },
+        {
+            lane: "reviewer",
+            status: "changes",
+            reviewedHeadSha: headSha,
+            summary: "The implementation conflicts with an accepted architecture decision",
+            findings: [{
+                    severity: "major",
+                    summary: "Align ADR-0003 with the approved Rerun-only behavior",
+                    evidence: "docs/architecture/ADR-0003.md:42",
+                }],
+        },
+    ]);
+    const controller = new HarnessController({
+        config: { ...config, maxReviewRounds: 1 },
+        store,
+        github: new FakeGitHub([issue({ number: 39, title: "Resolve an architectural decision" })]),
+        git: new FakeGit(),
+        herdr,
+        analyst: new FakeAnalyst([{
+                kind: "advice",
+                action: "hold",
+                summary: "Maintainer intent is required before changing the accepted ADR",
+                resolutionBrief: "",
+                evidenceRefs: ["task"],
+                unknowns: ["Whether Rerun-only supersedes ADR-0003"],
+            }]),
+        evidence: new FakeEvidence(),
+        clock,
+        ids,
+    });
+    for (let index = 0; index < 14; index += 1)
+        await controller.tick();
+    const held = store.state.activeJob;
+    const oldAttemptId = held.activeAttempt.id;
+    assert.equal(held.state, "blocked");
+    assert.equal(held.activeAttempt?.round, 1);
+    assert.equal(held.analysis?.action, "hold");
+    await assert.rejects(() => approveRecovery(store, {
+        expectedRevision: held.revision,
+        incidentId: held.incident.id,
+        analysisId: held.analysis.id,
+        actor: "maintainer@example.test",
+        reason: "Rerun-only is authoritative",
+    }, { clock, ids }), /did not recommend retry/);
+    await assert.rejects(() => resolveDecision(store, {
+        expectedRevision: held.revision - 1,
+        incidentId: held.incident.id,
+        analysisId: held.analysis.id,
+        actor: "maintainer@example.test",
+        reason: "Rerun-only supersedes ADR-0003; update the decision record and architecture.",
+    }, { clock, ids }), /stale job revision/);
+    const reviewerResult = store.state.activeJob.activeAttempt.result;
+    if (!reviewerResult || reviewerResult.lane !== "reviewer")
+        throw new Error("expected Reviewer result");
+    reviewerResult.findings[0].severity = "minor";
+    await assert.rejects(() => resolveDecision(store, {
+        expectedRevision: held.revision,
+        incidentId: held.incident.id,
+        analysisId: held.analysis.id,
+        actor: "maintainer@example.test",
+        reason: "Rerun-only supersedes ADR-0003; update the decision record and architecture.",
+    }, { clock, ids }), /not eligible for decision resolution/);
+    reviewerResult.findings[0].severity = "major";
+    const approval = await resolveDecision(store, {
+        expectedRevision: held.revision,
+        incidentId: held.incident.id,
+        analysisId: held.analysis.id,
+        actor: "maintainer@example.test",
+        reason: "Rerun-only supersedes ADR-0003; update the decision record and architecture.",
+    }, { clock, ids });
+    assert.equal(approval.basis, "human_decision");
+    assert.equal(approval.action, "retry_fresh_worker");
+    assert.equal(store.state.activeJob?.state, "recovery_approved");
+    assert.equal((await controller.tick()).action, "recovery_applied");
+    assert.equal(store.state.activeJob?.state, "worker_ready");
+    assert.equal((await controller.tick()).action, "attempt_prepared");
+    const freshAttemptId = store.state.activeJob.activeAttempt.id;
+    assert.ok(freshAttemptId !== oldAttemptId);
+    assert.equal((await controller.tick()).action, "attempt_pane_ready");
+    assert.equal((await controller.tick()).action, "attempt_agent_ready");
+    assert.equal((await controller.tick()).action, "attempt_dispatched");
+    assert.match(herdr.prompts.at(-1)?.text ?? "", /Rerun-only supersedes ADR-0003/);
+    assert.match(herdr.prompts.at(-1)?.text ?? "", /Align ADR-0003 with the approved Rerun-only behavior/);
 });
 test("integrity incidents cannot be converted into retry authority by the Analyst", async () => {
     const store = new MemoryStore();

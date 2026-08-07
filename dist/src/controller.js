@@ -3,7 +3,7 @@ import { Buffer } from "node:buffer";
 import { basename, dirname, isAbsolute, resolve } from "node:path";
 import { selectNextTask } from "./eligibility.js";
 import { assertJobInvariant, digest, evolveJob, isRetryAction, taskFromSelection, } from "./model.js";
-import { allowedActionsFor, buildEvidencePack, makeIncident, validateAttemptResult } from "./policy.js";
+import { allowedActionsFor, buildEvidencePack, isDecisionResolutionEligible, makeIncident, validateAttemptResult } from "./policy.js";
 import { reviewerPrompt, workerPrompt } from "./prompts.js";
 import { pathIsWithin, pathsOverlap } from "./path-safety.js";
 const BUNDLED_CODE_REVIEW_SKILL = resolve(import.meta.dirname, "../../pi/skills/code-review");
@@ -829,11 +829,12 @@ export class HarnessController {
                 attemptResult: null,
             });
         }
+        const humanDecision = approval.basis === "human_decision";
         if (approval.jobRevision >= job.revision ||
             approval.incidentId !== incident.id ||
             approval.analysisId !== analysis.id ||
             !isRetryAction(approval.action) ||
-            approval.action !== analysis.action ||
+            (humanDecision ? !isDecisionResolutionEligible(job) : approval.action !== analysis.action) ||
             !incident.allowedActions.includes(approval.action) ||
             !allowedActionsFor(incident.class, incident.lane).includes(approval.action)) {
             return this.block(state, job, {
@@ -901,11 +902,20 @@ export class HarnessController {
             ? [...job.attempts, settleAttempt(job.activeAttempt, job.activeAttempt.result, now)]
             : job.attempts;
         const consumed = { ...approval, consumedAt: now };
+        const decisionFindings = job.activeAttempt?.result?.lane === "reviewer"
+            ? job.activeAttempt.result.findings
+                .map((finding, index) => `${index + 1}. [${finding.severity}] ${finding.summary} — ${finding.evidence}`)
+                .join("\n")
+            : "";
         const next = evolveJob(job, now, {
             state: approval.action === "retry_fresh_reviewer" ? "reviewer_ready" : "worker_ready",
             activeAttempt: null,
             attempts,
-            pendingBrief: approval.action === "retry_fresh_worker" ? analysis.resolutionBrief : null,
+            pendingBrief: approval.action === "retry_fresh_worker"
+                ? humanDecision
+                    ? `Human-resolved decision:\n${approval.reason}\n\nBlocking Reviewer findings:\n${decisionFindings}`
+                    : analysis.resolutionBrief
+                : null,
             incident: null,
             analysis: null,
             approval: consumed,

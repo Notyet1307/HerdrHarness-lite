@@ -1,6 +1,6 @@
 import type { AnalystAdvice, Approval, HarnessState, Reassessment } from "./model.js";
 import { evolveJob, isBoundedText, isRetryAction } from "./model.js";
-import { allowedActionsFor, makeIncident } from "./policy.js";
+import { allowedActionsFor, isDecisionResolutionEligible, makeIncident } from "./policy.js";
 import type { Clock, IdGenerator, StateStore } from "./ports.js";
 
 export type ApprovalRequest = {
@@ -48,6 +48,7 @@ export async function approveRecovery(
     incidentId: job.incident.id,
     analysisId: job.analysis.id,
     action: job.analysis.action,
+    basis: "analyst_advice",
     actor: request.actor,
     reason: request.reason,
     createdAt: now,
@@ -60,6 +61,52 @@ export async function approveRecovery(
   });
   const next: HarnessState = { ...state, activeJob: nextJob };
   await store.save(next, job.revision);
+  return approval;
+}
+
+/** Human gate for one narrow case: a maintainer resolves an exhausted Reviewer architecture decision. */
+export async function resolveDecision(
+  store: StateStore,
+  request: ApprovalRequest,
+  dependencies: { clock: Clock; ids: IdGenerator },
+): Promise<Approval> {
+  if (!isBoundedText(request.actor, 512)) throw new Error("decision actor is required and bounded");
+  if (!isBoundedText(request.reason, 2_000)) throw new Error("decision reason is required and bounded");
+
+  const state = await store.load();
+  const job = state.activeJob;
+  if (!job) throw new Error("no active job");
+  if (job.revision !== request.expectedRevision) {
+    throw new Error(`stale job revision: expected ${request.expectedRevision}, current ${job.revision}`);
+  }
+  if (job.state !== "blocked" || !job.incident) throw new Error("job is not awaiting a decision resolution");
+  if (job.incident.id !== request.incidentId) throw new Error("incident changed before decision resolution");
+  if (!job.analysis || job.analysis.id !== request.analysisId) throw new Error("analysis changed before decision resolution");
+  if (job.approval !== null || !isDecisionResolutionEligible(job)) {
+    throw new Error("job is not eligible for decision resolution");
+  }
+
+  const now = dependencies.clock.now();
+  const approval: Approval = {
+    id: dependencies.ids.next("approval"),
+    jobRevision: job.revision,
+    incidentId: job.incident.id,
+    analysisId: job.analysis.id,
+    action: "retry_fresh_worker",
+    basis: "human_decision",
+    actor: request.actor,
+    reason: request.reason,
+    createdAt: now,
+    consumedAt: null,
+  };
+  await store.save({
+    ...state,
+    activeJob: evolveJob(job, now, {
+      state: "recovery_approved",
+      approval,
+      lastError: null,
+    }),
+  }, job.revision);
   return approval;
 }
 

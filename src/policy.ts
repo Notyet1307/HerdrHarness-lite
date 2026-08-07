@@ -4,6 +4,7 @@ import type {
   BlockClass,
   EvidencePack,
   Incident,
+  Job,
   RecoveryAction,
 } from "./model.js";
 import { digest } from "./model.js";
@@ -26,6 +27,36 @@ export function allowedActionsFor(blockClass: BlockClass, lane: Incident["lane"]
     case "analyst_unavailable":
       return ["hold"];
   }
+}
+
+/** Exact evidence boundary for a maintainer resolving an exhausted Reviewer architecture decision. */
+export function isDecisionResolutionEligible(job: Job): boolean {
+  const incident = job.incident;
+  const analysis = job.analysis;
+  const attempt = job.activeAttempt;
+  const review = attempt?.result;
+  return incident?.class === "review_uncertain"
+    && incident.lane === "reviewer"
+    && incident.attemptId !== null
+    && incident.attemptId === attempt?.id
+    && incident.allowedActions.includes("retry_fresh_worker")
+    && allowedActionsFor(incident.class, incident.lane).includes("retry_fresh_worker")
+    && analysis?.incidentId === incident.id
+    && analysis.action === "hold"
+    && analysis.resolutionBrief === ""
+    && analysis.unknowns.length > 0
+    && job.headSha !== null
+    && Number.isInteger(job.maxReviewRounds)
+    && job.maxReviewRounds >= 1
+    && attempt?.lane === "reviewer"
+    && attempt.phase === "settled"
+    && Number.isInteger(attempt.round)
+    && attempt.round >= job.maxReviewRounds
+    && attempt.expectedHeadSha === job.headSha
+    && review?.lane === "reviewer"
+    && review.status === "changes"
+    && review.reviewedHeadSha === job.headSha
+    && review.findings.some((finding) => finding.severity === "major" || finding.severity === "critical");
 }
 
 export function makeIncident(input: {

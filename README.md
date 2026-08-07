@@ -152,6 +152,22 @@ node dist/src/cli.js approve \
 
 Approval is compare-and-swap protected. Continue with standalone ticks through `recovery_applied` and fresh-attempt preparation/dispatch. The Harness closes the old pane and never resumes the old agent.
 
+#### Maintainer resolved an exhausted architecture decision
+
+`resolve-decision` is not a general override for Analyst `hold`. It is accepted only when the active, HEAD-bound Reviewer returned `changes` with a `major` or `critical` finding on the final allowed review round, and the Analyst held with unresolved questions. Record the concrete maintainer decision—not merely “retry”—in `--reason`:
+
+```bash
+node dist/src/cli.js resolve-decision \
+  --config /ABSOLUTE/PATH/harness.config.json \
+  --revision REVISION \
+  --incident INCIDENT_ID \
+  --analysis ANALYSIS_ID \
+  --actor OPERATOR \
+  --reason "Rerun-only supersedes ADR-0003; update the ADR and architecture, then validate the exact HEAD"
+```
+
+The ledger records `basis=human_decision` with the actor, decision, timestamp, revision, incident, and analysis bindings. The next `tick` consumes it into a fresh Worker brief containing both the decision and the blocking Reviewer findings. Any stale binding, non-final round, non-`changes` result, lower-severity-only finding, missing Analyst unknown, or HEAD mismatch fails closed.
+
 #### Provider, Reviewer validation environment, or Analyst runtime repaired
 
 Use `reassess` only when the incident is exactly one of these retryable cases:

@@ -157,6 +157,8 @@ export type Approval = {
     incidentId: string;
     analysisId: string;
     action: Exclude<RecoveryAction, "hold">;
+    /** Optional because V1 ledgers created before decision resolution have no basis field. */
+    basis?: "analyst_advice" | "human_decision";
     actor: string;
     reason: string;
     createdAt: string;

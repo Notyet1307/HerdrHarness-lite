@@ -13,6 +13,11 @@ export declare function approveRecovery(store: StateStore, request: ApprovalRequ
     clock: Clock;
     ids: IdGenerator;
 }): Promise<Approval>;
+/** Human gate for one narrow case: a maintainer resolves an exhausted Reviewer architecture decision. */
+export declare function resolveDecision(store: StateStore, request: ApprovalRequest, dependencies: {
+    clock: Clock;
+    ids: IdGenerator;
+}): Promise<Approval>;
 /** Human gate: requests new analysis after a hold, but grants no retry authority. */
 export declare function reassessIncident(store: StateStore, request: ReassessmentRequest, dependencies: {
     clock: Clock;

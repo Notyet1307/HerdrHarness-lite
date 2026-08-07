@@ -203,6 +203,8 @@ export type Approval = {
   incidentId: string;
   analysisId: string;
   action: Exclude<RecoveryAction, "hold">;
+  /** Optional because V1 ledgers created before decision resolution have no basis field. */
+  basis?: "analyst_advice" | "human_decision";
   actor: string;
   reason: string;
   createdAt: string;
@@ -391,6 +393,21 @@ export function assertJobInvariant(job: Job): void {
   }
   if (job.approval && !isRetryAction(job.approval.action)) {
     throw new Error("approval has an invalid recovery action");
+  }
+  if (
+    job.approval?.basis !== undefined &&
+    job.approval.basis !== "analyst_advice" &&
+    job.approval.basis !== "human_decision"
+  ) {
+    throw new Error("approval has an invalid basis");
+  }
+  if (
+    job.approval?.basis === "human_decision" &&
+    (!isBoundedText(job.approval.actor, 512) ||
+      !isBoundedText(job.approval.reason, 2_000) ||
+      !Number.isFinite(Date.parse(job.approval.createdAt)))
+  ) {
+    throw new Error("human decision approval is not auditable");
   }
   if (
     job.reassessments !== undefined &&
