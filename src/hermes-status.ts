@@ -5,9 +5,11 @@ import { JsonStateStore } from "./adapters/json-store.js";
 import { MAX_CI_REWORKS, type HarnessState, type Job } from "./model.js";
 
 const MAX_MESSAGE_LENGTH = 3_500;
+const LANE_ID = /^[a-z0-9][a-z0-9-]{0,31}$/;
 
 type BridgeConfig = {
   harnessConfig: string;
+  laneId?: string;
 };
 
 type HarnessStatusConfig = {
@@ -19,8 +21,8 @@ type HarnessStatusConfig = {
 
 async function main(argv: string[]): Promise<number> {
   const command = argv[2] || "status";
-  if (command !== "status" && command !== "incident") {
-    throw new Error("command must be status or incident");
+  if (command !== "status" && command !== "incident" && command !== "summary") {
+    throw new Error("command must be status, incident, or summary");
   }
   const bridgePath = requiredFlag(argv, "--config");
   const bridge = loadBridgeConfig(bridgePath);
@@ -28,7 +30,9 @@ async function main(argv: string[]): Promise<number> {
   const state = await new JsonStateStore(harness.stateDir).load();
   const message = command === "status"
     ? renderStatus(state, harness)
-    : renderIncident(state);
+    : command === "incident"
+      ? renderIncident(state, bridge.laneId)
+      : renderSummary(state, harness);
   process.stdout.write(`${bounded(message)}\n`);
   return 0;
 }
@@ -67,7 +71,21 @@ function renderStatus(state: HarnessState, config: HarnessStatusConfig): string 
   return lines.join("\n");
 }
 
-function renderIncident(state: HarnessState): string {
+function renderSummary(state: HarnessState, config: HarnessStatusConfig): string {
+  const job = state.activeJob;
+  if (!job) return `${clean(config.repo, 160)} · IDLE · 历史 ${state.terminalJobs.length}`;
+  const parts = [
+    `${clean(job.task.repo, 160)}#${job.task.issueNumber}`,
+    job.state.toUpperCase(),
+    `revision ${job.revision}`,
+  ];
+  if (job.activeAttempt) parts.push(`${job.activeAttempt.lane}/${job.activeAttempt.phase}`);
+  if (job.incident) parts.push(`incident ${clean(job.incident.class, 80)}`);
+  if (job.headSha) parts.push(`HEAD ${shortSha(job.headSha)}`);
+  return parts.join(" · ");
+}
+
+function renderIncident(state: HarnessState, laneId?: string): string {
   const job = state.activeJob;
   if (!job) return "当前没有活跃任务，也没有待处理 incident。";
   const incident = job.incident;
@@ -100,7 +118,7 @@ function renderIncident(state: HarnessState): string {
   if (analysis.action === "hold") {
     lines.push("下一步：Analyst 建议 hold；没有可批准的 fresh retry。");
   } else {
-    lines.push("下一步：使用当前 Telegram 决策卡批准 fresh retry，或发送 /harness approve 获取新的 10 分钟挑战。");
+    lines.push(`下一步：使用当前 Telegram 决策卡批准 fresh retry，或发送 ${approvalCommand(laneId)} 获取新的 10 分钟挑战。`);
   }
   return lines.join("\n");
 }
@@ -136,7 +154,14 @@ function loadBridgeConfig(path: string): BridgeConfig {
   if (!parsed.harnessConfig || !isAbsolute(parsed.harnessConfig)) {
     throw new Error("bridge config harnessConfig must be an absolute path");
   }
-  return { harnessConfig: parsed.harnessConfig };
+  if (parsed.laneId !== undefined && !LANE_ID.test(parsed.laneId)) {
+    throw new Error("bridge config laneId must be 1-32 lowercase letters, digits, or hyphens");
+  }
+  return { harnessConfig: parsed.harnessConfig, ...(parsed.laneId ? { laneId: parsed.laneId } : {}) };
+}
+
+function approvalCommand(laneId?: string): string {
+  return laneId ? `/harness ${laneId} approve` : "/harness approve";
 }
 
 function loadHarnessConfig(path: string): HarnessStatusConfig {

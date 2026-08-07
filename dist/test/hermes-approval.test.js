@@ -69,6 +69,7 @@ test("Telegram approval card exposes bounded decisions and hold consumes only th
         mkdirSync(stateDir, { recursive: true, mode: 0o700 });
         writeFileSync(harnessConfig, JSON.stringify({ stateDir, herdr: { session: "test" }, analyst: { command: "/usr/bin/false" } }), { encoding: "utf8", mode: 0o600 });
         writeFileSync(bridgeConfig, JSON.stringify({
+            laneId: "exposure",
             harnessConfig,
             nodeBin: process.execPath,
             harnessCliScript: resolve("dist/src/cli.js"),
@@ -89,13 +90,14 @@ test("Telegram approval card exposes bounded decisions and hold consumes only th
         assert.match(payload.card.text, /发生了什么/);
         assert.match(payload.card.text, /Analyst 判断/);
         assert.match(payload.card.text, /建议恢复/);
+        assert.match(payload.card.text, /实例.*exposure/);
         assert.ok(payload.card.text.length <= 3_900);
         assert.ok(!payload.card.text.includes("<script>"));
         assert.match(payload.card.text, /&lt;script&gt;/);
         assert.equal(payload.card.approveLabel, "✅ 批准并启动全新 Reviewer");
-        assert.match(payload.card.approveCallback, /^hh:a:[0-9A-F]{16}$/);
-        assert.match(payload.card.holdCallback, /^hh:h:[0-9A-F]{16}$/);
-        const token = payload.card.holdCallback.split(":")[2];
+        assert.match(payload.card.approveCallback, /^hh:a:exposure:[0-9A-F]{16}$/);
+        assert.match(payload.card.holdCallback, /^hh:h:exposure:[0-9A-F]{16}$/);
+        const token = payload.card.holdCallback.split(":").at(-1);
         const held = run("hold", bridgeConfig, token, true);
         assert.equal(held.status, 0);
         assert.equal(JSON.parse(held.stdout).action, "held");

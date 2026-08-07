@@ -474,4 +474,6 @@ src/cli.ts         tick/run/status/approve/reassess
 src/adapters/      GitHub, Git, Herdr, Analyst, evidence, and state
 ```
 
+For one Telegram bot routing status and exact approvals across independent repository lanes, see [`integrations/hermes-telegram/README.md`](./integrations/hermes-telegram/README.md).
+
 See [ARCHITECTURE.zh-CN.md](./ARCHITECTURE.zh-CN.md) for the complete state model and design analysis.

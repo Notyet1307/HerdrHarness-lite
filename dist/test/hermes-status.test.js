@@ -21,6 +21,9 @@ test("Hermes status stays read-only and renders bounded ledger facts", () => {
         const idle = run("status", bridgeConfig);
         assert.equal(idle.status, 0);
         assert.match(idle.stdout, /状态：空闲/);
+        const idleSummary = run("summary", bridgeConfig);
+        assert.equal(idleSummary.status, 0);
+        assert.match(idleSummary.stdout, /owner\/repo · IDLE/);
         const incident = {
             id: "incident-001",
             class: "infrastructure_exhausted",
@@ -104,6 +107,10 @@ test("Hermes status stays read-only and renders bounded ledger facts", () => {
         assert.equal(blocked.status, 0);
         assert.match(blocked.stdout, /Analyst 建议：retry_fresh_reviewer/);
         assert.match(blocked.stdout, /Telegram 决策卡/);
+        const summary = run("summary", bridgeConfig);
+        assert.equal(summary.status, 0);
+        assert.match(summary.stdout, /owner\/repo#48 · BLOCKED · revision 12/);
+        assert.match(summary.stdout, /incident infrastructure_exhausted/);
     }
     finally {
         rmSync(root, { recursive: true, force: true });
