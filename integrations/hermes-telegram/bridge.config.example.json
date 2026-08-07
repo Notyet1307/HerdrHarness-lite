@@ -1,0 +1,5 @@
+{
+  "harnessConfig": "/absolute/path/to/harness.config.json",
+  "nodeBin": "/absolute/path/to/node",
+  "statusScript": "/absolute/path/to/HerdrHarness-lite/dist/src/hermes-status.js"
+}

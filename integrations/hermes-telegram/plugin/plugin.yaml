@@ -1,0 +1,4 @@
+name: harness-ops
+version: 0.1.0
+description: "Deterministic read-only Telegram status commands for Herdr Harness Lite."
+author: "Herdr Harness Lite"
