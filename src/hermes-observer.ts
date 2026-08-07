@@ -16,7 +16,8 @@ import {
 } from "node:fs";
 import { dirname, isAbsolute, join } from "node:path";
 import { JsonStateStore } from "./adapters/json-store.js";
-import type { HarnessState, Job, JobState } from "./model.js";
+import { isRetryAction, type HarnessState, type Job, type JobState } from "./model.js";
+import { allowedActionsFor } from "./policy.js";
 
 const MAX_MESSAGE_LENGTH = 3_900;
 const MAX_OUTBOX = 512;
@@ -27,6 +28,7 @@ type ObserverConfigFile = {
   harnessConfig: string;
   nodeBin: string;
   statusScript: string;
+  approvalScript: string;
   hermesBin: string;
   hermesProfile: string;
   target: "telegram";
@@ -36,17 +38,28 @@ type ObserverConfigFile = {
   heartbeatTimeoutMs: number;
 };
 
-type ObserverConfig = ObserverConfigFile & { harnessStateDir: string };
+type ObserverConfig = ObserverConfigFile & { bridgeConfig: string; harnessStateDir: string };
 
-type OutboxEntry = {
+type TextOutboxEntry = {
+  kind: "text";
   key: string;
   message: string;
   attempts: number;
   nextAttemptAt: number;
 };
 
+type ApprovalOutboxEntry = {
+  kind: "approval";
+  key: string;
+  analysisId: string;
+  attempts: number;
+  nextAttemptAt: number;
+};
+
+type OutboxEntry = TextOutboxEntry | ApprovalOutboxEntry;
+
 type ObserverState = {
-  version: 1;
+  version: 2;
   initialized: boolean;
   ledgerInitialized: boolean;
   ledgerHealthy: boolean;
@@ -79,12 +92,12 @@ async function main(argv: string[]): Promise<number> {
 
 async function cycle(config: ObserverConfig): Promise<void> {
   const state = loadState(config.observerState);
-  flushOutbox(config, state);
+  await flushOutbox(config, state);
   if (!state.initialized) {
     state.initialized = true;
     enqueue(state, "observer-online", [
       "✅ Herdr Harness Telegram Observer 已上线",
-      "模式：仅通知；不能审批、不能恢复、不能修改 Harness ledger。",
+      "模式：通知与决策入口；只有精确绑定的人工点击可请求 Harness 写入恢复批准。",
       safeView(config, "status"),
     ].join("\n"));
   }
@@ -93,7 +106,7 @@ async function cycle(config: ObserverConfig): Promise<void> {
   observeControllerLog(config, state);
   observeHeartbeat(config, state);
   saveState(config.observerState, state);
-  flushOutbox(config, state);
+  await flushOutbox(config, state);
 }
 
 async function observeLedger(config: ObserverConfig, observer: ObserverState): Promise<void> {
@@ -116,7 +129,7 @@ async function observeLedger(config: ObserverConfig, observer: ObserverState): P
     observer.ledgerInitialized = true;
     baselineLedger(observer, ledger);
     if (ledger.activeJob?.analysis) {
-      enqueue(observer, `analysis:${ledger.activeJob.analysis.id}`, `🧭 当前任务已有 Analyst 恢复建议\n${safeView(config, "incident")}`);
+      enqueueAnalysis(config, observer, ledger.activeJob, "🧭 当前任务已有 Analyst 恢复建议");
     } else if (ledger.activeJob?.incident) {
       enqueue(observer, `incident:${ledger.activeJob.incident.id}`, `⛔️ 当前 Harness 任务已阻塞\n${safeView(config, "incident")}`);
     }
@@ -141,7 +154,7 @@ async function observeLedger(config: ObserverConfig, observer: ObserverState): P
   if (job && jobChanged) {
     enqueue(observer, `job:${job.id}`, `🆕 Harness 已领取新任务\n${safeView(config, "status")}`);
     if (job.analysis) {
-      enqueue(observer, `analysis:${job.analysis.id}`, `🧭 Analyst 已给出恢复建议\n${safeView(config, "incident")}`);
+      enqueueAnalysis(config, observer, job, "🧭 Analyst 已给出恢复建议");
     } else if (job.incident) {
       enqueue(observer, `incident:${job.incident.id}`, `⛔️ Harness 任务已阻塞\n${safeView(config, "incident")}`);
     }
@@ -162,7 +175,7 @@ function observeJob(config: ObserverConfig, observer: ObserverState, job: Job): 
   const incidentChanged = job.incident?.id !== (observer.lastIncidentId ?? undefined);
   const analysisChanged = job.analysis?.id !== (observer.lastAnalysisId ?? undefined);
   if (job.analysis && analysisChanged) {
-    enqueue(observer, `analysis:${job.analysis.id}`, `🧭 Analyst 已给出恢复建议\n${safeView(config, "incident")}`);
+    enqueueAnalysis(config, observer, job, "🧭 Analyst 已给出恢复建议");
   } else if (job.incident && incidentChanged) {
     enqueue(observer, `incident:${job.incident.id}`, `⛔️ Harness 任务已阻塞\n${safeView(config, "incident")}`);
   }
@@ -306,19 +319,62 @@ function safeView(config: ObserverConfig, command: "status" | "incident"): strin
   return `详情读取失败：${clean(output.error?.message || output.stderr || `exit ${output.status}`, 700)}`;
 }
 
-function flushOutbox(config: ObserverConfig, state: ObserverState): void {
+async function flushOutbox(config: ObserverConfig, state: ObserverState): Promise<void> {
   for (;;) {
     const entry = state.outbox.find((candidate) => candidate.nextAttemptAt <= Date.now());
     if (!entry) return;
-    const sent = spawnSync(config.hermesBin, [
-      "--profile",
-      config.hermesProfile,
-      "send",
-      "--to",
-      config.target,
-      "--quiet",
-      entry.message,
-    ], { encoding: "utf8", timeout: 20_000, maxBuffer: 1024 * 1024 });
+    let sent: ReturnType<typeof spawnSync>;
+    if (entry.kind === "approval") {
+      let ledger: HarnessState;
+      try {
+        ledger = await new JsonStateStore(config.harnessStateDir).load();
+      } catch (error) {
+        retryEntry(config, state, entry, message(error));
+        return;
+      }
+      const job = ledger.activeJob;
+      if (
+        job?.state !== "blocked"
+        || job.analysis?.id !== entry.analysisId
+        || job.analysis.incidentId !== job.incident?.id
+        || !isRetryAction(job.analysis.action)
+      ) {
+        state.outbox = state.outbox.filter((candidate) => candidate !== entry);
+        saveState(config.observerState, state);
+        continue;
+      }
+      const requested = spawnSync(config.nodeBin, [
+        config.approvalScript,
+        "request",
+        "--config",
+        config.bridgeConfig,
+        "--json",
+      ], { encoding: "utf8", timeout: 15_000, maxBuffer: 1024 * 1024 });
+      const card = requested.status === 0 ? parseApprovalCard(requested.stdout, entry.analysisId) : null;
+      if (requested.status !== 0) {
+        sent = requested;
+      } else if (!card) {
+        retryEntry(config, state, entry, "approval script returned an invalid card payload");
+        return;
+      } else {
+        sent = spawnSync(config.hermesBin, ["--profile", config.hermesProfile, "harness-card"], {
+          encoding: "utf8",
+          input: JSON.stringify(card),
+          timeout: 20_000,
+          maxBuffer: 1024 * 1024,
+        });
+      }
+    } else {
+      sent = spawnSync(config.hermesBin, [
+        "--profile",
+        config.hermesProfile,
+        "send",
+        "--to",
+        config.target,
+        "--quiet",
+        entry.message,
+      ], { encoding: "utf8", timeout: 20_000, maxBuffer: 1024 * 1024 });
+    }
 
     if (sent.status === 0) {
       state.outbox = state.outbox.filter((candidate) => candidate !== entry);
@@ -327,24 +383,76 @@ function flushOutbox(config: ObserverConfig, state: ObserverState): void {
       continue;
     }
 
-    entry.attempts += 1;
-    entry.nextAttemptAt = Date.now() + RETRY_DELAYS_MS[Math.min(entry.attempts - 1, RETRY_DELAYS_MS.length - 1)]!;
-    saveState(config.observerState, state);
-    process.stderr.write(`${JSON.stringify({ ok: false, action: "notification_retry", key: entry.key, attempts: entry.attempts, error: clean(sent.error?.message || sent.stderr || `exit ${sent.status}`, 700) })}\n`);
+    retryEntry(config, state, entry, sent.error?.message || sent.stderr || `exit ${sent.status}`);
     return;
   }
+}
+
+function retryEntry(config: ObserverConfig, state: ObserverState, entry: OutboxEntry, error: string): void {
+  entry.attempts += 1;
+  entry.nextAttemptAt = Date.now() + RETRY_DELAYS_MS[Math.min(entry.attempts - 1, RETRY_DELAYS_MS.length - 1)]!;
+  saveState(config.observerState, state);
+  process.stderr.write(`${JSON.stringify({ ok: false, action: "notification_retry", key: entry.key, attempts: entry.attempts, error: clean(error, 700) })}\n`);
 }
 
 function enqueue(state: ObserverState, key: string, messageText: string): void {
   if (state.outbox.some((entry) => entry.key === key)) return;
   if (state.outbox.length >= MAX_OUTBOX) throw new Error(`observer outbox reached ${MAX_OUTBOX} entries`);
-  state.outbox.push({ key, message: bounded(messageText.trim()), attempts: 0, nextAttemptAt: 0 });
+  state.outbox.push({ kind: "text", key, message: bounded(messageText.trim()), attempts: 0, nextAttemptAt: 0 });
+}
+
+function enqueueAnalysis(config: ObserverConfig, state: ObserverState, job: Job, heading: string): void {
+  const analysis = job.analysis;
+  const exactRetry = job.state === "blocked"
+    && job.incident !== null
+    && analysis?.incidentId === job.incident.id
+    && isRetryAction(analysis.action)
+    && job.incident.allowedActions.includes(analysis.action)
+    && allowedActionsFor(job.incident.class, job.incident.lane).includes(analysis.action);
+  if (!exactRetry) {
+    enqueue(state, `analysis:${analysis?.id ?? job.revision}`, `${heading}\n${safeView(config, "incident")}`);
+    return;
+  }
+  const key = `approval:${analysis.id}`;
+  if (state.outbox.some((entry) => entry.key === key)) return;
+  if (state.outbox.length >= MAX_OUTBOX) throw new Error(`observer outbox reached ${MAX_OUTBOX} entries`);
+  state.outbox.push({ kind: "approval", key, analysisId: analysis.id, attempts: 0, nextAttemptAt: 0 });
+}
+
+function parseApprovalCard(output: string, analysisId: string): unknown | null {
+  try {
+    const value = JSON.parse(output) as {
+      ok?: unknown;
+      action?: unknown;
+      analysisId?: unknown;
+      card?: { text?: unknown; approveLabel?: unknown; approveCallback?: unknown; holdCallback?: unknown };
+    };
+    const card = value.card;
+    if (
+      value.ok !== true
+      || value.action !== "challenge_created"
+      || value.analysisId !== analysisId
+      || typeof card?.text !== "string"
+      || card.text.length === 0
+      || card.text.length > MAX_MESSAGE_LENGTH
+      || typeof card.approveLabel !== "string"
+      || card.approveLabel.length === 0
+      || card.approveLabel.length > 64
+      || typeof card.approveCallback !== "string"
+      || !/^hh:a:[0-9A-F]{16}$/.test(card.approveCallback)
+      || typeof card.holdCallback !== "string"
+      || !/^hh:h:[0-9A-F]{16}$/.test(card.holdCallback)
+    ) return null;
+    return card;
+  } catch {
+    return null;
+  }
 }
 
 function loadConfig(path: string): ObserverConfig {
   assertSecureAbsoluteFile(path, "bridge config");
   const parsed = JSON.parse(readFileSync(path, "utf8")) as Partial<ObserverConfigFile>;
-  const paths = ["harnessConfig", "nodeBin", "statusScript", "hermesBin", "observerState", "controllerLog"] as const;
+  const paths = ["harnessConfig", "nodeBin", "statusScript", "approvalScript", "hermesBin", "observerState", "controllerLog"] as const;
   for (const name of paths) {
     if (!parsed[name] || !isAbsolute(parsed[name])) throw new Error(`${name} must be an absolute path`);
   }
@@ -360,7 +468,7 @@ function loadConfig(path: string): ObserverConfig {
   const harness = JSON.parse(readFileSync(file.harnessConfig, "utf8")) as { stateDir?: unknown };
   if (typeof harness.stateDir !== "string" || !isAbsolute(harness.stateDir)) throw new Error("Harness config stateDir must be absolute");
   if (!existsSync(harness.stateDir)) throw new Error("Harness stateDir does not exist");
-  return { ...file, harnessStateDir: harness.stateDir };
+  return { ...file, bridgeConfig: path, harnessStateDir: harness.stateDir };
 }
 
 function assertSecureAbsoluteFile(path: string, label: string): void {
@@ -372,9 +480,15 @@ function assertSecureAbsoluteFile(path: string, label: string): void {
 function loadState(path: string): ObserverState {
   if (!existsSync(path)) return emptyState();
   assertSecureAbsoluteFile(path, "observer state");
-  const value = JSON.parse(readFileSync(path, "utf8")) as ObserverState;
+  const raw = JSON.parse(readFileSync(path, "utf8")) as ObserverState | (Omit<ObserverState, "version" | "outbox"> & {
+    version: 1;
+    outbox: Array<{ key: string; message: string; attempts: number; nextAttemptAt: number }>;
+  });
+  const value: ObserverState = raw.version === 1
+    ? { ...raw, version: 2, outbox: raw.outbox.map((entry) => ({ kind: "text" as const, ...entry })) }
+    : raw;
   if (
-    value.version !== 1
+    value.version !== 2
     || typeof value.initialized !== "boolean"
     || typeof value.ledgerInitialized !== "boolean"
     || typeof value.ledgerHealthy !== "boolean"
@@ -387,7 +501,11 @@ function loadState(path: string): ObserverState {
     || !Number.isInteger(value.terminalCount)
     || value.terminalCount < 0
     || !Array.isArray(value.outbox)
-    || value.outbox.some((entry) => !entry || typeof entry.key !== "string" || typeof entry.message !== "string" || !Number.isInteger(entry.attempts) || !Number.isFinite(entry.nextAttemptAt))
+    || value.outbox.some((entry) => !entry
+      || typeof entry.key !== "string"
+      || !Number.isInteger(entry.attempts)
+      || !Number.isFinite(entry.nextAttemptAt)
+      || (entry.kind === "text" ? typeof entry.message !== "string" : entry.kind !== "approval" || typeof entry.analysisId !== "string"))
   ) {
     throw new Error("invalid observer state");
   }
@@ -396,7 +514,7 @@ function loadState(path: string): ObserverState {
 
 function emptyState(): ObserverState {
   return {
-    version: 1,
+    version: 2,
     initialized: false,
     ledgerInitialized: false,
     ledgerHealthy: true,

@@ -100,7 +100,7 @@ function renderIncident(state: HarnessState): string {
   if (analysis.action === "hold") {
     lines.push("下一步：Analyst 建议 hold；没有可批准的 fresh retry。");
   } else {
-    lines.push("下一步：第一阶段尚未启用 Telegram 批准；请在 Mac mini 使用 Harness 的精确 approve 命令。");
+    lines.push("下一步：使用当前 Telegram 决策卡批准 fresh retry，或发送 /harness approve 获取新的 10 分钟挑战。");
   }
   return lines.join("\n");
 }
@@ -114,7 +114,7 @@ function nextStep(job: Job): string {
     case "reviewer_running": return "等待 Reviewer 产生 durable result。";
     case "publish_ready": return "Controller 将推送分支并创建 PR。";
     case "awaiting_merge": return "等待 required checks、auto-merge 或新的 CI incident。";
-    case "blocked": return "查看 /harness incident；第一阶段不接受 Telegram 批准。";
+    case "blocked": return "查看 /harness incident；若 Analyst 给出精确 fresh retry，使用 Telegram 决策卡处理。";
     case "recovery_approved": return "Controller 将重新校验并消费已批准恢复。";
     case "done": return "任务已完成。";
     case "cancelled": return "任务已取消。";

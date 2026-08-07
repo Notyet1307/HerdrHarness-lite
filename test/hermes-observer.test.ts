@@ -7,10 +7,10 @@ import { spawnSync } from "node:child_process";
 
 type ObserverState = {
   controllerLogOffset: number;
-  outbox: Array<{ message: string; attempts: number; nextAttemptAt: number }>;
+  outbox: Array<{ kind: "text" | "approval"; message?: string; analysisId?: string; attempts: number; nextAttemptAt: number }>;
 };
 
-test("Hermes observer is notify-only, baselines old logs, and retries a durable outbox", () => {
+test("Hermes observer baselines old logs and retries text or approval-card deliveries", () => {
   const root = mkdtempSync(join(tmpdir(), "herdr-hermes-observer-"));
   try {
     const stateDir = join(root, "harness-state");
@@ -32,8 +32,8 @@ test("Hermes observer is notify-only, baselines old logs, and retries a durable 
     assert.equal(first.status, 0);
     let observer = readObserver(observerState);
     assert.equal(observer.outbox.length, 1);
-    assert.match(observer.outbox[0]!.message, /仅通知；不能审批、不能恢复/);
-    assert.ok(!observer.outbox[0]!.message.includes("historical failure"));
+    assert.match(observer.outbox[0]!.message ?? "", /通知与决策入口/);
+    assert.ok(!(observer.outbox[0]!.message ?? "").includes("historical failure"));
     assert.equal(observer.outbox[0]!.attempts, 1);
 
     observer.outbox[0]!.nextAttemptAt = 0;
@@ -48,13 +48,13 @@ test("Hermes observer is notify-only, baselines old logs, and retries a durable 
     writeBridge("/usr/bin/false");
     assert.equal(runObserver().status, 0);
     observer = readObserver(observerState);
-    assert.ok(observer.outbox.some((entry) => entry.message.includes("Analyst 已给出恢复建议")));
-    assert.ok(observer.outbox.every((entry) => !entry.message.includes("SECRET ISSUE BODY")));
+    assert.ok(observer.outbox.some((entry) => entry.kind === "approval" && entry.analysisId === "analysis-001"));
+    assert.ok(observer.outbox.every((entry) => !(entry.message ?? "").includes("SECRET ISSUE BODY")));
 
     appendFileSync(controllerLog, `${JSON.stringify({ ok: false, action: "preflight_failed", jobId: "job-001", message: "provider probe failed" })}\n`, { encoding: "utf8" });
     assert.equal(runObserver().status, 0);
     observer = readObserver(observerState);
-    assert.ok(observer.outbox.some((entry) => entry.message.includes("preflight_failed") && entry.message.includes("未执行自动恢复")));
+    assert.ok(observer.outbox.some((entry) => (entry.message ?? "").includes("preflight_failed") && (entry.message ?? "").includes("未执行自动恢复")));
     assert.equal(readFileSync(ledgerPath, "utf8"), blockedLedger);
 
     function writeBridge(hermesBin: string): void {
@@ -62,6 +62,10 @@ test("Hermes observer is notify-only, baselines old logs, and retries a durable 
         harnessConfig,
         nodeBin: process.execPath,
         statusScript: resolve("dist/src/hermes-status.js"),
+        approvalScript: resolve("dist/src/hermes-approval.js"),
+        harnessCliScript: resolve("dist/src/cli.js"),
+        approvalState: join(root, "approval", "state.json"),
+        telegramAllowedUser: "123456789",
         hermesBin,
         hermesProfile: "harness",
         target: "telegram",

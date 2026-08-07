@@ -108,7 +108,7 @@ test("Hermes status stays read-only and renders bounded ledger facts", () => {
     const blocked = run("incident", bridgeConfig);
     assert.equal(blocked.status, 0);
     assert.match(blocked.stdout, /Analyst 建议：retry_fresh_reviewer/);
-    assert.match(blocked.stdout, /尚未启用 Telegram 批准/);
+    assert.match(blocked.stdout, /Telegram 决策卡/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
