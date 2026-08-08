@@ -88,12 +88,14 @@ export class MemoryStore implements StateStore {
 
 export class FakeGitHub implements GitHubPort {
   claims: Array<{ issue: number; jobId: string }> = [];
+  releasedClaims: number[] = [];
   published: PullRequestRef[] = [];
   suspended: number[] = [];
   mergeStatus: "open" | "merged" | "closed_unmerged" = "open";
   autoMergeEnabled = false;
   requiredChecks: PullRequestCheck[] = [];
   suspendFailure: Error | null = null;
+  releaseClaimFailure: Error | null = null;
 
   constructor(public graph: IssueSnapshot[]) {}
 
@@ -121,6 +123,13 @@ export class FakeGitHub implements GitHubPort {
     if (!issue) throw new Error(`missing issue #${input.issueNumber}`);
     issue.labels = issue.labels.filter((label) => label !== input.claimLabel);
     if (!issue.labels.includes(input.readyLabel)) issue.labels.push(input.readyLabel);
+  }
+
+  async releaseIssueClaim(input: { repo: string; issueNumber: number; claimLabel: string }): Promise<void> {
+    if (this.releaseClaimFailure) throw this.releaseClaimFailure;
+    this.releasedClaims.push(input.issueNumber);
+    const issue = this.graph.find((candidate) => candidate.number === input.issueNumber);
+    if (issue) issue.labels = issue.labels.filter((label) => label !== input.claimLabel);
   }
 
   async publish(input: {

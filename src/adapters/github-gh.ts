@@ -128,6 +128,25 @@ export class GitHubGh implements GitHubPort {
     );
   }
 
+  async releaseIssueClaim(input: {
+    repo: string;
+    issueNumber: number;
+    claimLabel: string;
+  }): Promise<void> {
+    requireSuccess(
+      this.runner.run("gh", [
+        "issue",
+        "edit",
+        String(input.issueNumber),
+        "--repo",
+        input.repo,
+        "--remove-label",
+        input.claimLabel,
+      ]),
+      `release issue #${input.issueNumber} claim`,
+    );
+  }
+
   async publish(input: {
     repo: string;
     issueNumber: number;

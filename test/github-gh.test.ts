@@ -5,6 +5,22 @@ import type { CommandResult, CommandRunner } from "../src/adapters/command.js";
 
 const headSha = "b".repeat(40);
 
+test("releasing an issue claim removes only the claim label", async () => {
+  const runner = new PublishRunner();
+  const github = new GitHubGh(runner);
+
+  await github.releaseIssueClaim({
+    repo: "owner/repo",
+    issueNumber: 73,
+    claimLabel: "agent:claimed",
+  });
+
+  assert.deepEqual(runner.calls.at(-1), {
+    command: "gh",
+    args: ["issue", "edit", "73", "--repo", "owner/repo", "--remove-label", "agent:claimed"],
+  });
+});
+
 test("publishing in auto mode enables native auto-merge for the reviewed head", async () => {
   const runner = new PublishRunner();
   const github = new GitHubGh(runner, true);
@@ -140,6 +156,7 @@ class PublishRunner implements CommandRunner {
   run(command: string, args: string[]): CommandResult {
     this.calls.push({ command, args: [...args] });
     if (command === "git") return ok("");
+    if (args[0] === "issue" && args[1] === "edit") return ok("");
     if (args[0] === "pr" && args[1] === "list") return ok("[]");
     if (args[0] === "pr" && args[1] === "create") return ok("https://github.com/owner/repo/pull/42\n");
     if (args[0] === "pr" && args[1] === "view") {

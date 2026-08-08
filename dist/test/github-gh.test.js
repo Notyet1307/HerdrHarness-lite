@@ -2,6 +2,19 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { GitHubGh } from "../src/adapters/github-gh.js";
 const headSha = "b".repeat(40);
+test("releasing an issue claim removes only the claim label", async () => {
+    const runner = new PublishRunner();
+    const github = new GitHubGh(runner);
+    await github.releaseIssueClaim({
+        repo: "owner/repo",
+        issueNumber: 73,
+        claimLabel: "agent:claimed",
+    });
+    assert.deepEqual(runner.calls.at(-1), {
+        command: "gh",
+        args: ["issue", "edit", "73", "--repo", "owner/repo", "--remove-label", "agent:claimed"],
+    });
+});
 test("publishing in auto mode enables native auto-merge for the reviewed head", async () => {
     const runner = new PublishRunner();
     const github = new GitHubGh(runner, true);
@@ -118,6 +131,8 @@ class PublishRunner {
     run(command, args) {
         this.calls.push({ command, args: [...args] });
         if (command === "git")
+            return ok("");
+        if (args[0] === "issue" && args[1] === "edit")
             return ok("");
         if (args[0] === "pr" && args[1] === "list")
             return ok("[]");

@@ -81,6 +81,11 @@ export interface GitHubPort {
     claimLabel: string;
     readyLabel: string;
   }): Promise<void>;
+  releaseIssueClaim(input: {
+    repo: string;
+    issueNumber: number;
+    claimLabel: string;
+  }): Promise<void>;
   publish(input: {
     repo: string;
     issueNumber: number;

@@ -77,6 +77,17 @@ export class GitHubGh {
             input.claimLabel,
         ]), `requeue issue #${input.issueNumber}`);
     }
+    async releaseIssueClaim(input) {
+        requireSuccess(this.runner.run("gh", [
+            "issue",
+            "edit",
+            String(input.issueNumber),
+            "--repo",
+            input.repo,
+            "--remove-label",
+            input.claimLabel,
+        ]), `release issue #${input.issueNumber} claim`);
+    }
     async publish(input) {
         requireSuccess(this.runner.run("git", ["-C", input.worktreePath, "push", "--set-upstream", "origin", input.branch]), "git push reviewed branch");
         const existingRaw = requireSuccess(this.runner.run("gh", [

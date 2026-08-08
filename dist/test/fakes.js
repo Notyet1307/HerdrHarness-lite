@@ -79,12 +79,14 @@ export class MemoryStore {
 export class FakeGitHub {
     graph;
     claims = [];
+    releasedClaims = [];
     published = [];
     suspended = [];
     mergeStatus = "open";
     autoMergeEnabled = false;
     requiredChecks = [];
     suspendFailure = null;
+    releaseClaimFailure = null;
     constructor(graph) {
         this.graph = graph;
     }
@@ -113,6 +115,14 @@ export class FakeGitHub {
         issue.labels = issue.labels.filter((label) => label !== input.claimLabel);
         if (!issue.labels.includes(input.readyLabel))
             issue.labels.push(input.readyLabel);
+    }
+    async releaseIssueClaim(input) {
+        if (this.releaseClaimFailure)
+            throw this.releaseClaimFailure;
+        this.releasedClaims.push(input.issueNumber);
+        const issue = this.graph.find((candidate) => candidate.number === input.issueNumber);
+        if (issue)
+            issue.labels = issue.labels.filter((label) => label !== input.claimLabel);
     }
     async publish(input) {
         const pr = { number: 42, url: "https://example.test/pr/42", headSha: input.headSha };

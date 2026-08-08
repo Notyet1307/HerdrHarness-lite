@@ -993,6 +993,19 @@ export class HarnessController {
         catch (error) {
             return result(false, "archived", job.id, `Codex Analyst could not be closed safely: ${message(error)}`);
         }
+        let warning = "";
+        if (job.state === "done") {
+            try {
+                await this.deps.github.releaseIssueClaim({
+                    repo: this.deps.config.repo,
+                    issueNumber: job.task.issueNumber,
+                    claimLabel: this.deps.config.claimLabel,
+                });
+            }
+            catch (error) {
+                warning = `; warning: claim label cleanup failed: ${message(error)}`;
+            }
+        }
         const terminal = {
             id: job.id,
             repo: job.task.repo,
@@ -1006,7 +1019,7 @@ export class HarnessController {
             ? state.terminalJobs
             : [...state.terminalJobs, terminal];
         await this.deps.store.save({ version: 1, activeJob: null, terminalJobs }, job.revision);
-        return result(true, "archived", job.id, `${job.state} job archived; the slot is free`);
+        return result(true, "archived", job.id, `${job.state} job archived; the slot is free${warning}`);
     }
     async block(state, job, input) {
         const now = this.deps.clock.now();
