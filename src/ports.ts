@@ -75,6 +75,12 @@ export interface GitHubPort {
     claimLabel: string;
     readyLabel: string;
   }): Promise<void>;
+  requeueIssue(input: {
+    repo: string;
+    issueNumber: number;
+    claimLabel: string;
+    readyLabel: string;
+  }): Promise<void>;
   publish(input: {
     repo: string;
     issueNumber: number;
@@ -106,6 +112,13 @@ export interface GitPort {
     expectedRemoteHeadSha: string | null;
     allowedResultPaths: string[];
   }): Promise<WorkerVerification>;
+  prepareWorkerResult(input: {
+    worktree: WorktreeHandle;
+    rootPath: string;
+    resultPath: string;
+    jobId: string;
+    attemptId: string;
+  }): Promise<{ descriptorPath: string }>;
   prepareReviewer(input: {
     worktree: WorktreeHandle;
     rootPath: string;

@@ -107,6 +107,14 @@ test("Hermes status stays read-only and renders bounded ledger facts", () => {
         assert.equal(blocked.status, 0);
         assert.match(blocked.stdout, /Analyst 建议：retry_fresh_reviewer/);
         assert.match(blocked.stdout, /Telegram 决策卡/);
+        const notification = run("notification", bridgeConfig);
+        assert.equal(notification.status, 0);
+        assert.match(notification.stdout, /^任务：owner\/repo#48 Expose durable status/m);
+        assert.match(notification.stdout, /原因：provider sessions are full/);
+        assert.match(notification.stdout, /建议：Start a fresh Reviewer against the unchanged HEAD\./);
+        assert.ok(!notification.stdout.includes("revision"));
+        assert.ok(!notification.stdout.includes("Incident："));
+        assert.ok(!notification.stdout.includes("Telegram 决策卡"));
         const summary = run("summary", bridgeConfig);
         assert.equal(summary.status, 0);
         assert.match(summary.stdout, /owner\/repo#48 · BLOCKED · revision 12/);

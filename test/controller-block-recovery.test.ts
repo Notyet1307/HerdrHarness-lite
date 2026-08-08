@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { HarnessController } from "../src/controller.js";
 import { assertJobInvariant } from "../src/model.js";
-import { approveRecovery, reassessIncident, resolveDecision } from "../src/recovery.js";
+import { approveRecovery, cancelHeldJob, reassessIncident, resolveDecision } from "../src/recovery.js";
 import type { HarnessConfig } from "../src/ports.js";
 import {
   FakeAnalyst,
@@ -33,6 +33,50 @@ const config: HarnessConfig = {
   workerArgv: validWorkerArgv,
   reviewerArgv: validReviewerArgv,
 };
+
+test("an exact held pre-PR job can be cancelled, archived, and selected again", async () => {
+  const store = new MemoryStore();
+  const clock = new FakeClock();
+  const ids = new SequenceIds();
+  const github = new FakeGitHub([issue({ number: 73, title: "Requeue held integrity work" })]);
+  const herdr = new FakeHerdr([{ lane: "worker", status: "blocked", summary: "old runtime cannot publish a trusted result" }]);
+  const controller = new HarnessController({
+    config,
+    store,
+    github,
+    git: new FakeGit(),
+    herdr,
+    analyst: new FakeAnalyst(),
+    evidence: new FakeEvidence(),
+    clock,
+    ids,
+    preflight: new FakeRuntimePreflight(),
+  });
+
+  for (let index = 0; index < 9; index += 1) await controller.tick();
+  const held = store.state.activeJob!;
+  assert.equal(held.state, "blocked");
+  assert.equal(held.analysis?.action, "hold");
+
+  await cancelHeldJob(store, {
+    expectedRevision: held.revision,
+    incidentId: held.incident!.id,
+    analysisId: held.analysis!.id,
+    actor: "human@example.test",
+    reason: "Retire the fail-closed run and let the corrected runtime claim a new job.",
+  }, { clock, ids });
+  assert.equal(store.state.activeJob?.state, "cancelled");
+
+  assert.equal((await controller.tick()).action, "archived");
+  assert.equal(store.state.terminalJobs[0]?.state, "cancelled");
+  assert.ok(github.graph[0]?.labels.includes("ready-for-agent"));
+  assert.ok(!github.graph[0]?.labels.includes("agent:claimed"));
+  assert.equal(herdr.closed.length, 1);
+
+  assert.equal((await controller.tick()).action, "selected");
+  assert.equal(store.state.activeJob?.task.issueNumber, 73);
+  assert.ok(store.state.activeJob?.id !== held.id);
+});
 
 test("blocked work cannot resume before exact human approval and recovery always uses a fresh worker", async () => {
   const store = new MemoryStore();
@@ -122,7 +166,7 @@ test("blocked work cannot resume before exact human approval and recovery always
   for (let index = 0; index < 3; index += 1) await controller.tick();
   const recoveryPrompt = herdr.prompts.at(-1)?.text ?? "";
   assert.match(recoveryPrompt, /Keep the public interface unchanged/);
-  assert.match(recoveryPrompt, new RegExp(freshAttemptId));
+  assert.equal(recoveryPrompt.includes(freshAttemptId), false);
 });
 
 test("Reviewer infrastructure failure resumes with a fresh Reviewer on the same HEAD", async () => {

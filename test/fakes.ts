@@ -5,6 +5,7 @@ import type { AnalystPort, Clock, EvidencePort, GitHubPort, GitPort, HerdrPort, 
 export const validCodeReviewSkillPath = resolve("pi/skills/code-review");
 export const validFocusedSelfCheckSkillPath = resolve("pi/skills/focused-self-check");
 export const validPiSubagentsExtensionPath = resolve("test/fixtures/pi-subagents/index.js");
+export const validWorkerToolsExtensionPath = resolve("pi/extensions/worker-tools.js");
 export const validReviewerToolsExtensionPath = resolve("pi/extensions/reviewer-tools.js");
 export const validImplementSkillPath = resolve("test/fixtures/pi-skills/skills/implement");
 export const validTddSkillPath = resolve("test/fixtures/pi-skills/skills/tdd");
@@ -14,10 +15,12 @@ export const untrustedImplementSkillPath = resolve("test/fixtures/untrusted-skil
 export const validWorkerArgv = [
   "--no-approve",
   "--no-skills",
+  "--no-extensions",
+  "--extension", validWorkerToolsExtensionPath,
   "--skill", validImplementSkillPath,
   "--skill", validTddSkillPath,
   "--skill", validFocusedSelfCheckSkillPath,
-  "--tools", "read,bash,edit,write,grep,find,ls",
+  "--tools", "read,bash,edit,write,grep,find,ls,worker_submit",
   "--thinking", "high",
 ];
 
@@ -113,6 +116,13 @@ export class FakeGitHub implements GitHubPort {
     }
   }
 
+  async requeueIssue(input: { repo: string; issueNumber: number; claimLabel: string; readyLabel: string }): Promise<void> {
+    const issue = this.graph.find((candidate) => candidate.number === input.issueNumber);
+    if (!issue) throw new Error(`missing issue #${input.issueNumber}`);
+    issue.labels = issue.labels.filter((label) => label !== input.claimLabel);
+    if (!issue.labels.includes(input.readyLabel)) issue.labels.push(input.readyLabel);
+  }
+
   async publish(input: {
     repo: string;
     issueNumber: number;
@@ -163,6 +173,10 @@ export class FakeGit implements GitPort {
       expectedRemoteHeadSha: input.expectedRemoteHeadSha,
     });
     return this.workerFailure ? { ok: false, ...this.workerFailure } : { ok: true, headSha: input.reportedHeadSha };
+  }
+
+  async prepareWorkerResult(input: { rootPath: string }): Promise<{ descriptorPath: string }> {
+    return { descriptorPath: join(input.rootPath, "descriptor.json") };
   }
 
   async prepareReviewer(input: { rootPath: string; validationArgv: string[]; dockerHost: string | null }): Promise<{ reviewPath: string; descriptorPath: string; evidencePath: string }> {

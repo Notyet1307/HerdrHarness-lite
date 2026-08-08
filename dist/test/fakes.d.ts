@@ -3,6 +3,7 @@ import type { AnalystPort, Clock, EvidencePort, GitHubPort, GitPort, HerdrPort, 
 export declare const validCodeReviewSkillPath: string;
 export declare const validFocusedSelfCheckSkillPath: string;
 export declare const validPiSubagentsExtensionPath: string;
+export declare const validWorkerToolsExtensionPath: string;
 export declare const validReviewerToolsExtensionPath: string;
 export declare const validImplementSkillPath: string;
 export declare const validTddSkillPath: string;
@@ -69,6 +70,12 @@ export declare class FakeGitHub implements GitHubPort {
         claimLabel: string;
         readyLabel: string;
     }): Promise<void>;
+    requeueIssue(input: {
+        repo: string;
+        issueNumber: number;
+        claimLabel: string;
+        readyLabel: string;
+    }): Promise<void>;
     publish(input: {
         repo: string;
         issueNumber: number;
@@ -105,6 +112,11 @@ export declare class FakeGit implements GitPort {
         ok: false;
         class: "integrity_violation" | "stale_task";
         reason: string;
+    }>;
+    prepareWorkerResult(input: {
+        rootPath: string;
+    }): Promise<{
+        descriptorPath: string;
     }>;
     prepareReviewer(input: {
         rootPath: string;

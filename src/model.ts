@@ -222,6 +222,16 @@ export type Reassessment = {
   createdAt: string;
 };
 
+export type Cancellation = {
+  id: string;
+  jobRevision: number;
+  incidentId: string;
+  analysisId: string;
+  actor: string;
+  reason: string;
+  createdAt: string;
+};
+
 export type PullRequestRef = {
   number: number;
   url: string;
@@ -284,6 +294,7 @@ export type Job = {
   incident: Incident | null;
   analysis: AnalystAdvice | null;
   approval: Approval | null;
+  cancellation?: Cancellation | null;
   reassessments?: Reassessment[];
   pullRequest: PullRequestRef | null;
   /** Optional for backward compatibility with V1 ledgers created before CI feedback. */
@@ -301,6 +312,7 @@ export type TerminalJob = {
   issueNumber: number;
   state: "done" | "cancelled";
   finishedAt: string;
+  cancellation?: Cancellation | null;
   reassessments?: Reassessment[];
 };
 
@@ -363,6 +375,17 @@ export function assertJobInvariant(job: Job): void {
   if (job.state === "recovery_approved" && !job.approval) {
     throw new Error("recovery_approved job requires an approval");
   }
+  if (job.state === "cancelled" && !job.cancellation) throw new Error("cancelled job requires a cancellation record");
+  if (job.cancellation && (
+    !Number.isInteger(job.cancellation.jobRevision)
+    || job.cancellation.jobRevision < 0
+    || !isBoundedText(job.cancellation.id, 512)
+    || !isBoundedText(job.cancellation.incidentId, 512)
+    || !isBoundedText(job.cancellation.analysisId, 512)
+    || !isBoundedText(job.cancellation.actor, 512)
+    || !isBoundedText(job.cancellation.reason, 2_000)
+    || !Number.isFinite(Date.parse(job.cancellation.createdAt))
+  )) throw new Error("job has an invalid cancellation record");
   const ciReworkCount = job.ciReworkCount ?? 0;
   if (!Number.isInteger(ciReworkCount) || ciReworkCount < 0 || ciReworkCount > MAX_CI_REWORKS) {
     throw new Error("job has an invalid CI rework count");
@@ -434,14 +457,14 @@ export function assertJobInvariant(job: Job): void {
   if (
     job.activeAttempt &&
     job.activeAttempt.lane === "worker" &&
-    !["worker_running", "blocked", "recovery_approved"].includes(job.state)
+    !["worker_running", "blocked", "recovery_approved", "cancelled"].includes(job.state)
   ) {
     throw new Error("worker attempt is bound to an invalid state");
   }
   if (
     job.activeAttempt &&
     job.activeAttempt.lane === "reviewer" &&
-    !["reviewer_running", "blocked", "recovery_approved"].includes(job.state)
+    !["reviewer_running", "blocked", "recovery_approved", "cancelled"].includes(job.state)
   ) {
     throw new Error("reviewer attempt is bound to an invalid state");
   }

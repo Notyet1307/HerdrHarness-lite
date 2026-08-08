@@ -6,6 +6,7 @@ import { dirname, isAbsolute, join } from "node:path";
 import { JsonStateStore } from "./adapters/json-store.js";
 import { isRetryAction } from "./model.js";
 import { allowedActionsFor } from "./policy.js";
+import { controllerHeartbeatPath } from "./controller-heartbeat.js";
 const MAX_MESSAGE_LENGTH = 3_900;
 const MAX_OUTBOX = 512;
 const LOG_CHUNK_BYTES = 1024 * 1024;
@@ -62,7 +63,7 @@ async function observeLedger(config, observer) {
             enqueueAnalysis(config, observer, ledger.activeJob, "🧭 当前任务已有 Analyst 恢复建议");
         }
         else if (ledger.activeJob?.incident) {
-            enqueue(observer, `incident:${ledger.activeJob.incident.id}`, `⛔️ 当前 Harness 任务已阻塞\n${safeView(config, "incident")}`);
+            enqueue(observer, `incident:${ledger.activeJob.incident.id}`, safeView(config, "notification"));
         }
         return;
     }
@@ -83,7 +84,7 @@ async function observeLedger(config, observer) {
             enqueueAnalysis(config, observer, job, "🧭 Analyst 已给出恢复建议");
         }
         else if (job.incident) {
-            enqueue(observer, `incident:${job.incident.id}`, `⛔️ Harness 任务已阻塞\n${safeView(config, "incident")}`);
+            enqueue(observer, `incident:${job.incident.id}`, safeView(config, "notification"));
         }
     }
     else if (job) {
@@ -104,7 +105,7 @@ function observeJob(config, observer, job) {
         enqueueAnalysis(config, observer, job, "🧭 Analyst 已给出恢复建议");
     }
     else if (job.incident && incidentChanged) {
-        enqueue(observer, `incident:${job.incident.id}`, `⛔️ Harness 任务已阻塞\n${safeView(config, "incident")}`);
+        enqueue(observer, `incident:${job.incident.id}`, safeView(config, "notification"));
     }
     if (job.state === observer.lastJobState)
         return;
@@ -217,11 +218,11 @@ function observeControllerEvent(config, observer, line, position) {
     ].join("\n"));
     if (event.action === "preflight_failed") {
         observer.controllerDown = true;
-        observer.controllerDownLogMtimeMs = safeLogMtime(config.controllerLog);
+        observer.controllerDownLogMtimeMs = safeLogMtime(config.controllerHeartbeat);
     }
 }
 function observeHeartbeat(config, observer) {
-    const mtime = safeLogMtime(config.controllerLog);
+    const mtime = safeLogMtime(config.controllerHeartbeat);
     const stale = mtime === 0 || Date.now() - mtime > config.heartbeatTimeoutMs;
     if (stale && !observer.controllerDown) {
         observer.controllerDown = true;
@@ -343,7 +344,7 @@ function enqueueAnalysis(config, state, job, heading) {
         && job.incident.allowedActions.includes(analysis.action)
         && allowedActionsFor(job.incident.class, job.incident.lane).includes(analysis.action);
     if (!exactRetry) {
-        enqueue(state, `analysis:${analysis?.id ?? job.revision}`, `${heading}\n${safeView(config, "incident")}`);
+        enqueue(state, `analysis:${analysis?.id ?? job.revision}`, safeView(config, "notification"));
         return;
     }
     const key = `approval:${analysis.id}`;
@@ -399,7 +400,12 @@ function loadConfig(path) {
         throw new Error("Harness config stateDir must be absolute");
     if (!existsSync(harness.stateDir))
         throw new Error("Harness stateDir does not exist");
-    return { ...file, bridgeConfig: path, harnessStateDir: harness.stateDir };
+    return {
+        ...file,
+        bridgeConfig: path,
+        harnessStateDir: harness.stateDir,
+        controllerHeartbeat: controllerHeartbeatPath(harness.stateDir),
+    };
 }
 function assertSecureAbsoluteFile(path, label) {
     if (!isAbsolute(path))

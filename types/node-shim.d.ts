@@ -1,6 +1,8 @@
 declare const process: {
   argv: string[];
   execPath: string;
+  pid: number;
+  ppid: number;
   cwd(): string;
   env: Record<string, string | undefined>;
   stdout: { write(value: string): void };
@@ -36,6 +38,11 @@ declare module "node:buffer" {
 }
 
 declare module "node:child_process" {
+  export function spawn(
+    command: string,
+    args?: readonly string[],
+    options?: { stdio?: "ignore" },
+  ): { pid?: number; unref(): void; kill(signal?: "SIGTERM"): boolean };
   export interface SpawnSyncReturns<T> {
     status: number | null;
     stdout: T;
@@ -72,6 +79,7 @@ declare module "node:fs" {
     isSymbolicLink(): boolean;
   };
   export function statSync(path: string): { size: number; mtimeMs: number };
+  export function utimesSync(path: string, atime: Date | number, mtime: Date | number): void;
   export function realpathSync(path: string): string;
   export function writeFileSync(
     path: string,

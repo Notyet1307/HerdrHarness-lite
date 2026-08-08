@@ -8,6 +8,7 @@ Copy `bridge.config.example.json` once per repository. Each copy must have:
 
 - a unique `laneId` using 1-32 lowercase letters, digits, or hyphens;
 - its own `harnessConfig`, `approvalState`, `observerState`, and `controllerLog`;
+- a Controller heartbeat derived from `<stateDir>/controller-heartbeat.json`, independent of Controller log traffic;
 - the same `telegramAllowedUser` as every other lane;
 - a Harness config with a unique `stateDir`, `worktreeRoot`, and `herdr.session`.
 

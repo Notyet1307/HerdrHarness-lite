@@ -39,7 +39,9 @@ import { pathIsWithin, pathsOverlap } from "./path-safety.js";
 
 const BUNDLED_CODE_REVIEW_SKILL = resolve(import.meta.dirname, "../../pi/skills/code-review");
 const BUNDLED_FOCUSED_SELF_CHECK_SKILL = resolve(import.meta.dirname, "../../pi/skills/focused-self-check");
+const BUNDLED_WORKER_TOOLS_EXTENSION = resolve(import.meta.dirname, "../../pi/extensions/worker-tools.js");
 const BUNDLED_REVIEWER_TOOLS_EXTENSION = resolve(import.meta.dirname, "../../pi/extensions/reviewer-tools.js");
+const WORKER_DESCRIPTOR_ENV = "HERDR_HARNESS_WORKER_DESCRIPTOR";
 const REVIEW_DESCRIPTOR_ENV = "HERDR_HARNESS_REVIEW_DESCRIPTOR";
 const REVIEW_SUBAGENT_CEILING_ENV = "PI_SUBAGENT_CAPABILITY_CEILING_V1";
 const REVIEW_SUBAGENT_CEILING = Buffer.from(JSON.stringify({
@@ -134,7 +136,7 @@ export class HarnessController {
 
   private async selectJob(state: HarnessState): Promise<TickResult> {
     const graph = await this.deps.github.listIssueGraph(this.deps.config.repo, this.deps.config.readyLabel);
-    const claimed = new Set(state.terminalJobs.map((terminal) => terminal.issueNumber));
+    const claimed = new Set(state.terminalJobs.filter((terminal) => terminal.state === "done").map((terminal) => terminal.issueNumber));
     const selected = selectNextTask(graph, {
       readyLabel: this.deps.config.readyLabel,
       claimedIssueNumbers: claimed,
@@ -195,7 +197,7 @@ export class HarnessController {
         const graph = await this.deps.github.listIssueGraph(this.deps.config.repo, this.deps.config.readyLabel);
         selected = selectNextTask(graph, {
           readyLabel: this.deps.config.readyLabel,
-          claimedIssueNumbers: new Set(state.terminalJobs.map((terminal) => terminal.issueNumber)),
+          claimedIssueNumbers: new Set(state.terminalJobs.filter((terminal) => terminal.state === "done").map((terminal) => terminal.issueNumber)),
         }).selected;
         if (!selected || selected.issue.number !== job.task.issueNumber || selected.mapNumber !== job.task.mapNumber) {
           return this.block(state, job, {
@@ -316,9 +318,9 @@ export class HarnessController {
 
     const attemptId = this.deps.ids.next(lane);
     const now = this.deps.clock.now();
-    const reviewerRoot = resolve(
+    const attemptRoot = resolve(
       this.deps.config.stateDir,
-      "reviewer-attempts",
+      `${lane}-attempts`,
       safeToken(job.id),
       safeToken(attemptId),
     );
@@ -331,7 +333,7 @@ export class HarnessController {
       expectedHeadSha: lane === "reviewer" ? job.headSha : null,
       expectedRemoteHeadSha: lane === "worker" ? (job.pullRequest?.headSha ?? null) : null,
       resultPath: lane === "reviewer"
-        ? resolve(reviewerRoot, "result.json")
+        ? resolve(attemptRoot, "result.json")
         : `${trimSlash(job.worktree.path)}/.harness/attempt-${safeToken(attemptId)}.json`,
       ...(lane === "reviewer" ? { reviewerValidationArgv: [...this.deps.config.reviewerValidationArgv] } : {}),
       promptDigest: "",
@@ -379,7 +381,17 @@ export class HarnessController {
       try {
         let cwd = job.worktree.path;
         let env: Record<string, string> = lane === "worker" ? { PYTHONDONTWRITEBYTECODE: "1" } : {};
-        if (lane === "worker" && preflight.dockerHost) env.DOCKER_HOST = preflight.dockerHost;
+        if (lane === "worker") {
+          const channel = await this.deps.git.prepareWorkerResult({
+            worktree: job.worktree,
+            rootPath: resolve(this.deps.config.stateDir, "worker-attempts", safeToken(job.id), safeToken(attempt.id)),
+            resultPath: attempt.resultPath,
+            jobId: job.id,
+            attemptId: attempt.id,
+          });
+          env[WORKER_DESCRIPTOR_ENV] = channel.descriptorPath;
+          if (preflight.dockerHost) env.DOCKER_HOST = preflight.dockerHost;
+        }
         if (lane === "reviewer") {
           if (!attempt.expectedHeadSha) throw new Error("Reviewer attempt has no expected HEAD");
           if (!validReviewerValidationArgv(attempt.reviewerValidationArgv)) {
@@ -1111,6 +1123,19 @@ export class HarnessController {
   }
 
   private async archive(state: HarnessState, job: Job): Promise<TickResult> {
+    if (job.state === "cancelled") {
+      try {
+        if (job.activeAttempt?.handle) await this.deps.herdr.close(job.activeAttempt.handle);
+        await this.deps.github.requeueIssue({
+          repo: this.deps.config.repo,
+          issueNumber: job.task.issueNumber,
+          claimLabel: this.deps.config.claimLabel,
+          readyLabel: this.deps.config.readyLabel,
+        });
+      } catch (error) {
+        return result(false, "archived", job.id, `cancelled job could not be requeued safely: ${message(error)}`);
+      }
+    }
     try {
       await this.deps.analyst.close({ jobId: job.id, taskDigest: job.task.digest, session: job.analyst });
     } catch (error) {
@@ -1122,6 +1147,7 @@ export class HarnessController {
       issueNumber: job.task.issueNumber,
       state: job.state as "done" | "cancelled",
       finishedAt: job.updatedAt,
+      cancellation: job.cancellation ?? null,
       reassessments: job.reassessments ?? [],
     } as const;
     const terminalJobs = state.terminalJobs.some((entry) => entry.id === job.id)
@@ -1262,7 +1288,7 @@ function validateConfig(config: HarnessConfig): void {
     "workerArgv",
     config.workerArgv,
     ["implement", "tdd", "focused-self-check"],
-    ["read", "bash", "edit", "write", "grep", "find", "ls"],
+    ["read", "bash", "edit", "write", "grep", "find", "ls", "worker_submit"],
     ["high", "xhigh", "max"],
   );
   validatePiRoleArgv(
@@ -1289,8 +1315,8 @@ function validatePiRoleArgv(
   if (!argv.includes("--no-skills")) fail("--no-skills is required");
   if (name === "reviewerArgv") {
     validateReviewerExtensions(argv, fail);
-  } else if (argv.includes("--no-extensions") || flagValues(argv, "--extension").length > 0) {
-    fail("Worker extensions are not allowed");
+  } else {
+    validateWorkerExtension(argv, fail);
   }
   const skillPaths = flagValues(argv, "--skill");
   if (skillPaths.some((path) => !isAbsolute(path))) fail("skill paths must be absolute");
@@ -1330,6 +1356,16 @@ function validatePiRoleArgv(
   const thinking = flagValues(argv, "--thinking");
   if (thinking.length !== 1 || !allowedThinking.includes(thinking[0] as "high" | "xhigh" | "max")) {
     fail(`--thinking ${allowedThinking.join(" or ")} is required`);
+  }
+}
+
+function validateWorkerExtension(argv: string[], fail: (reason: string) => never): void {
+  if (argv.filter((argument) => argument === "--no-extensions").length !== 1) {
+    fail("exactly one --no-extensions is required");
+  }
+  const extensions = flagValues(argv, "--extension");
+  if (extensions.length !== 1 || !isAbsolute(extensions[0]!) || resolve(extensions[0]!) !== BUNDLED_WORKER_TOOLS_EXTENSION) {
+    fail("the sole Worker extension must be the bundled worker-tools extension");
   }
 }
 

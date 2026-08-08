@@ -21,8 +21,8 @@ type HarnessStatusConfig = {
 
 async function main(argv: string[]): Promise<number> {
   const command = argv[2] || "status";
-  if (command !== "status" && command !== "incident" && command !== "summary") {
-    throw new Error("command must be status, incident, or summary");
+  if (command !== "status" && command !== "incident" && command !== "summary" && command !== "notification") {
+    throw new Error("command must be status, incident, summary, or notification");
   }
   const bridgePath = requiredFlag(argv, "--config");
   const bridge = loadBridgeConfig(bridgePath);
@@ -32,7 +32,9 @@ async function main(argv: string[]): Promise<number> {
     ? renderStatus(state, harness)
     : command === "incident"
       ? renderIncident(state, bridge.laneId)
-      : renderSummary(state, harness);
+      : command === "notification"
+        ? renderNotification(state)
+        : renderSummary(state, harness);
   process.stdout.write(`${bounded(message)}\n`);
   return 0;
 }
@@ -69,6 +71,21 @@ function renderStatus(state: HarnessState, config: HarnessStatusConfig): string 
     `下一步：${nextStep(job)}`,
   );
   return lines.join("\n");
+}
+
+function renderNotification(state: HarnessState): string {
+  const job = state.activeJob;
+  if (!job) return "当前没有需要处理的 Harness 任务。";
+  const incident = job.incident;
+  if (!incident) return `任务：${clean(job.task.repo, 160)}#${job.task.issueNumber} ${clean(job.task.title, 240)}\n状态：${job.state}`;
+
+  const analysis = job.analysis?.incidentId === incident.id ? job.analysis : null;
+  const recommendation = analysis?.resolutionBrief || analysis?.summary || "等待系统生成下一步建议；不执行自动恢复。";
+  return [
+    `任务：${clean(job.task.repo, 160)}#${job.task.issueNumber} ${clean(job.task.title, 240)}`,
+    `原因：${clean(incident.summary, 700)}`,
+    `建议：${clean(recommendation, 900)}`,
+  ].join("\n");
 }
 
 function renderSummary(state: HarnessState, config: HarnessStatusConfig): string {

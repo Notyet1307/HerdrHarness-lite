@@ -60,6 +60,17 @@ export function assertJobInvariant(job) {
     if (job.state === "recovery_approved" && !job.approval) {
         throw new Error("recovery_approved job requires an approval");
     }
+    if (job.state === "cancelled" && !job.cancellation)
+        throw new Error("cancelled job requires a cancellation record");
+    if (job.cancellation && (!Number.isInteger(job.cancellation.jobRevision)
+        || job.cancellation.jobRevision < 0
+        || !isBoundedText(job.cancellation.id, 512)
+        || !isBoundedText(job.cancellation.incidentId, 512)
+        || !isBoundedText(job.cancellation.analysisId, 512)
+        || !isBoundedText(job.cancellation.actor, 512)
+        || !isBoundedText(job.cancellation.reason, 2_000)
+        || !Number.isFinite(Date.parse(job.cancellation.createdAt))))
+        throw new Error("job has an invalid cancellation record");
     const ciReworkCount = job.ciReworkCount ?? 0;
     if (!Number.isInteger(ciReworkCount) || ciReworkCount < 0 || ciReworkCount > MAX_CI_REWORKS) {
         throw new Error("job has an invalid CI rework count");
@@ -118,12 +129,12 @@ export function assertJobInvariant(job) {
     }
     if (job.activeAttempt &&
         job.activeAttempt.lane === "worker" &&
-        !["worker_running", "blocked", "recovery_approved"].includes(job.state)) {
+        !["worker_running", "blocked", "recovery_approved", "cancelled"].includes(job.state)) {
         throw new Error("worker attempt is bound to an invalid state");
     }
     if (job.activeAttempt &&
         job.activeAttempt.lane === "reviewer" &&
-        !["reviewer_running", "blocked", "recovery_approved"].includes(job.state)) {
+        !["reviewer_running", "blocked", "recovery_approved", "cancelled"].includes(job.state)) {
         throw new Error("reviewer attempt is bound to an invalid state");
     }
     if (job.activeAttempt?.expectedRemoteHeadSha !== undefined &&

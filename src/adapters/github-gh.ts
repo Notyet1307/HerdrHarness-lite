@@ -106,6 +106,28 @@ export class GitHubGh implements GitHubPort {
     );
   }
 
+  async requeueIssue(input: {
+    repo: string;
+    issueNumber: number;
+    claimLabel: string;
+    readyLabel: string;
+  }): Promise<void> {
+    requireSuccess(
+      this.runner.run("gh", [
+        "issue",
+        "edit",
+        String(input.issueNumber),
+        "--repo",
+        input.repo,
+        "--add-label",
+        input.readyLabel,
+        "--remove-label",
+        input.claimLabel,
+      ]),
+      `requeue issue #${input.issueNumber}`,
+    );
+  }
+
   async publish(input: {
     repo: string;
     issueNumber: number;

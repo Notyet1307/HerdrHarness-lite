@@ -174,6 +174,15 @@ export type Reassessment = {
     reason: string;
     createdAt: string;
 };
+export type Cancellation = {
+    id: string;
+    jobRevision: number;
+    incidentId: string;
+    analysisId: string;
+    actor: string;
+    reason: string;
+    createdAt: string;
+};
 export type PullRequestRef = {
     number: number;
     url: string;
@@ -219,6 +228,7 @@ export type Job = {
     incident: Incident | null;
     analysis: AnalystAdvice | null;
     approval: Approval | null;
+    cancellation?: Cancellation | null;
     reassessments?: Reassessment[];
     pullRequest: PullRequestRef | null;
     /** Optional for backward compatibility with V1 ledgers created before CI feedback. */
@@ -235,6 +245,7 @@ export type TerminalJob = {
     issueNumber: number;
     state: "done" | "cancelled";
     finishedAt: string;
+    cancellation?: Cancellation | null;
     reassessments?: Reassessment[];
 };
 export type HarnessState = {

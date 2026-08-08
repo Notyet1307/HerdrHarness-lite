@@ -18,6 +18,7 @@ import { dirname, isAbsolute, join } from "node:path";
 import { JsonStateStore } from "./adapters/json-store.js";
 import { isRetryAction, type HarnessState, type Job, type JobState } from "./model.js";
 import { allowedActionsFor } from "./policy.js";
+import { controllerHeartbeatPath } from "./controller-heartbeat.js";
 
 const MAX_MESSAGE_LENGTH = 3_900;
 const MAX_OUTBOX = 512;
@@ -38,7 +39,7 @@ type ObserverConfigFile = {
   heartbeatTimeoutMs: number;
 };
 
-type ObserverConfig = ObserverConfigFile & { bridgeConfig: string; harnessStateDir: string };
+type ObserverConfig = ObserverConfigFile & { bridgeConfig: string; harnessStateDir: string; controllerHeartbeat: string };
 
 type TextOutboxEntry = {
   kind: "text";
@@ -131,7 +132,7 @@ async function observeLedger(config: ObserverConfig, observer: ObserverState): P
     if (ledger.activeJob?.analysis) {
       enqueueAnalysis(config, observer, ledger.activeJob, "🧭 当前任务已有 Analyst 恢复建议");
     } else if (ledger.activeJob?.incident) {
-      enqueue(observer, `incident:${ledger.activeJob.incident.id}`, `⛔️ 当前 Harness 任务已阻塞\n${safeView(config, "incident")}`);
+      enqueue(observer, `incident:${ledger.activeJob.incident.id}`, safeView(config, "notification"));
     }
     return;
   }
@@ -156,7 +157,7 @@ async function observeLedger(config: ObserverConfig, observer: ObserverState): P
     if (job.analysis) {
       enqueueAnalysis(config, observer, job, "🧭 Analyst 已给出恢复建议");
     } else if (job.incident) {
-      enqueue(observer, `incident:${job.incident.id}`, `⛔️ Harness 任务已阻塞\n${safeView(config, "incident")}`);
+      enqueue(observer, `incident:${job.incident.id}`, safeView(config, "notification"));
     }
   } else if (job) {
     observeJob(config, observer, job);
@@ -177,7 +178,7 @@ function observeJob(config: ObserverConfig, observer: ObserverState, job: Job): 
   if (job.analysis && analysisChanged) {
     enqueueAnalysis(config, observer, job, "🧭 Analyst 已给出恢复建议");
   } else if (job.incident && incidentChanged) {
-    enqueue(observer, `incident:${job.incident.id}`, `⛔️ Harness 任务已阻塞\n${safeView(config, "incident")}`);
+    enqueue(observer, `incident:${job.incident.id}`, safeView(config, "notification"));
   }
 
   if (job.state === observer.lastJobState) return;
@@ -283,12 +284,12 @@ function observeControllerEvent(config: ObserverConfig, observer: ObserverState,
 
   if (event.action === "preflight_failed") {
     observer.controllerDown = true;
-    observer.controllerDownLogMtimeMs = safeLogMtime(config.controllerLog);
+    observer.controllerDownLogMtimeMs = safeLogMtime(config.controllerHeartbeat);
   }
 }
 
 function observeHeartbeat(config: ObserverConfig, observer: ObserverState): void {
-  const mtime = safeLogMtime(config.controllerLog);
+  const mtime = safeLogMtime(config.controllerHeartbeat);
   const stale = mtime === 0 || Date.now() - mtime > config.heartbeatTimeoutMs;
   if (stale && !observer.controllerDown) {
     observer.controllerDown = true;
@@ -309,7 +310,7 @@ function safeLogMtime(path: string): number {
   }
 }
 
-function safeView(config: ObserverConfig, command: "status" | "incident"): string {
+function safeView(config: ObserverConfig, command: "status" | "incident" | "notification"): string {
   const output = spawnSync(config.nodeBin, [config.statusScript, command, "--config", config.bridgeConfig], {
     encoding: "utf8",
     timeout: 10_000,
@@ -410,7 +411,7 @@ function enqueueAnalysis(config: ObserverConfig, state: ObserverState, job: Job,
     && job.incident.allowedActions.includes(analysis.action)
     && allowedActionsFor(job.incident.class, job.incident.lane).includes(analysis.action);
   if (!exactRetry) {
-    enqueue(state, `analysis:${analysis?.id ?? job.revision}`, `${heading}\n${safeView(config, "incident")}`);
+    enqueue(state, `analysis:${analysis?.id ?? job.revision}`, safeView(config, "notification"));
     return;
   }
   const key = `approval:${analysis.id}`;
@@ -468,7 +469,12 @@ function loadConfig(path: string): ObserverConfig {
   const harness = JSON.parse(readFileSync(file.harnessConfig, "utf8")) as { stateDir?: unknown };
   if (typeof harness.stateDir !== "string" || !isAbsolute(harness.stateDir)) throw new Error("Harness config stateDir must be absolute");
   if (!existsSync(harness.stateDir)) throw new Error("Harness stateDir does not exist");
-  return { ...file, bridgeConfig: path, harnessStateDir: harness.stateDir };
+  return {
+    ...file,
+    bridgeConfig: path,
+    harnessStateDir: harness.stateDir,
+    controllerHeartbeat: controllerHeartbeatPath(harness.stateDir),
+  };
 }
 
 function assertSecureAbsoluteFile(path: string, label: string): void {
