@@ -94,14 +94,16 @@ test("Telegram approval card exposes bounded decisions and hold consumes only th
     const payload = JSON.parse(requested.stdout);
     assert.equal(payload.ok, true);
     assert.equal(payload.analysisId, "analysis-001");
-    assert.match(payload.card.text, /发生了什么/);
-    assert.match(payload.card.text, /Analyst 判断/);
-    assert.match(payload.card.text, /建议恢复/);
+    assert.match(payload.card.text, /需要你决定 · #48/);
+    assert.match(payload.card.text, /原因：/);
+    assert.match(payload.card.text, /影响：/);
+    assert.match(payload.card.text, /建议：/);
+    assert.match(payload.card.text, /<blockquote expandable><b>技术详情<\/b>/);
     assert.match(payload.card.text, /实例.*exposure/);
     assert.ok(payload.card.text.length <= 3_900);
     assert.ok(!payload.card.text.includes("<script>"));
     assert.match(payload.card.text, /&lt;script&gt;/);
-    assert.equal(payload.card.approveLabel, "✅ 批准并启动全新 Reviewer");
+    assert.equal(payload.card.approveLabel, "批准：全新 Reviewer");
     assert.match(payload.card.approveCallback, /^hh:a:exposure:[0-9A-F]{16}$/);
     assert.match(payload.card.holdCallback, /^hh:h:exposure:[0-9A-F]{16}$/);
 

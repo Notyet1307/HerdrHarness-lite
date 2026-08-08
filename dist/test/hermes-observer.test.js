@@ -29,8 +29,8 @@ test("Hermes observer baselines old logs and retries text or approval-card deliv
         assert.equal(first.status, 0);
         let observer = readObserver(observerState);
         assert.equal(observer.outbox.length, 1);
-        assert.match(observer.outbox[0].message ?? "", /通知与决策入口/);
-        assert.match(observer.outbox[0].message ?? "", /owner\/repo/);
+        assert.match(observer.outbox[0].message ?? "", /^🟢 Observer 已上线 · 无需处理/m);
+        assert.match(observer.outbox[0].message ?? "", /只推送任务开始、终态和需要关注的异常/);
         assert.ok(!(observer.outbox[0].message ?? "").includes("详情读取失败"));
         assert.ok(!(observer.outbox[0].message ?? "").includes("historical failure"));
         assert.ok(!observer.outbox.some((entry) => (entry.message ?? "").includes("Controller 心跳已停止")));
@@ -41,8 +41,48 @@ test("Hermes observer baselines old logs and retries text or approval-card deliv
         assert.equal(runObserver().status, 0);
         assert.equal(readObserver(observerState).outbox.length, 0);
         const ledgerPath = join(stateDir, "state.json");
-        const blockedLedger = `${JSON.stringify(blockedState(root))}\n`;
-        writeFileSync(ledgerPath, blockedLedger, { encoding: "utf8", mode: 0o600 });
+        const active = activeState(root);
+        writeFileSync(ledgerPath, `${JSON.stringify(active)}\n`, { encoding: "utf8", mode: 0o600 });
+        writeBridge("/usr/bin/false");
+        assert.equal(runObserver().status, 0);
+        observer = readObserver(observerState);
+        assert.deepEqual(observer.outbox.map((entry) => entry.key), ["job:job-001"]);
+        assert.equal(observer.outbox[0].message, "🟦 任务已开始 · 无需处理\nowner/repo#48 · Expose durable status");
+        for (const entry of observer.outbox)
+            entry.nextAttemptAt = 0;
+        writeFileSync(observerState, `${JSON.stringify(observer)}\n`, { encoding: "utf8", mode: 0o600 });
+        writeBridge("/usr/bin/true");
+        assert.equal(runObserver().status, 0);
+        assert.equal(readObserver(observerState).outbox.length, 0);
+        active.activeJob.revision += 1;
+        active.activeJob.state = "reviewer_ready";
+        writeFileSync(ledgerPath, `${JSON.stringify(active)}\n`, { encoding: "utf8", mode: 0o600 });
+        writeBridge("/usr/bin/false");
+        assert.equal(runObserver().status, 0);
+        assert.equal(readObserver(observerState).outbox.length, 0);
+        const terminalJobs = [{
+                id: "job-001",
+                repo: "owner/repo",
+                issueNumber: 48,
+                state: "done",
+                finishedAt: "2026-08-07T00:03:00.000Z",
+                cancellation: null,
+                reassessments: [],
+            }];
+        writeFileSync(ledgerPath, `${JSON.stringify({ version: 1, activeJob: null, terminalJobs })}\n`, { encoding: "utf8", mode: 0o600 });
+        assert.equal(runObserver().status, 0);
+        observer = readObserver(observerState);
+        assert.deepEqual(observer.outbox.map((entry) => entry.key), ["terminal:job-001:done"]);
+        assert.equal(observer.outbox[0].message, "✅ 任务已完成 · 无需处理\nowner/repo#48");
+        for (const entry of observer.outbox)
+            entry.nextAttemptAt = 0;
+        writeFileSync(observerState, `${JSON.stringify(observer)}\n`, { encoding: "utf8", mode: 0o600 });
+        writeBridge("/usr/bin/true");
+        assert.equal(runObserver().status, 0);
+        assert.equal(readObserver(observerState).outbox.length, 0);
+        const blocked = { ...blockedState(root), terminalJobs };
+        const blockedLedgerWithHistory = `${JSON.stringify(blocked)}\n`;
+        writeFileSync(ledgerPath, blockedLedgerWithHistory, { encoding: "utf8", mode: 0o600 });
         writeBridge("/usr/bin/false");
         assert.equal(runObserver().status, 0);
         observer = readObserver(observerState);
@@ -59,7 +99,7 @@ test("Hermes observer baselines old logs and retries text or approval-card deliv
         assert.equal(runObserver().status, 0);
         observer = readObserver(observerState);
         assert.ok(observer.outbox.some((entry) => (entry.message ?? "").includes("preflight_failed") && (entry.message ?? "").includes("未执行自动恢复")));
-        assert.equal(readFileSync(ledgerPath, "utf8"), blockedLedger);
+        assert.equal(readFileSync(ledgerPath, "utf8"), blockedLedgerWithHistory);
         function writeBridge(hermesBin) {
             writeFileSync(bridgeConfig, JSON.stringify({
                 laneId: "exposure",
@@ -92,6 +132,20 @@ test("Hermes observer baselines old logs and retries text or approval-card deliv
 });
 function readObserver(path) {
     return JSON.parse(readFileSync(path, "utf8"));
+}
+function activeState(root) {
+    const state = blockedState(root);
+    return {
+        ...state,
+        activeJob: {
+            ...state.activeJob,
+            revision: 5,
+            state: "worker_ready",
+            incident: null,
+            analysis: null,
+            lastError: null,
+        },
+    };
 }
 function blockedState(root) {
     const incident = {
