@@ -66,6 +66,7 @@ export type TickAction =
   | "analysis_recorded"
   | "waiting_for_approval"
   | "recovery_applied"
+  | "ci_recovered"
   | "base_refreshed"
   | "published"
   | "publish_retry"
@@ -981,6 +982,8 @@ export class HarnessController {
   }
 
   private async diagnoseOrWait(state: HarnessState, job: Job): Promise<TickResult> {
+    const recovered = await this.reconcileBlockedCi(state, job);
+    if (recovered) return recovered;
     if (!job.incident) throw new Error("blocked job has no incident");
     if (job.analysis) {
       return result(true, "waiting_for_approval", job.id, `analysis ${job.analysis.id} is ready; human approval is required`);
@@ -1008,6 +1011,54 @@ export class HarnessController {
     const next = evolveJob(job, this.deps.clock.now(), { analysis: advice });
     await this.saveJob(state, job, next);
     return result(true, "analysis_recorded", job.id, `Analyst advice ${advice.id} recorded with action=${advice.action}`);
+  }
+
+  private async reconcileBlockedCi(state: HarnessState, job: Job): Promise<TickResult | null> {
+    if (
+      (job.incident?.class !== "ci_failure" && job.incident?.class !== "ci_rework_exhausted") ||
+      !job.pullRequest ||
+      !job.ciFailure ||
+      job.headSha !== job.pullRequest.headSha ||
+      job.ciFailure.headSha !== job.pullRequest.headSha
+    ) return null;
+
+    let observation;
+    try {
+      observation = await this.deps.github.observePullRequest(job.task.repo, job.pullRequest);
+    } catch (error) {
+      return result(false, "waiting_for_approval", job.id, `exact-HEAD CI reconciliation is retryable: ${message(error)}`);
+    }
+    if (observation.status === "merged") {
+      const next = evolveJob(job, this.deps.clock.now(), {
+        state: "done",
+        incident: null,
+        analysis: null,
+        ciFailure: null,
+        lastError: null,
+      });
+      await this.saveJob(state, job, next);
+      return result(true, "merged", job.id, `PR #${job.pullRequest.number} merged while CI recovery was held`);
+    }
+    if (
+      observation.status !== "open" ||
+      observation.requiredChecks.length === 0 ||
+      observation.requiredChecks.some((check) => check.bucket !== "pass" && check.bucket !== "skipping")
+    ) return null;
+
+    const next = evolveJob(job, this.deps.clock.now(), {
+      state: "publish_ready",
+      incident: null,
+      analysis: null,
+      ciFailure: null,
+      lastError: null,
+    });
+    await this.saveJob(state, job, next);
+    return result(
+      true,
+      "ci_recovered",
+      job.id,
+      `PR #${job.pullRequest.number} required checks recovered on unchanged HEAD ${job.pullRequest.headSha}`,
+    );
   }
 
   private async runDiagnosis(job: Job, incident: Incident): Promise<AnalystAdvice> {

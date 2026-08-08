@@ -75,7 +75,7 @@ node dist/src/cli.js tick --config /ABSOLUTE/PATH/harness.config.json
 | `selected`、`claimed`、`worktree_created` | 核对消息后再执行一次 `tick` |
 | `attempt_prepared`、`attempt_pane_ready`、`attempt_agent_ready` | 再执行一次 `tick`；下一步可能进入长时间 dispatch |
 | dispatch 阶段命令仍未返回 | 等待；只用 `status` 和 Herdr 只读查看，不并发启动第二个 `tick` |
-| `attempt_dispatched`、`attempt_completed`、`base_refreshed`、`published`、`merged` | 再执行一次 `tick` 消费下一阶段 |
+| `attempt_dispatched`、`attempt_completed`、`ci_recovered`、`base_refreshed`、`published`、`merged` | 再执行一次 `tick` 消费下一阶段 |
 | `publish_retry` | 修复消息指出的可重试发布条件，再执行 `tick` |
 | `waiting_for_merge` | 等待 GitHub required checks/merge，再执行 `tick`；不得绕过 GitHub |
 | `blocked`、`analysis_recorded`、`waiting_for_approval` | 进入“恢复 blocked job” |
@@ -446,7 +446,7 @@ PR 仍为 OPEN 时，Controller 会读取精确 reviewed HEAD 上的 GitHub requ
 4. 每次都需精确人工批准，最多允许两个 fresh Worker 在同一分支回修；
 5. 先验证远端分支仍指向此前已审的 PR HEAD，再要求 fresh Reviewer，通过后更新同一 PR。
 
-Controller 不会自动 rerun CI，也不会自动 rebase。无冲突的 base merge 只作为集成刷新，仍必须重新经过独立 Reviewer 与 GitHub CI。每轮 CI 回修都需要独立 Analyst 建议和精确人工批准。两轮获批回修后若 required check 第三次失败，会进入 `ci_rework_exhausted`，只允许 `hold`。
+Controller 不会自动 rerun CI，也不会自动 rebase。若操作者在 reviewed PR HEAD 未变化时 rerun CI，blocked job 只会在同一精确 HEAD 的全部 required checks 均为 pass/skipping 后恢复，且不会重置 CI rework 计数。无冲突的 base merge 只作为集成刷新，仍必须重新经过独立 Reviewer 与 GitHub CI。每轮 CI 回修都需要独立 Analyst 建议和精确人工批准。两轮获批回修后若 required check 第三次失败，会进入 `ci_rework_exhausted`，代码改动只允许 `hold`。
 
 ## 状态与审计数据
 
