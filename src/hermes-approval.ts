@@ -17,10 +17,12 @@ import { allowedActionsFor } from "./policy.js";
 
 const CHALLENGE_TTL_MS = 10 * 60 * 1_000;
 const MAX_STDIN_BYTES = 1_024;
+const LANE_ID = /^[a-z0-9][a-z0-9-]{0,31}$/;
 
 type ApprovalAction = "retry_fresh_worker" | "retry_fresh_reviewer";
 
 type ApprovalConfigFile = {
+  laneId?: string;
   harnessConfig: string;
   nodeBin: string;
   harnessCliScript: string;
@@ -108,7 +110,7 @@ async function requestChallenge(config: ApprovalConfig, json: boolean): Promise<
     `Analyst：${clean(job.analysis.summary, 500)}`,
     `恢复说明：${clean(job.analysis.resolutionBrief, 700)}`,
     "有效期：10 分钟；新的挑战会使旧挑战失效。",
-    `确认命令：/harness approve ${token}`,
+    `确认命令：${approvalCommand(config, token)}`,
     "不想批准就不要发送确认命令。",
   ].join("\n");
   if (json) {
@@ -117,7 +119,7 @@ async function requestChallenge(config: ApprovalConfig, json: boolean): Promise<
       action: "challenge_created",
       analysisId: challenge.analysisId,
       expiresAt: challenge.expiresAt,
-      card: approvalCard(job, token),
+      card: approvalCard(job, token, config.laneId),
     })}\n`);
   } else {
     process.stdout.write(`${humanMessage}\n`);
@@ -133,12 +135,12 @@ async function decideChallenge(config: ApprovalConfig, decision: "confirm" | "ho
     || Date.parse(challenge.expiresAt) <= Date.now()
     || digestToken(token) !== challenge.tokenDigest
   ) {
-    throw new ApprovalCommandError("challenge_invalid", "挑战码无效、已过期或已使用；请重新发送 /harness approve", true);
+    throw new ApprovalCommandError("challenge_invalid", `挑战码无效、已过期或已使用；请重新发送 ${approvalCommand(config)}`, true);
   }
 
   const store = new JsonStateStore(config.harnessStateDir);
   const before = await store.load();
-  assertChallengeCurrent(before.activeJob, challenge);
+  assertChallengeCurrent(before.activeJob, challenge, config);
   const actor = `telegram:${config.telegramAllowedUser}`;
   if (decision === "hold") {
     challenge.consumedAt = new Date().toISOString();
@@ -207,7 +209,7 @@ async function decideChallenge(config: ApprovalConfig, decision: "confirm" | "ho
   return 0;
 }
 
-function assertChallengeCurrent(job: Job | null, challenge: Challenge): void {
+function assertChallengeCurrent(job: Job | null, challenge: Challenge, config: ApprovalConfig): void {
   if (
     !job
     || job.id !== challenge.jobId
@@ -218,11 +220,11 @@ function assertChallengeCurrent(job: Job | null, challenge: Challenge): void {
     || job.analysis.incidentId !== job.incident.id
     || job.analysis.action !== challenge.action
   ) {
-    throw new ApprovalCommandError("binding_stale", "任务、revision、incident 或 analysis 已变化；请重新发送 /harness approve", true);
+    throw new ApprovalCommandError("binding_stale", `任务、revision、incident 或 analysis 已变化；请重新发送 ${approvalCommand(config)}`, true);
   }
 }
 
-function approvalCard(job: Job, token: string): { text: string; approveLabel: string; approveCallback: string; holdCallback: string } {
+function approvalCard(job: Job, token: string, laneId?: string): { text: string; approveLabel: string; approveCallback: string; holdCallback: string } {
   const incident = job.incident!;
   const analysis = job.analysis!;
   if (!isRetryAction(analysis.action)) throw new Error("approval card requires a fresh retry action");
@@ -233,6 +235,7 @@ function approvalCard(job: Job, token: string): { text: string; approveLabel: st
   return {
     text: [
       "🚨 <b>Harness 需要人工决定</b>",
+      ...(laneId ? [`实例：<code>${html(laneId, 32)}</code>`] : []),
       `<code>${html(clean(job.task.repo, 160), 140)}#${job.task.issueNumber}</code> · <code>HEAD ${html(head, 40)}</code>`,
       "━━━━━━━━━━━━━━",
       "📍 <b>发生了什么</b>",
@@ -257,8 +260,8 @@ function approvalCard(job: Job, token: string): { text: string; approveLabel: st
     approveLabel: analysis.action === "retry_fresh_worker"
       ? "✅ 批准并启动全新 Worker"
       : "✅ 批准并启动全新 Reviewer",
-    approveCallback: `hh:a:${token}`,
-    holdCallback: `hh:h:${token}`,
+    approveCallback: `hh:a:${laneId ? `${laneId}:` : ""}${token}`,
+    holdCallback: `hh:h:${laneId ? `${laneId}:` : ""}${token}`,
   };
 }
 
@@ -287,12 +290,19 @@ function loadConfig(path: string): ApprovalConfig {
   if (!parsed.telegramAllowedUser || !/^[1-9][0-9]{2,19}$/.test(parsed.telegramAllowedUser)) {
     throw new Error("telegramAllowedUser must be one numeric Telegram user id");
   }
+  if (parsed.laneId !== undefined && !LANE_ID.test(parsed.laneId)) {
+    throw new Error("laneId must be 1-32 lowercase letters, digits, or hyphens");
+  }
   const file = parsed as ApprovalConfigFile;
   const harness = JSON.parse(readFileSync(file.harnessConfig, "utf8")) as { stateDir?: unknown };
   if (typeof harness.stateDir !== "string" || !isAbsolute(harness.stateDir) || !existsSync(harness.stateDir)) {
     throw new Error("Harness config stateDir must be an existing absolute path");
   }
   return { ...file, harnessStateDir: harness.stateDir };
+}
+
+function approvalCommand(config: ApprovalConfig, token?: string): string {
+  return `/harness${config.laneId ? ` ${config.laneId}` : ""} approve${token ? ` ${token}` : ""}`;
 }
 
 function loadChallenge(path: string): Challenge {

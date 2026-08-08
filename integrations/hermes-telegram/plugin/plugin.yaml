@@ -1,4 +1,4 @@
 name: harness-ops
-version: 0.3.0
-description: "Bound Harness status, approval cards, and Telegram callbacks."
+version: 0.4.0
+description: "Bound Harness Fleet status, approval cards, and Telegram callbacks."
 author: "Herdr Harness Lite"

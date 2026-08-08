@@ -473,4 +473,6 @@ src/cli.ts         tick/run/status/approve/reassess
 src/adapters/      GitHub、Git、Herdr、Analyst、证据与状态
 ```
 
+若要通过一个 Telegram Bot 查询多个独立仓库 lane 并路由精确审批，见 [`integrations/hermes-telegram/README.md`](./integrations/hermes-telegram/README.md)。
+
 完整状态机和设计分析见 [ARCHITECTURE.zh-CN.md](./ARCHITECTURE.zh-CN.md)。

@@ -33,6 +33,8 @@ test("Hermes observer baselines old logs and retries text or approval-card deliv
     let observer = readObserver(observerState);
     assert.equal(observer.outbox.length, 1);
     assert.match(observer.outbox[0]!.message ?? "", /通知与决策入口/);
+    assert.match(observer.outbox[0]!.message ?? "", /owner\/repo/);
+    assert.ok(!(observer.outbox[0]!.message ?? "").includes("详情读取失败"));
     assert.ok(!(observer.outbox[0]!.message ?? "").includes("historical failure"));
     assert.equal(observer.outbox[0]!.attempts, 1);
 
@@ -51,7 +53,14 @@ test("Hermes observer baselines old logs and retries text or approval-card deliv
     assert.ok(observer.outbox.some((entry) => entry.kind === "approval" && entry.analysisId === "analysis-001"));
     assert.ok(observer.outbox.every((entry) => !(entry.message ?? "").includes("SECRET ISSUE BODY")));
 
+    for (const entry of observer.outbox) entry.nextAttemptAt = 0;
+    writeFileSync(observerState, `${JSON.stringify(observer)}\n`, { encoding: "utf8", mode: 0o600 });
+    writeBridge("/usr/bin/true");
+    assert.equal(runObserver().status, 0);
+    assert.ok(!readObserver(observerState).outbox.some((entry) => entry.kind === "approval"));
+
     appendFileSync(controllerLog, `${JSON.stringify({ ok: false, action: "preflight_failed", jobId: "job-001", message: "provider probe failed" })}\n`, { encoding: "utf8" });
+    writeBridge("/usr/bin/false");
     assert.equal(runObserver().status, 0);
     observer = readObserver(observerState);
     assert.ok(observer.outbox.some((entry) => (entry.message ?? "").includes("preflight_failed") && (entry.message ?? "").includes("未执行自动恢复")));
@@ -59,6 +68,7 @@ test("Hermes observer baselines old logs and retries text or approval-card deliv
 
     function writeBridge(hermesBin: string): void {
       writeFileSync(bridgeConfig, JSON.stringify({
+        laneId: "exposure",
         harnessConfig,
         nodeBin: process.execPath,
         statusScript: resolve("dist/src/hermes-status.js"),

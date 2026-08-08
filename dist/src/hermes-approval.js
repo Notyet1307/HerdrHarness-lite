@@ -8,6 +8,7 @@ import { isRetryAction } from "./model.js";
 import { allowedActionsFor } from "./policy.js";
 const CHALLENGE_TTL_MS = 10 * 60 * 1_000;
 const MAX_STDIN_BYTES = 1_024;
+const LANE_ID = /^[a-z0-9][a-z0-9-]{0,31}$/;
 class ApprovalCommandError extends Error {
     code;
     terminal;
@@ -72,7 +73,7 @@ async function requestChallenge(config, json) {
         `Analyst：${clean(job.analysis.summary, 500)}`,
         `恢复说明：${clean(job.analysis.resolutionBrief, 700)}`,
         "有效期：10 分钟；新的挑战会使旧挑战失效。",
-        `确认命令：/harness approve ${token}`,
+        `确认命令：${approvalCommand(config, token)}`,
         "不想批准就不要发送确认命令。",
     ].join("\n");
     if (json) {
@@ -81,7 +82,7 @@ async function requestChallenge(config, json) {
             action: "challenge_created",
             analysisId: challenge.analysisId,
             expiresAt: challenge.expiresAt,
-            card: approvalCard(job, token),
+            card: approvalCard(job, token, config.laneId),
         })}\n`);
     }
     else {
@@ -95,11 +96,11 @@ async function decideChallenge(config, decision, json) {
     if (challenge.consumedAt !== null
         || Date.parse(challenge.expiresAt) <= Date.now()
         || digestToken(token) !== challenge.tokenDigest) {
-        throw new ApprovalCommandError("challenge_invalid", "挑战码无效、已过期或已使用；请重新发送 /harness approve", true);
+        throw new ApprovalCommandError("challenge_invalid", `挑战码无效、已过期或已使用；请重新发送 ${approvalCommand(config)}`, true);
     }
     const store = new JsonStateStore(config.harnessStateDir);
     const before = await store.load();
-    assertChallengeCurrent(before.activeJob, challenge);
+    assertChallengeCurrent(before.activeJob, challenge, config);
     const actor = `telegram:${config.telegramAllowedUser}`;
     if (decision === "hold") {
         challenge.consumedAt = new Date().toISOString();
@@ -159,7 +160,7 @@ async function decideChallenge(config, decision, json) {
         : `${humanMessage}\n`);
     return 0;
 }
-function assertChallengeCurrent(job, challenge) {
+function assertChallengeCurrent(job, challenge, config) {
     if (!job
         || job.id !== challenge.jobId
         || job.revision !== challenge.revision
@@ -168,10 +169,10 @@ function assertChallengeCurrent(job, challenge) {
         || job.analysis?.id !== challenge.analysisId
         || job.analysis.incidentId !== job.incident.id
         || job.analysis.action !== challenge.action) {
-        throw new ApprovalCommandError("binding_stale", "任务、revision、incident 或 analysis 已变化；请重新发送 /harness approve", true);
+        throw new ApprovalCommandError("binding_stale", `任务、revision、incident 或 analysis 已变化；请重新发送 ${approvalCommand(config)}`, true);
     }
 }
-function approvalCard(job, token) {
+function approvalCard(job, token, laneId) {
     const incident = job.incident;
     const analysis = job.analysis;
     if (!isRetryAction(analysis.action))
@@ -183,6 +184,7 @@ function approvalCard(job, token) {
     return {
         text: [
             "🚨 <b>Harness 需要人工决定</b>",
+            ...(laneId ? [`实例：<code>${html(laneId, 32)}</code>`] : []),
             `<code>${html(clean(job.task.repo, 160), 140)}#${job.task.issueNumber}</code> · <code>HEAD ${html(head, 40)}</code>`,
             "━━━━━━━━━━━━━━",
             "📍 <b>发生了什么</b>",
@@ -207,8 +209,8 @@ function approvalCard(job, token) {
         approveLabel: analysis.action === "retry_fresh_worker"
             ? "✅ 批准并启动全新 Worker"
             : "✅ 批准并启动全新 Reviewer",
-        approveCallback: `hh:a:${token}`,
-        holdCallback: `hh:h:${token}`,
+        approveCallback: `hh:a:${laneId ? `${laneId}:` : ""}${token}`,
+        holdCallback: `hh:h:${laneId ? `${laneId}:` : ""}${token}`,
     };
 }
 function readToken() {
@@ -239,12 +241,18 @@ function loadConfig(path) {
     if (!parsed.telegramAllowedUser || !/^[1-9][0-9]{2,19}$/.test(parsed.telegramAllowedUser)) {
         throw new Error("telegramAllowedUser must be one numeric Telegram user id");
     }
+    if (parsed.laneId !== undefined && !LANE_ID.test(parsed.laneId)) {
+        throw new Error("laneId must be 1-32 lowercase letters, digits, or hyphens");
+    }
     const file = parsed;
     const harness = JSON.parse(readFileSync(file.harnessConfig, "utf8"));
     if (typeof harness.stateDir !== "string" || !isAbsolute(harness.stateDir) || !existsSync(harness.stateDir)) {
         throw new Error("Harness config stateDir must be an existing absolute path");
     }
     return { ...file, harnessStateDir: harness.stateDir };
+}
+function approvalCommand(config, token) {
+    return `/harness${config.laneId ? ` ${config.laneId}` : ""} approve${token ? ` ${token}` : ""}`;
 }
 function loadChallenge(path) {
     assertSecureAbsoluteFile(path, "approval challenge");

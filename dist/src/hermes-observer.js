@@ -243,7 +243,7 @@ function safeLogMtime(path) {
     }
 }
 function safeView(config, command) {
-    const output = spawnSync(config.nodeBin, [config.statusScript, command, "--config", config.harnessConfig], {
+    const output = spawnSync(config.nodeBin, [config.statusScript, command, "--config", config.bridgeConfig], {
         encoding: "utf8",
         timeout: 10_000,
         maxBuffer: 1024 * 1024,
@@ -367,9 +367,9 @@ function parseApprovalCard(output, analysisId) {
             || card.approveLabel.length === 0
             || card.approveLabel.length > 64
             || typeof card.approveCallback !== "string"
-            || !/^hh:a:[0-9A-F]{16}$/.test(card.approveCallback)
+            || !/^hh:a:(?:[a-z0-9][a-z0-9-]{0,31}:)?[0-9A-F]{16}$/.test(card.approveCallback)
             || typeof card.holdCallback !== "string"
-            || !/^hh:h:[0-9A-F]{16}$/.test(card.holdCallback))
+            || !/^hh:h:(?:[a-z0-9][a-z0-9-]{0,31}:)?[0-9A-F]{16}$/.test(card.holdCallback))
             return null;
         return card;
     }

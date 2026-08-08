@@ -1,0 +1,8 @@
+{
+  "telegramAllowedUser": "123456789",
+  "lanes": {
+    "exposure": "/absolute/path/to/exposure/bridge.json",
+    "tailmux": "/absolute/path/to/tailmux/bridge.json",
+    "agent-lab": "/absolute/path/to/agent-lab/bridge.json"
+  }
+}
