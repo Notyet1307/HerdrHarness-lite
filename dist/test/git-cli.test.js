@@ -127,6 +127,54 @@ test("post-PR Worker verification requires the remote branch to remain on the re
     if (!premature.ok)
         assert.match(premature.reason, /pushed the branch before review/);
 });
+test("base refresh merges a newer base locally without moving the reviewed remote branch", async () => {
+    const fixture = baseSyncFixture(false);
+    try {
+        const cli = new GitCli(fixture.runner);
+        const latestBaseSha = await cli.refreshBase(fixture.repo, "main");
+        const result = await cli.syncBase({
+            worktree: { path: fixture.repo, branch: fixture.branch, workspaceId: "w1" },
+            branch: fixture.branch,
+            baseRef: "main",
+            expectedHeadSha: fixture.issueHead,
+            expectedRemoteHeadSha: fixture.issueHead,
+            latestBaseSha,
+        });
+        assert.equal(result.ok, true);
+        if (!result.ok)
+            return;
+        assert.ok(result.headSha !== fixture.issueHead);
+        fixture.git("merge-base", "--is-ancestor", fixture.issueHead, result.headSha);
+        fixture.git("merge-base", "--is-ancestor", latestBaseSha, result.headSha);
+        assert.equal(fixture.git("ls-remote", "--heads", "origin", fixture.branch).split(/\s+/, 1)[0], fixture.issueHead);
+    }
+    finally {
+        rmSync(fixture.root, { recursive: true, force: true });
+    }
+});
+test("base refresh aborts a conflict and preserves the reviewed HEAD", async () => {
+    const fixture = baseSyncFixture(true);
+    try {
+        const cli = new GitCli(fixture.runner);
+        const result = await cli.syncBase({
+            worktree: { path: fixture.repo, branch: fixture.branch, workspaceId: "w1" },
+            branch: fixture.branch,
+            baseRef: "main",
+            expectedHeadSha: fixture.issueHead,
+            expectedRemoteHeadSha: fixture.issueHead,
+            latestBaseSha: await cli.refreshBase(fixture.repo, "main"),
+        });
+        assert.deepEqual(result.ok, false);
+        if (result.ok)
+            return;
+        assert.equal(result.class, "agent_decision");
+        assert.equal(fixture.git("rev-parse", "HEAD").trim(), fixture.issueHead);
+        assert.equal(fixture.git("status", "--porcelain", "--untracked-files=no"), "");
+    }
+    finally {
+        rmSync(fixture.root, { recursive: true, force: true });
+    }
+});
 class ReviewRunner {
     status;
     constructor(status) {
@@ -170,5 +218,37 @@ class WorkerRunner {
 }
 function ok(stdout) {
     return { ok: true, code: 0, stdout, stderr: "", error: null };
+}
+function baseSyncFixture(conflict) {
+    const root = mkdtempSync(join(tmpdir(), "herdr-base-sync-"));
+    const origin = join(root, "origin.git");
+    const repo = join(root, "repo");
+    const branch = "agent/issue-1";
+    const runner = new SyncCommandRunner();
+    requireSuccess(runner.run("git", ["init", "--bare", "--quiet", origin]), "git init bare");
+    mkdirSync(repo);
+    requireSuccess(runner.run("git", ["-C", repo, "init", "--quiet"]), "git init");
+    const git = (...args) => requireSuccess(runner.run("git", ["-C", repo, ...args]), `git ${args[0]}`);
+    git("config", "user.email", "controller@example.test");
+    git("config", "user.name", "Controller Test");
+    writeFileSync(join(repo, "shared.txt"), "base\n");
+    git("add", "shared.txt");
+    git("commit", "--quiet", "-m", "base");
+    git("branch", "-M", "main");
+    git("remote", "add", "origin", origin);
+    git("push", "--quiet", "-u", "origin", "main");
+    git("switch", "--quiet", "-c", branch);
+    writeFileSync(join(repo, conflict ? "shared.txt" : "issue.txt"), "issue\n");
+    git("add", ".");
+    git("commit", "--quiet", "-m", "issue");
+    const issueHead = git("rev-parse", "HEAD").trim();
+    git("push", "--quiet", "-u", "origin", branch);
+    git("switch", "--quiet", "main");
+    writeFileSync(join(repo, conflict ? "shared.txt" : "main.txt"), "main\n");
+    git("add", ".");
+    git("commit", "--quiet", "-m", "advance main");
+    git("push", "--quiet", "origin", "main");
+    git("switch", "--quiet", branch);
+    return { root, repo, branch, issueHead, runner, git };
 }
 //# sourceMappingURL=git-cli.test.js.map

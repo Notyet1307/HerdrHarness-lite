@@ -97,6 +97,16 @@ export declare class FakeGitHub implements GitHubPort {
 }
 export declare class FakeGit implements GitPort {
     baseSha: string;
+    baseSyncHeadSha: string | null;
+    baseSyncFailure: {
+        class: "agent_decision" | "integrity_violation";
+        reason: string;
+    } | null;
+    baseSyncs: Array<{
+        expectedHeadSha: string;
+        expectedRemoteHeadSha: string | null;
+        latestBaseSha: string;
+    }>;
     workerFailure: {
         class: "integrity_violation" | "stale_task";
         reason: string;
@@ -109,6 +119,18 @@ export declare class FakeGit implements GitPort {
         expectedRemoteHeadSha: string | null;
     }>;
     refreshBase(): Promise<string>;
+    syncBase(input: {
+        expectedHeadSha: string;
+        expectedRemoteHeadSha: string | null;
+        latestBaseSha: string;
+    }): Promise<{
+        ok: true;
+        headSha: string;
+    } | {
+        ok: false;
+        class: "agent_decision" | "integrity_violation";
+        reason: string;
+    }>;
     verifyWorker(input: {
         reportedHeadSha: string;
         expectedRemoteHeadSha: string | null;

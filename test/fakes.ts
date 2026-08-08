@@ -163,6 +163,9 @@ export class FakeGitHub implements GitHubPort {
 
 export class FakeGit implements GitPort {
   baseSha = "a".repeat(40);
+  baseSyncHeadSha: string | null = null;
+  baseSyncFailure: { class: "agent_decision" | "integrity_violation"; reason: string } | null = null;
+  baseSyncs: Array<{ expectedHeadSha: string; expectedRemoteHeadSha: string | null; latestBaseSha: string }> = [];
   workerFailure: { class: "integrity_violation" | "stale_task"; reason: string } | null = null;
   reviewerFailure: string | null = null;
   reviewerValidationArgv: string[][] = [];
@@ -174,6 +177,21 @@ export class FakeGit implements GitPort {
 
   async refreshBase(): Promise<string> {
     return this.baseSha;
+  }
+
+  async syncBase(input: {
+    expectedHeadSha: string;
+    expectedRemoteHeadSha: string | null;
+    latestBaseSha: string;
+  }): Promise<{ ok: true; headSha: string } | { ok: false; class: "agent_decision" | "integrity_violation"; reason: string }> {
+    this.baseSyncs.push({
+      expectedHeadSha: input.expectedHeadSha,
+      expectedRemoteHeadSha: input.expectedRemoteHeadSha,
+      latestBaseSha: input.latestBaseSha,
+    });
+    return this.baseSyncFailure
+      ? { ok: false, ...this.baseSyncFailure }
+      : { ok: true, headSha: this.baseSyncHeadSha ?? input.expectedHeadSha };
   }
 
   async verifyWorker(input: { reportedHeadSha: string; expectedRemoteHeadSha: string | null }): Promise<{ ok: true; headSha: string } | { ok: false; class: "integrity_violation" | "stale_task"; reason: string }> {

@@ -14,6 +14,74 @@ export class GitCli {
             throw new Error(`invalid base SHA: ${sha}`);
         return sha;
     }
+    async syncBase(input) {
+        const path = input.worktree.path;
+        const head = this.git(path, ["rev-parse", "HEAD"]).trim();
+        if (head !== input.expectedHeadSha) {
+            return { ok: false, class: "integrity_violation", reason: `worktree HEAD ${head} != reviewed HEAD ${input.expectedHeadSha}` };
+        }
+        const branch = this.git(path, ["branch", "--show-current"]).trim();
+        if (branch !== input.branch) {
+            return { ok: false, class: "integrity_violation", reason: `branch ${branch || "detached"} != ${input.branch}` };
+        }
+        const dirty = this.git(path, ["status", "--porcelain", "--untracked-files=no"]);
+        if (dirty.trim()) {
+            return { ok: false, class: "integrity_violation", reason: `base refresh found tracked changes:\n${dirty.trim()}` };
+        }
+        const remote = this.runner.run("git", ["-C", path, "ls-remote", "--heads", "origin", input.branch]);
+        if (!remote.ok) {
+            return { ok: false, class: "integrity_violation", reason: "cannot prove the remote branch before base refresh" };
+        }
+        const remoteHead = remote.stdout.trim().split(/\s+/, 1)[0] || null;
+        if (remoteHead !== input.expectedRemoteHeadSha) {
+            return {
+                ok: false,
+                class: "integrity_violation",
+                reason: `remote branch ${remoteHead ?? "is missing"} differs from reviewed anchor ${input.expectedRemoteHeadSha ?? "none"}`,
+            };
+        }
+        const merge = this.runner.run("git", ["-C", path, "merge", "--no-edit", input.latestBaseSha]);
+        if (!merge.ok) {
+            const merging = this.runner.run("git", ["-C", path, "rev-parse", "-q", "--verify", "MERGE_HEAD"]);
+            if (!merging.ok) {
+                return {
+                    ok: false,
+                    class: "integrity_violation",
+                    reason: `base refresh failed before a merge was established: ${commandDiagnostic(merge)}`,
+                };
+            }
+            const conflicts = this.runner.run("git", ["-C", path, "diff", "--name-only", "--diff-filter=U"]);
+            const abort = this.runner.run("git", ["-C", path, "merge", "--abort"]);
+            if (!abort.ok || this.git(path, ["rev-parse", "HEAD"]).trim() !== input.expectedHeadSha) {
+                return { ok: false, class: "integrity_violation", reason: "base refresh conflict could not be cleanly aborted" };
+            }
+            if (!conflicts.ok || !conflicts.stdout.trim()) {
+                return {
+                    ok: false,
+                    class: "integrity_violation",
+                    reason: `base refresh failed without a merge conflict: ${commandDiagnostic(merge)}`,
+                };
+            }
+            return {
+                ok: false,
+                class: "agent_decision",
+                reason: `latest ${input.baseRef} ${input.latestBaseSha} conflicts with reviewed HEAD ${input.expectedHeadSha}`,
+            };
+        }
+        const refreshedHead = this.git(path, ["rev-parse", "HEAD"]).trim();
+        if (!/^[0-9a-f]{40}$/i.test(refreshedHead)) {
+            return { ok: false, class: "integrity_violation", reason: `base refresh produced invalid HEAD ${refreshedHead}` };
+        }
+        for (const ancestor of [input.expectedHeadSha, input.latestBaseSha]) {
+            if (!this.runner.run("git", ["-C", path, "merge-base", "--is-ancestor", ancestor, refreshedHead]).ok) {
+                return { ok: false, class: "integrity_violation", reason: `${ancestor} is not an ancestor of refreshed HEAD ${refreshedHead}` };
+            }
+        }
+        if (this.git(path, ["status", "--porcelain", "--untracked-files=no"]).trim()) {
+            return { ok: false, class: "integrity_violation", reason: "base refresh left tracked worktree changes" };
+        }
+        return { ok: true, headSha: refreshedHead };
+    }
     async verifyWorker(input) {
         const path = input.worktree.path;
         const head = this.git(path, ["rev-parse", "HEAD"]).trim();
@@ -169,6 +237,9 @@ export class GitCli {
     git(path, args) {
         return requireSuccess(this.runner.run("git", ["-C", path, ...args]), `git ${args[0] ?? "command"}`);
     }
+}
+function commandDiagnostic(result) {
+    return result.error ?? (result.stderr.trim() || result.stdout.trim() || `exit ${result.code}`);
 }
 function unexpectedStatus(status, worktreePath, allowedResultPaths) {
     const allowed = new Set(allowedResultPaths.map((path) => relative(worktreePath, path).replace(/\\/g, "/")));

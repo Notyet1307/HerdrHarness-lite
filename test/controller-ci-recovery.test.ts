@@ -30,6 +30,12 @@ const failedCheck = {
   completedAt: "2026-08-06T00:00:00Z",
   diagnostic: "assertion failed",
 };
+const passedCheck = {
+  ...failedCheck,
+  state: "SUCCESS",
+  bucket: "pass" as const,
+  diagnostic: null,
+};
 
 const config: HarnessConfig = {
   repo: "owner/repo",
@@ -233,6 +239,87 @@ test("failed required CI permits two exact human-approved Worker cycles before e
     }, { clock, ids }),
     /within the rework limit/,
   );
+});
+
+test("a newer base suspends auto-merge and requires a fresh review of the merged HEAD", async () => {
+  const store = new MemoryStore();
+  const github = new FakeGitHub([issue({ number: 40, title: "Refresh base" })]);
+  const git = new FakeGit();
+  const refreshedBase = "e".repeat(40);
+  const refreshedHead = "f".repeat(40);
+  const controller = new HarnessController({
+    config,
+    store,
+    github,
+    git,
+    herdr: new FakeHerdr([
+      { lane: "worker", status: "completed", headSha: oldHead },
+      { lane: "reviewer", status: "pass", reviewedHeadSha: oldHead },
+      { lane: "reviewer", status: "pass", reviewedHeadSha: refreshedHead },
+    ]),
+    analyst: new FakeAnalyst(),
+    evidence: new FakeEvidence(),
+    clock: new FakeClock(),
+    ids: new SequenceIds(),
+    preflight: new FakeRuntimePreflight(),
+  });
+
+  await driveUntil(controller, store, "awaiting_merge");
+  github.autoMergeEnabled = true;
+  github.requiredChecks = [passedCheck];
+  git.baseSha = refreshedBase;
+  git.baseSyncHeadSha = refreshedHead;
+
+  const refreshed = await controller.tick();
+  assert.equal(refreshed.action, "base_refreshed");
+  assert.equal(store.state.activeJob?.state, "reviewer_ready");
+  assert.equal(store.state.activeJob?.baseSha, refreshedBase);
+  assert.equal(store.state.activeJob?.headSha, refreshedHead);
+  assert.deepEqual(github.suspended, [42]);
+  assert.deepEqual(git.baseSyncs, [{
+    expectedHeadSha: oldHead,
+    expectedRemoteHeadSha: oldHead,
+    latestBaseSha: refreshedBase,
+  }]);
+
+  await driveUntil(controller, store, "awaiting_merge");
+  assert.equal(store.state.activeJob?.pullRequest?.headSha, refreshedHead);
+  assert.equal(github.published.at(-1)?.headSha, refreshedHead);
+  assert.equal(store.state.activeJob?.ciReworkCount, 0);
+});
+
+test("a conflicting base refresh fails closed after suspending auto-merge", async () => {
+  const store = new MemoryStore();
+  const github = new FakeGitHub([issue({ number: 41, title: "Conflict base" })]);
+  const git = new FakeGit();
+  const controller = new HarnessController({
+    config,
+    store,
+    github,
+    git,
+    herdr: new FakeHerdr([
+      { lane: "worker", status: "completed", headSha: oldHead },
+      { lane: "reviewer", status: "pass", reviewedHeadSha: oldHead },
+    ]),
+    analyst: new FakeAnalyst(),
+    evidence: new FakeEvidence(),
+    clock: new FakeClock(),
+    ids: new SequenceIds(),
+    preflight: new FakeRuntimePreflight(),
+  });
+
+  await driveUntil(controller, store, "awaiting_merge");
+  github.autoMergeEnabled = true;
+  github.requiredChecks = [passedCheck];
+  git.baseSha = "e".repeat(40);
+  git.baseSyncFailure = { class: "agent_decision", reason: "main conflicts with the reviewed HEAD" };
+
+  const blocked = await controller.tick();
+  assert.equal(blocked.action, "blocked");
+  assert.equal(store.state.activeJob?.state, "blocked");
+  assert.equal(store.state.activeJob?.incident?.class, "agent_decision");
+  assert.equal(store.state.activeJob?.headSha, oldHead);
+  assert.deepEqual(github.suspended, [42]);
 });
 
 async function driveUntil(

@@ -66,6 +66,7 @@ export type TickAction =
   | "analysis_recorded"
   | "waiting_for_approval"
   | "recovery_applied"
+  | "base_refreshed"
   | "published"
   | "publish_retry"
   | "waiting_for_merge"
@@ -800,6 +801,8 @@ export class HarnessController {
         attemptResult: null,
       });
     }
+    const refreshed = await this.refreshBaseForReview(state, job, false, "publish_retry");
+    if (refreshed) return refreshed;
     let pullRequest;
     try {
       pullRequest = await this.deps.github.publish({
@@ -856,33 +859,43 @@ export class HarnessController {
     }
     if (observation.status === "open") {
       const failedChecks = observation.requiredChecks.filter(isFailedCheck);
-      if (failedChecks.length === 0) {
-        return result(true, "waiting_for_merge", job.id, `PR #${job.pullRequest.number} is still open`);
-      }
-      if (observation.autoMergeEnabled) {
-        try {
-          await this.deps.github.suspendAutoMerge(job.task.repo, job.pullRequest);
-        } catch (error) {
-          return result(
-            false,
-            "waiting_for_merge",
-            job.id,
-            `required CI failed but auto-merge suspension is not confirmed: ${message(error)}`,
-          );
+      if (failedChecks.length > 0) {
+        if (observation.autoMergeEnabled) {
+          try {
+            await this.deps.github.suspendAutoMerge(job.task.repo, job.pullRequest);
+          } catch (error) {
+            return result(
+              false,
+              "waiting_for_merge",
+              job.id,
+              `required CI failed but auto-merge suspension is not confirmed: ${message(error)}`,
+            );
+          }
         }
+        const ciFailure: CiFailure = {
+          headSha: job.pullRequest.headSha,
+          observedAt: this.deps.clock.now(),
+          checks: failedChecks,
+        };
+        return this.block(state, job, {
+          class: (job.ciReworkCount ?? 0) >= MAX_CI_REWORKS ? "ci_rework_exhausted" : "ci_failure",
+          lane: "controller",
+          summary: summarizeCiFailure(job.pullRequest.number, ciFailure),
+          attemptResult: null,
+          ciFailure,
+        });
       }
-      const ciFailure: CiFailure = {
-        headSha: job.pullRequest.headSha,
-        observedAt: this.deps.clock.now(),
-        checks: failedChecks,
-      };
-      return this.block(state, job, {
-        class: (job.ciReworkCount ?? 0) >= MAX_CI_REWORKS ? "ci_rework_exhausted" : "ci_failure",
-        lane: "controller",
-        summary: summarizeCiFailure(job.pullRequest.number, ciFailure),
-        attemptResult: null,
-        ciFailure,
-      });
+      if (observation.requiredChecks.some((check) => check.bucket === "pending")) {
+        return result(true, "waiting_for_merge", job.id, `PR #${job.pullRequest.number} required checks are still pending`);
+      }
+      const refreshed = await this.refreshBaseForReview(
+        state,
+        job,
+        observation.autoMergeEnabled,
+        "waiting_for_merge",
+      );
+      if (refreshed) return refreshed;
+      return result(true, "waiting_for_merge", job.id, `PR #${job.pullRequest.number} is still open`);
     }
     if (observation.status === "closed_unmerged") {
       return this.block(state, job, {
@@ -895,6 +908,76 @@ export class HarnessController {
     const next = evolveJob(job, this.deps.clock.now(), { state: "done", lastError: null });
     await this.saveJob(state, job, next);
     return result(true, "merged", job.id, `PR #${job.pullRequest.number} merged`);
+  }
+
+  private async refreshBaseForReview(
+    state: HarnessState,
+    job: Job,
+    autoMergeEnabled: boolean,
+    retryAction: "publish_retry" | "waiting_for_merge",
+  ): Promise<TickResult | null> {
+    if (!job.worktree || !job.headSha) {
+      return this.block(state, job, {
+        class: "integrity_violation",
+        lane: "controller",
+        summary: "base refresh requires a worktree and reviewed HEAD",
+        attemptResult: null,
+      });
+    }
+
+    let latestBaseSha: string;
+    try {
+      latestBaseSha = await this.deps.git.refreshBase(this.deps.config.localPath, this.deps.config.baseRef);
+    } catch (error) {
+      return result(false, retryAction, job.id, `base refresh is retryable: ${message(error)}`);
+    }
+    if (latestBaseSha === job.baseSha) return null;
+
+    if (autoMergeEnabled && job.pullRequest) {
+      try {
+        await this.deps.github.suspendAutoMerge(job.task.repo, job.pullRequest);
+      } catch (error) {
+        return result(false, retryAction, job.id, `base moved but auto-merge suspension is not confirmed: ${message(error)}`);
+      }
+    }
+
+    let verification;
+    try {
+      verification = await this.deps.git.syncBase({
+        worktree: job.worktree,
+        branch: job.branch,
+        baseRef: this.deps.config.baseRef,
+        expectedHeadSha: job.headSha,
+        expectedRemoteHeadSha: job.pullRequest?.headSha ?? null,
+        latestBaseSha,
+      });
+    } catch (error) {
+      return result(false, retryAction, job.id, `base refresh is retryable: ${message(error)}`);
+    }
+    if (!verification.ok) {
+      return this.block(state, job, {
+        class: verification.class,
+        lane: "controller",
+        summary: verification.reason,
+        attemptResult: null,
+      });
+    }
+
+    const next = evolveJob(job, this.deps.clock.now(), {
+      state: "reviewer_ready",
+      baseSha: latestBaseSha,
+      headSha: verification.headSha,
+      activeAttempt: null,
+      ciFailure: null,
+      lastError: null,
+    });
+    await this.saveJob(state, job, next);
+    return result(
+      true,
+      "base_refreshed",
+      job.id,
+      `base advanced to ${latestBaseSha}; refreshed HEAD ${verification.headSha} requires fresh review`,
+    );
   }
 
   private async diagnoseOrWait(state: HarnessState, job: Job): Promise<TickResult> {
