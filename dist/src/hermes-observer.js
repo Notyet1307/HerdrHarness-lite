@@ -6,6 +6,7 @@ import { dirname, isAbsolute, join } from "node:path";
 import { JsonStateStore } from "./adapters/json-store.js";
 import { isRetryAction } from "./model.js";
 import { allowedActionsFor } from "./policy.js";
+import { controllerHeartbeatPath } from "./controller-heartbeat.js";
 const MAX_MESSAGE_LENGTH = 3_900;
 const MAX_OUTBOX = 512;
 const LOG_CHUNK_BYTES = 1024 * 1024;
@@ -217,11 +218,11 @@ function observeControllerEvent(config, observer, line, position) {
     ].join("\n"));
     if (event.action === "preflight_failed") {
         observer.controllerDown = true;
-        observer.controllerDownLogMtimeMs = safeLogMtime(config.controllerLog);
+        observer.controllerDownLogMtimeMs = safeLogMtime(config.controllerHeartbeat);
     }
 }
 function observeHeartbeat(config, observer) {
-    const mtime = safeLogMtime(config.controllerLog);
+    const mtime = safeLogMtime(config.controllerHeartbeat);
     const stale = mtime === 0 || Date.now() - mtime > config.heartbeatTimeoutMs;
     if (stale && !observer.controllerDown) {
         observer.controllerDown = true;
@@ -399,7 +400,12 @@ function loadConfig(path) {
         throw new Error("Harness config stateDir must be absolute");
     if (!existsSync(harness.stateDir))
         throw new Error("Harness stateDir does not exist");
-    return { ...file, bridgeConfig: path, harnessStateDir: harness.stateDir };
+    return {
+        ...file,
+        bridgeConfig: path,
+        harnessStateDir: harness.stateDir,
+        controllerHeartbeat: controllerHeartbeatPath(harness.stateDir),
+    };
 }
 function assertSecureAbsoluteFile(path, label) {
     if (!isAbsolute(path))

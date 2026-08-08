@@ -11,7 +11,8 @@ import { JsonStateStore } from "./adapters/json-store.js";
 import { LocalEvidence } from "./adapters/local-evidence.js";
 import { RuntimePreflightCli } from "./adapters/runtime-preflight.js";
 import { HarnessController } from "./controller.js";
-import { approveRecovery, reassessIncident, resolveDecision } from "./recovery.js";
+import { startControllerHeartbeat } from "./controller-heartbeat.js";
+import { approveRecovery, cancelHeldJob, reassessIncident, resolveDecision } from "./recovery.js";
 const usage = `Usage:
   herdr-harness-lite tick --config /absolute/harness.config.json
   herdr-harness-lite run --config /absolute/harness.config.json [--poll-ms 15000] [--max-cycles N]
@@ -19,6 +20,7 @@ const usage = `Usage:
   herdr-harness-lite approve --config /absolute/harness.config.json --revision N --incident ID --analysis ID --actor TEXT --reason TEXT
   herdr-harness-lite reassess --config /absolute/harness.config.json --revision N --incident ID --analysis ID --actor TEXT --reason TEXT
   herdr-harness-lite resolve-decision --config /absolute/harness.config.json --revision N --incident ID --analysis ID --actor TEXT --reason TEXT
+  herdr-harness-lite cancel --config /absolute/harness.config.json --revision N --incident ID --analysis ID --actor TEXT --reason TEXT
 `;
 class SystemClock {
     now() {
@@ -47,7 +49,7 @@ async function main(argv) {
         process.stdout.write(`${JSON.stringify(await store.load(), null, 2)}\n`);
         return 0;
     }
-    if (command === "approve" || command === "reassess" || command === "resolve-decision") {
+    if (command === "approve" || command === "reassess" || command === "resolve-decision" || command === "cancel") {
         const request = {
             expectedRevision: integerFlag(argv, "--revision"),
             incidentId: requiredFlag(argv, "--incident"),
@@ -59,7 +61,9 @@ async function main(argv) {
             ? await approveRecovery(store, request, { clock, ids })
             : command === "reassess"
                 ? await reassessIncident(store, request, { clock, ids })
-                : await resolveDecision(store, request, { clock, ids });
+                : command === "resolve-decision"
+                    ? await resolveDecision(store, request, { clock, ids })
+                    : await cancelHeldJob(store, request, { clock, ids });
         process.stdout.write(`${JSON.stringify(record, null, 2)}\n`);
         return 0;
     }
@@ -86,16 +90,22 @@ async function main(argv) {
     const maxCycles = optionalIntegerFlag(argv, "--max-cycles");
     if (pollMs < 100)
         throw new Error("--poll-ms must be at least 100");
-    let cycle = 0;
-    for (;;) {
-        cycle += 1;
-        const output = await controller.tick();
-        process.stdout.write(`${JSON.stringify({ cycle, ...output })}\n`);
-        if (output.action === "preflight_failed")
-            return 1;
-        if (maxCycles !== null && cycle >= maxCycles)
-            return output.ok ? 0 : 1;
-        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, pollMs);
+    const heartbeat = startControllerHeartbeat(config.stateDir);
+    try {
+        let cycle = 0;
+        for (;;) {
+            cycle += 1;
+            const output = await controller.tick();
+            process.stdout.write(`${JSON.stringify({ cycle, ...output })}\n`);
+            if (output.action === "preflight_failed")
+                return 1;
+            if (maxCycles !== null && cycle >= maxCycles)
+                return output.ok ? 0 : 1;
+            Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, pollMs);
+        }
+    }
+    finally {
+        heartbeat.stop();
     }
 }
 function loadConfig(path) {

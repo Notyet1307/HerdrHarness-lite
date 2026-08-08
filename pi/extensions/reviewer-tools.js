@@ -300,7 +300,7 @@ function processFailure(output) {
   return detail.length <= 4_000 ? detail : `[truncated]\n${detail.slice(-4_000)}`;
 }
 
-function publishResult(path, body) {
+export function publishResult(path, body) {
   mkdirSync(dirname(path), { recursive: true });
   const temporary = `${path}.${randomUUID()}.tmp`;
   let fd = null;

@@ -14,7 +14,7 @@ export function workerPrompt(job, attempt) {
         `After validation, load and follow focused-self-check exactly once against attempt Base SHA ${attempt.baseSha}. Do not run code-review or launch review subagents; the fresh independent Reviewer owns the complete Standards and Spec review.`,
         "Apply only concrete focused-check fixes, commit the final state, and verify the worktree is clean.",
         "When human input is required, return status=blocked instead of guessing.",
-        resultInstruction(job, attempt),
+        resultInstruction(attempt),
     ].join("\n\n");
 }
 export function reviewerPrompt(job, attempt) {
@@ -31,10 +31,10 @@ export function reviewerPrompt(job, attempt) {
         "After a successful preflight, follow the loaded code-review skill with Base SHA as the fixed point and independently review the exact Head SHA. Generic shell and file-writing tools are intentionally unavailable.",
         "Call review_validate exactly once for the configured validation command; it runs only in a disposable writable copy.",
         "Use status=changes only with actionable findings; use status=blocked when either review axis or required evidence is incomplete.",
-        resultInstruction(job, attempt),
+        resultInstruction(attempt),
     ].join("\n\n");
 }
-function resultInstruction(job, attempt) {
+function resultInstruction(attempt) {
     if (attempt.lane === "reviewer") {
         return [
             "Before settling, call review_submit exactly once with status, summary, and findings.",
@@ -42,11 +42,9 @@ function resultInstruction(job, attempt) {
             "Herdr idle/done is only liveness; Harness accepts work only from this durable result plus Git verification.",
         ].join("\n");
     }
-    const schema = '{"version":1,"jobId":"...","attemptId":"...","lane":"worker","status":"completed|blocked|failed","summary":"...","headSha":"40-char SHA or null","failedCommands":[]}';
     return [
-        `Before settling, write exactly one UTF-8 JSON object to ${attempt.resultPath}.`,
-        `Required identity: jobId=${job.id}, attemptId=${attempt.id}, lane=${attempt.lane}.`,
-        `Schema: ${schema}`,
+        "Before settling, call worker_submit exactly once with status, summary, headSha, and failedCommands.",
+        "The Harness-owned tool binds job, attempt, and lane and atomically writes the result channel; do not create a result file yourself.",
         "Herdr idle/done is only liveness; Harness accepts work only from this durable result plus Git verification.",
     ].join("\n");
 }

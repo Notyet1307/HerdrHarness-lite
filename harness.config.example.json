@@ -21,6 +21,9 @@
   "workerArgv": [
     "--no-approve",
     "--no-skills",
+    "--no-extensions",
+    "--extension",
+    "/absolute/path/to/HerdrHarness-lite/pi/extensions/worker-tools.js",
     "--skill",
     "/absolute/path/to/.agents/skills/implement",
     "--skill",
@@ -28,7 +31,7 @@
     "--skill",
     "/absolute/path/to/HerdrHarness-lite/pi/skills/focused-self-check",
     "--tools",
-    "read,bash,edit,write,grep,find,ls",
+    "read,bash,edit,write,grep,find,ls,worker_submit",
     "--thinking",
     "high"
   ],

@@ -15,6 +15,12 @@ export declare class GitHubGh implements GitHubPort {
         claimLabel: string;
         readyLabel: string;
     }): Promise<void>;
+    requeueIssue(input: {
+        repo: string;
+        issueNumber: number;
+        claimLabel: string;
+        readyLabel: string;
+    }): Promise<void>;
     publish(input: {
         repo: string;
         issueNumber: number;

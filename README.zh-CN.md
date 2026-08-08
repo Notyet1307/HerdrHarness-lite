@@ -214,6 +214,14 @@ Fresh Worker 不会丢掉已提交改动：它继续使用同一任务 worktree�
 
 完整性违规、任务身份过期、HEAD 漂移、禁止动作和未知证据不能靠改配置或重复命令转成 retry。唯一兼容迁移是旧版把“Reviewer 启动前残留”误记成完整性违规，且账本能证明 Reviewer 从未获得 handle；它会被精确 `reassess` 为 `reviewer_preflight_dirty`，仍需新 Analyst 判断、人类批准和恢复前 clean-tree 校验。
 
+如果要废止一个尚未创建 PR 的精确 held job，使用 `cancel` 并提供当前 revision、incident、analysis、actor 与 reason。下一次 `tick` 会关闭其 pane，把 claim 标签换回 `readyLabel`，以 `cancelled` 归档旧 job，再允许新 job 领取同一 Issue。该操作保留原完整性 incident，不把它转换成 retry 权限。
+
+```bash
+node dist/src/cli.js cancel --config /ABSOLUTE/PATH/harness.config.json \
+  --revision REVISION --incident INCIDENT_ID --analysis ANALYSIS_ID \
+  --actor OPERATOR --reason "修正运行时后，废止本次 fail-closed run"
+```
+
 ### 6. Agent 交付或交接
 
 只有以下事实可以支撑“任务完成”：
@@ -279,7 +287,7 @@ blocked incident
 
 | 角色 | 什么时候运行 | 拥有什么信息 | 权限与完成条件 |
 | --- | --- | --- | --- |
-| Worker | 首次实现、Reviewer actionable findings 后的 rework、获批的 Worker 恢复 | 不可变 Issue snapshot、task digest、base/branch、可选的有界 rework/recovery brief、result path | 可修改任务 worktree、测试、执行一次 focused self-check 并提交；不能启动 review subagent、push 或建 PR。只有身份绑定 durable result 与 Git 验证同时通过才完成 |
+| Worker | 首次实现、Reviewer actionable findings 后的 rework、获批的 Worker 恢复 | 不可变 Issue snapshot、task digest、base/branch、可选的有界 rework/recovery brief | 可修改任务 worktree、测试、执行一次 focused self-check、提交并调用 `worker_submit`；不能提供结果身份、启动 review subagent、push 或建 PR。只有 Harness 绑定的 durable result 与 Git 验证同时通过才完成 |
 | Reviewer | 每次 Worker HEAD 被接受后 | Issue 目标、固定 base、精确 HEAD、Harness 生成的 Git evidence、固定验证 argv | 顶层无通用 shell/edit/write；先预检实际验证环境，再独立检查 Standards 和 Spec，在验证副本运行命令，通过 `review_submit` 返回 `pass/changes/blocked` |
 | Analyst | claim 后建立任务绑定 session；正常主链不介入，只有 blocked 时执行判断 turn | 任务 snapshot、incident、账本/Git/最近 review 等有界证据；最多请求 `maxAnalystTurns` 轮白名单只读证据 | 只能建议 `hold` 或 policy 允许的 fresh retry；不能写状态、改 Git、操作 Herdr 或批准自己 |
 | 人类 | provider/运行时变更、风险接受和恢复授权时 | 精确 revision、incident、analysis 与证据 | 唯一可签发 retry approval；审批后 Controller 仍会重新检查 policy、身份和 Git |
@@ -295,6 +303,8 @@ Worker 不再加载 `code-review`，也没有 `subagent` 工具；bundled
 Reviewer 针对精确实现 HEAD 创建只读源码快照。它必须先调用 `review_preflight`，从真实 Reviewer 进程内证明源码/验证路径、固定命令和所需 Docker socket 可用；之后才能前台启动一次 `subagent`，且必须恰好包含一个 Standards 子代理和一个 Spec 子代理。两个子代理的工具上限都是 `read,grep,find,ls`。预检失败，或任一轴失败、缺失、没有实质输出，都不能得到 `pass` 或 `changes`。
 
 `review_validate` 在独立可写副本中执行 attempt 已绑定的固定 argv，使用最小环境和私有 cache/home/temp。源码、验证、状态与结果路径按 canonical path 双向检查不得重叠，包括符号链接别名。`review_submit` 在产品 worktree 外原子发布唯一结果，已有结果不可覆盖。
+
+`worker_submit` 同样只接收结果字段；job、attempt、lane 和 result path 身份均来自 Harness 管理的 descriptor，原子结果通道也不能覆盖已有结果。
 
 如果 `reviewerValidationArgv` 用 `/usr/bin/env
 DOCKER_CONFIG=/absolute/path` 显式包装验证命令，预检只复用这个声明路径，
@@ -337,7 +347,7 @@ Harness 不会：
 | `baseRef` | 目标分支，通常为 `main` |
 | `readyLabel` | GitHub 可执行任务标签，例如 `ready-for-agent` |
 | `claimLabel` | 持久领取标记，例如 `agent:claimed` |
-| `stateDir` | 私有账本、事件、Analyst receipts 和 Reviewer attempt 数据 |
+| `stateDir` | 私有账本、事件、Analyst receipts、attempt descriptors 和 Controller 心跳 |
 | `worktreeRoot` | Herdr 任务 worktree 根目录 |
 | `maxReviewRounds` | Reviewer/rework 最大轮数 |
 | `maxAnalystTurns` | Analyst 可请求的最大证据轮数 |
@@ -353,11 +363,11 @@ Harness 不会：
 
 | 角色 | 必需内容 | 工具 | Thinking |
 | --- | --- | --- | --- |
-| Worker | `implement`、`tdd`、bundled `focused-self-check` | `read,bash,edit,write,grep,find,ls` | `high`、`xhigh` 或 `max` |
+| Worker | `implement`、`tdd`、bundled `focused-self-check` 与 `worker-tools.js` | `read,bash,edit,write,grep,find,ls,worker_submit` | `high`、`xhigh` 或 `max` |
 | Reviewer | bundled `code-review`、显式 `pi-subagents` 与 `reviewer-tools.js` extensions | `read,grep,find,ls,subagent,review_preflight,review_validate,review_submit` | `max` |
 | Review-axis 子代理 | fresh context，不继承 skills/extensions | `read,grep,find,ls` | `max` |
 
-Worker 与 Reviewer 都必须包含 `--no-approve --no-skills`；Reviewer 还必须包含 `--no-extensions` 和示例配置声明的两个 extension。Controller 会核对 skill/extension 身份、工具集合和 bundled review 代码。可选运行时选择器仅限 `--provider`、`--model`、`--no-session`。
+Worker 与 Reviewer 都必须包含 `--no-approve --no-skills --no-extensions`。Worker 只加载 bundled `worker-tools.js`；Reviewer 加载示例配置声明的两个 extension。Controller 会核对 skill/extension 身份、工具集合和 bundled 代码。可选运行时选择器仅限 `--provider`、`--model`、`--no-session`。
 
 ### Provider/model 示例
 
@@ -466,10 +476,10 @@ npm run verify
 src/model.ts       领域记录与不变量
 src/controller.ts  单写者状态机
 src/policy.ts      incident policy 与结果验证
-src/recovery.ts    approval 与 reassessment gates
+src/recovery.ts    approval、reassessment 与 cancellation gates
 src/prompts.ts     Worker/Reviewer 契约
 src/ports.ts       外部边界
-src/cli.ts         tick/run/status/approve/reassess
+src/cli.ts         tick/run/status/恢复操作命令
 src/adapters/      GitHub、Git、Herdr、Analyst、证据与状态
 ```
 

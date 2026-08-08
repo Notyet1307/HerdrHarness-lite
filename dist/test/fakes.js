@@ -3,6 +3,7 @@ import { digest } from "../src/model.js";
 export const validCodeReviewSkillPath = resolve("pi/skills/code-review");
 export const validFocusedSelfCheckSkillPath = resolve("pi/skills/focused-self-check");
 export const validPiSubagentsExtensionPath = resolve("test/fixtures/pi-subagents/index.js");
+export const validWorkerToolsExtensionPath = resolve("pi/extensions/worker-tools.js");
 export const validReviewerToolsExtensionPath = resolve("pi/extensions/reviewer-tools.js");
 export const validImplementSkillPath = resolve("test/fixtures/pi-skills/skills/implement");
 export const validTddSkillPath = resolve("test/fixtures/pi-skills/skills/tdd");
@@ -11,10 +12,12 @@ export const untrustedImplementSkillPath = resolve("test/fixtures/untrusted-skil
 export const validWorkerArgv = [
     "--no-approve",
     "--no-skills",
+    "--no-extensions",
+    "--extension", validWorkerToolsExtensionPath,
     "--skill", validImplementSkillPath,
     "--skill", validTddSkillPath,
     "--skill", validFocusedSelfCheckSkillPath,
-    "--tools", "read,bash,edit,write,grep,find,ls",
+    "--tools", "read,bash,edit,write,grep,find,ls,worker_submit",
     "--thinking", "high",
 ];
 export const validReviewerArgv = [
@@ -103,6 +106,14 @@ export class FakeGitHub {
                 issue.labels.push(input.claimLabel);
         }
     }
+    async requeueIssue(input) {
+        const issue = this.graph.find((candidate) => candidate.number === input.issueNumber);
+        if (!issue)
+            throw new Error(`missing issue #${input.issueNumber}`);
+        issue.labels = issue.labels.filter((label) => label !== input.claimLabel);
+        if (!issue.labels.includes(input.readyLabel))
+            issue.labels.push(input.readyLabel);
+    }
     async publish(input) {
         const pr = { number: 42, url: "https://example.test/pr/42", headSha: input.headSha };
         this.published.push(pr);
@@ -138,6 +149,9 @@ export class FakeGit {
             expectedRemoteHeadSha: input.expectedRemoteHeadSha,
         });
         return this.workerFailure ? { ok: false, ...this.workerFailure } : { ok: true, headSha: input.reportedHeadSha };
+    }
+    async prepareWorkerResult(input) {
+        return { descriptorPath: join(input.rootPath, "descriptor.json") };
     }
     async prepareReviewer(input) {
         this.reviewerValidationArgv.push([...input.validationArgv]);

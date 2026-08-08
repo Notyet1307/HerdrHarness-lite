@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -18,6 +18,7 @@ test("Hermes observer baselines old logs and retries text or approval-card deliv
     const harnessConfig = join(root, "harness.json");
     const bridgeConfig = join(root, "bridge.json");
     const controllerLog = join(root, "controller.log");
+    const controllerHeartbeat = join(stateDir, "controller-heartbeat.json");
     mkdirSync(stateDir, { recursive: true, mode: 0o700 });
     writeFileSync(harnessConfig, JSON.stringify({
       repo: "owner/repo",
@@ -26,6 +27,9 @@ test("Hermes observer baselines old logs and retries text or approval-card deliv
       reviewerArgv: [],
     }), { encoding: "utf8", mode: 0o600 });
     writeFileSync(controllerLog, `${JSON.stringify({ ok: false, action: "preflight_failed", jobId: null, message: "historical failure" })}\n`, { encoding: "utf8", mode: 0o600 });
+    const old = new Date(Date.now() - 120_000);
+    utimesSync(controllerLog, old, old);
+    writeFileSync(controllerHeartbeat, "{}\n", { encoding: "utf8", mode: 0o600 });
 
     writeBridge("/usr/bin/false");
     const first = runObserver();
@@ -36,6 +40,7 @@ test("Hermes observer baselines old logs and retries text or approval-card deliv
     assert.match(observer.outbox[0]!.message ?? "", /owner\/repo/);
     assert.ok(!(observer.outbox[0]!.message ?? "").includes("详情读取失败"));
     assert.ok(!(observer.outbox[0]!.message ?? "").includes("historical failure"));
+    assert.ok(!observer.outbox.some((entry) => (entry.message ?? "").includes("Controller 心跳已停止")));
     assert.equal(observer.outbox[0]!.attempts, 1);
 
     observer.outbox[0]!.nextAttemptAt = 0;

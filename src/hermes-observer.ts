@@ -18,6 +18,7 @@ import { dirname, isAbsolute, join } from "node:path";
 import { JsonStateStore } from "./adapters/json-store.js";
 import { isRetryAction, type HarnessState, type Job, type JobState } from "./model.js";
 import { allowedActionsFor } from "./policy.js";
+import { controllerHeartbeatPath } from "./controller-heartbeat.js";
 
 const MAX_MESSAGE_LENGTH = 3_900;
 const MAX_OUTBOX = 512;
@@ -38,7 +39,7 @@ type ObserverConfigFile = {
   heartbeatTimeoutMs: number;
 };
 
-type ObserverConfig = ObserverConfigFile & { bridgeConfig: string; harnessStateDir: string };
+type ObserverConfig = ObserverConfigFile & { bridgeConfig: string; harnessStateDir: string; controllerHeartbeat: string };
 
 type TextOutboxEntry = {
   kind: "text";
@@ -283,12 +284,12 @@ function observeControllerEvent(config: ObserverConfig, observer: ObserverState,
 
   if (event.action === "preflight_failed") {
     observer.controllerDown = true;
-    observer.controllerDownLogMtimeMs = safeLogMtime(config.controllerLog);
+    observer.controllerDownLogMtimeMs = safeLogMtime(config.controllerHeartbeat);
   }
 }
 
 function observeHeartbeat(config: ObserverConfig, observer: ObserverState): void {
-  const mtime = safeLogMtime(config.controllerLog);
+  const mtime = safeLogMtime(config.controllerHeartbeat);
   const stale = mtime === 0 || Date.now() - mtime > config.heartbeatTimeoutMs;
   if (stale && !observer.controllerDown) {
     observer.controllerDown = true;
@@ -468,7 +469,12 @@ function loadConfig(path: string): ObserverConfig {
   const harness = JSON.parse(readFileSync(file.harnessConfig, "utf8")) as { stateDir?: unknown };
   if (typeof harness.stateDir !== "string" || !isAbsolute(harness.stateDir)) throw new Error("Harness config stateDir must be absolute");
   if (!existsSync(harness.stateDir)) throw new Error("Harness stateDir does not exist");
-  return { ...file, bridgeConfig: path, harnessStateDir: harness.stateDir };
+  return {
+    ...file,
+    bridgeConfig: path,
+    harnessStateDir: harness.stateDir,
+    controllerHeartbeat: controllerHeartbeatPath(harness.stateDir),
+  };
 }
 
 function assertSecureAbsoluteFile(path: string, label: string): void {

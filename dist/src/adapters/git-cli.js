@@ -1,6 +1,6 @@
 import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join, relative, resolve, sep } from "node:path";
-import { pathsOverlap } from "../path-safety.js";
+import { pathIsWithin, pathsOverlap } from "../path-safety.js";
 import { requireSuccess, SyncCommandRunner } from "./command.js";
 export class GitCli {
     runner;
@@ -52,6 +52,26 @@ export class GitCli {
             };
         }
         return { ok: true, headSha: head };
+    }
+    async prepareWorkerResult(input) {
+        const rootPath = resolve(input.rootPath);
+        const resultPath = resolve(input.resultPath);
+        if (pathsOverlap(input.worktree.path, rootPath))
+            throw new Error("Worker descriptor state must be outside the product worktree");
+        if (!pathIsWithin(input.worktree.path, resultPath))
+            throw new Error("Worker result path must stay inside the product worktree");
+        const descriptorPath = join(rootPath, "descriptor.json");
+        const descriptor = { version: 1, jobId: input.jobId, attemptId: input.attemptId, resultPath };
+        if (existsSync(descriptorPath)) {
+            const existing = JSON.parse(readFileSync(descriptorPath, "utf8"));
+            if (JSON.stringify(existing) !== JSON.stringify(descriptor))
+                throw new Error("Worker descriptor identity changed after preparation");
+            return { descriptorPath };
+        }
+        mkdirSync(rootPath, { recursive: true, mode: 0o700 });
+        chmodSync(rootPath, 0o700);
+        writeFileSync(descriptorPath, `${JSON.stringify(descriptor, null, 2)}\n`, { flag: "wx", mode: 0o400 });
+        return { descriptorPath };
     }
     async prepareReviewer(input) {
         const rootPath = resolve(input.rootPath);

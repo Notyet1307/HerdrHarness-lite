@@ -214,6 +214,14 @@ A fresh Worker retains committed work: it uses the same task worktree and receiv
 
 Integrity violations, stale task identity, HEAD drift, forbidden actions, and unknown evidence cannot become retryable through a config edit or repeated command. The sole compatibility migration is a legacy incident that misattributed pre-start residue to a Reviewer when the ledger proves no Reviewer handle was ever issued; exact `reassess` converts it to `reviewer_preflight_dirty`, still requiring fresh Analyst advice, human approval, and a clean-tree check before recovery.
 
+To retire an exact held job before any PR exists, use `cancel` with the current revision, incident, analysis, actor, and reason. The next `tick` closes its pane, moves the claim label back to `readyLabel`, archives the old job as `cancelled`, and permits a new job to claim the issue. This preserves the integrity incident instead of converting it into retry authority.
+
+```bash
+node dist/src/cli.js cancel --config /ABSOLUTE/PATH/harness.config.json \
+  --revision REVISION --incident INCIDENT_ID --analysis ANALYSIS_ID \
+  --actor OPERATOR --reason "Retire this fail-closed run after correcting the runtime"
+```
+
 ### 6. Agent completion and handoff
 
 Only these facts support “the issue is complete”:
@@ -279,7 +287,7 @@ Each `tick` performs at most one durable transition. A restarted process continu
 
 | Role | When it runs | Information available | Authority and completion |
 | --- | --- | --- | --- |
-| Worker | Initial implementation, rework after actionable Reviewer findings, or approved Worker recovery | Immutable issue snapshot, task digest, base/branch, optional bounded rework/recovery brief, and result path | May modify the task worktree, validate, run one focused self-check, and commit; cannot launch review subagents, push, or open a PR. Completion requires an identity-bound durable result plus Git verification |
+| Worker | Initial implementation, rework after actionable Reviewer findings, or approved Worker recovery | Immutable issue snapshot, task digest, base/branch, and optional bounded rework/recovery brief | May modify the task worktree, validate, run one focused self-check, commit, and call `worker_submit`; cannot supply result identity, launch review subagents, push, or open a PR. Completion requires the Harness-bound durable result plus Git verification |
 | Reviewer | After each Worker HEAD is accepted | Issue objective, fixed base, exact HEAD, Harness-generated Git evidence, and fixed validation argv | Has no generic shell/edit/write at the top level; preflights its real validation environment, independently reviews Standards and Spec, validates in a disposable copy, and returns `pass/changes/blocked` through `review_submit` |
 | Analyst | A task-bound session starts after claim; it does not join the normal path and receives a decision turn only when blocked | Task snapshot, incident, and bounded ledger/Git/last-review evidence; may request at most `maxAnalystTurns` of whitelisted read-only evidence | May recommend `hold` or a policy-allowed fresh retry; cannot write state, mutate Git, operate Herdr, or approve itself |
 | Human | Runtime/provider changes, risk acceptance, and recovery authorization | Exact revision, incident, analysis, and evidence | Sole authority for retry approval; the Controller still rechecks policy, identity, and Git after approval |
@@ -295,6 +303,8 @@ the fresh Reviewer remains the only complete two-axis review.
 The Reviewer receives a read-only snapshot of the exact implementation HEAD. It must first call `review_preflight`, which proves its source/validation paths, configured executable, and required Docker socket from inside the actual Reviewer process. Only then may it launch `subagent` once in the foreground, containing exactly one Standards child and one Spec child. Both children are limited to `read,grep,find,ls`. A failed preflight or failed, missing, or non-substantive axis cannot produce `pass` or `changes`.
 
 `review_validate` executes the attempt-bound argv in a separate writable copy with a minimal environment and private cache/home/temp paths. Source, validation, state, and result paths are checked for two-way canonical overlap, including symlink aliases. `review_submit` atomically publishes the sole result outside the product worktree and cannot overwrite an existing result.
+
+`worker_submit` likewise takes only outcome fields. The Harness-owned descriptor supplies job, attempt, lane, and result-path identity, and the atomic channel cannot overwrite an existing result.
 
 If `reviewerValidationArgv` explicitly wraps its command with `/usr/bin/env
 DOCKER_CONFIG=/absolute/path`, preflight reuses only that declared path so an
@@ -337,7 +347,7 @@ Treat [`harness.config.example.json`](./harness.config.example.json) as the sing
 | `baseRef` | Target branch, usually `main` |
 | `readyLabel` | Executable GitHub task label, for example `ready-for-agent` |
 | `claimLabel` | Durable claim marker, for example `agent:claimed` |
-| `stateDir` | Private ledger, events, Analyst receipts, and Reviewer-attempt data |
+| `stateDir` | Private ledger, events, Analyst receipts, attempt descriptors, and Controller heartbeat |
 | `worktreeRoot` | Root for Herdr task worktrees |
 | `maxReviewRounds` | Maximum Reviewer/rework rounds |
 | `maxAnalystTurns` | Maximum Analyst evidence turns |
@@ -353,11 +363,11 @@ Role contracts:
 
 | Role | Required content | Tools | Thinking |
 | --- | --- | --- | --- |
-| Worker | `implement`, `tdd`, bundled `focused-self-check` | `read,bash,edit,write,grep,find,ls` | `high`, `xhigh`, or `max` |
+| Worker | `implement`, `tdd`, bundled `focused-self-check`, and `worker-tools.js` | `read,bash,edit,write,grep,find,ls,worker_submit` | `high`, `xhigh`, or `max` |
 | Reviewer | bundled `code-review` plus explicit `pi-subagents` and `reviewer-tools.js` extensions | `read,grep,find,ls,subagent,review_preflight,review_validate,review_submit` | `max` |
 | Review-axis child | Fresh context with no inherited skills/extensions | `read,grep,find,ls` | `max` |
 
-Worker and Reviewer both require `--no-approve --no-skills`. Reviewer additionally requires `--no-extensions` and the two extensions declared by the example config. The Controller verifies skill/extension identity, exact tools, and bundled review code. Optional runtime selectors are limited to `--provider`, `--model`, and `--no-session`.
+Worker and Reviewer both require `--no-approve --no-skills --no-extensions`. Worker loads only bundled `worker-tools.js`; Reviewer loads the two extensions declared by the example config. The Controller verifies skill/extension identity, exact tools, and bundled code. Optional runtime selectors are limited to `--provider`, `--model`, and `--no-session`.
 
 ### Provider/model examples
 
@@ -467,10 +477,10 @@ Implementation entry points:
 src/model.ts       domain records and invariants
 src/controller.ts  single-writer state machine
 src/policy.ts      incident policy and result validation
-src/recovery.ts    approval and reassessment gates
+src/recovery.ts    approval, reassessment, and cancellation gates
 src/prompts.ts     Worker/Reviewer contracts
 src/ports.ts       external boundaries
-src/cli.ts         tick/run/status/approve/reassess
+src/cli.ts         tick/run/status/recovery operator commands
 src/adapters/      GitHub, Git, Herdr, Analyst, evidence, and state
 ```
 

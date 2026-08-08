@@ -52,9 +52,11 @@ test("example config pins the Worker and Reviewer Pi role contracts", () => {
     "focused-self-check",
   ]);
   assert.deepEqual(flagValues(exampleConfig.reviewerArgv, "--skill").map(lastPathPart), ["code-review"]);
+  assert.equal(exampleConfig.workerArgv.includes("--no-extensions"), true);
   assert.equal(exampleConfig.reviewerArgv.includes("--no-extensions"), true);
+  assert.deepEqual(flagValues(exampleConfig.workerArgv, "--extension").map(lastPathPart), ["worker-tools.js"]);
   assert.deepEqual(flagValues(exampleConfig.reviewerArgv, "--extension").map(lastPathPart), ["index.ts", "reviewer-tools.js"]);
-  assert.deepEqual(flagValues(exampleConfig.workerArgv, "--tools"), ["read,bash,edit,write,grep,find,ls"]);
+  assert.deepEqual(flagValues(exampleConfig.workerArgv, "--tools"), ["read,bash,edit,write,grep,find,ls,worker_submit"]);
   assert.deepEqual(flagValues(exampleConfig.reviewerArgv, "--tools"), ["read,grep,find,ls,subagent,review_preflight,review_validate,review_submit"]);
   assert.deepEqual(flagValues(exampleConfig.workerArgv, "--thinking"), ["high"]);
   assert.deepEqual(flagValues(exampleConfig.reviewerArgv, "--thinking"), ["max"]);

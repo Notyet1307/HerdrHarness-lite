@@ -388,6 +388,7 @@ test("happy path claims, starts Analyst, runs fresh Pi worker/reviewer, publishe
   assert.equal(herdr.prepared.length, 2);
   assert.equal(herdr.prepared[0]?.lane, "worker");
   assert.equal(herdr.prepared[1]?.lane, "reviewer");
+  assert.match(herdr.prepared[0]?.env.HERDR_HARNESS_WORKER_DESCRIPTOR ?? "", /\/descriptor\.json$/);
   assert.match(herdr.prepared[1]?.cwd ?? "", /^\/state\/reviewer-attempts\/job-001\/reviewer-/);
   assert.match(herdr.prepared[1]?.env.HERDR_HARNESS_REVIEW_DESCRIPTOR ?? "", /\/descriptor\.json$/);
   assert.ok(herdr.prepared[1]?.env.PI_SUBAGENT_CAPABILITY_CEILING_V1);
@@ -405,6 +406,8 @@ test("happy path claims, starts Analyst, runs fresh Pi worker/reviewer, publishe
   assert.deepEqual(herdr.prompts.map((prompt) => prompt.skill), ["implement", "code-review"]);
   assert.match(herdr.prompts[0]?.text ?? "", /focused-self-check exactly once/);
   assert.match(herdr.prompts[0]?.text ?? "", /Do not run code-review or launch review subagents/);
+  assert.match(herdr.prompts[0]?.text ?? "", /call worker_submit exactly once/);
+  assert.equal(/Required identity:/.test(herdr.prompts[0]?.text ?? ""), false);
   assert.match(herdr.prompts[1]?.text ?? "", /Call review_preflight before/);
   assert.deepEqual(herdr.closed, [
     herdr.prepared[0]!.handle.agentName,
