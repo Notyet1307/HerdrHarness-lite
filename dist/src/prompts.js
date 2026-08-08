@@ -43,8 +43,8 @@ function resultInstruction(attempt) {
         ].join("\n");
     }
     return [
-        "Before settling, call worker_submit exactly once with status, summary, headSha, and failedCommands.",
-        "The Harness-owned tool binds job, attempt, and lane and atomically writes the result channel; do not create a result file yourself.",
+        "Before settling, call worker_submit exactly once with status, summary, and failedCommands.",
+        "The Harness-owned tool binds job, attempt, lane, and the actual worktree HEAD and atomically writes the result channel; do not create a result file yourself.",
         "Herdr idle/done is only liveness; Harness accepts work only from this durable result plus Git verification.",
     ].join("\n");
 }

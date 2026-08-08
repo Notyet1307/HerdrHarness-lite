@@ -4,24 +4,37 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { requireSuccess, SyncCommandRunner } from "../src/adapters/command.js";
+import { GitCli } from "../src/adapters/git-cli.js";
 
 type Tool = {
+  parameters: { required: string[]; properties: Record<string, unknown> };
   execute(id: string, params: Record<string, unknown>): Promise<{ content: Array<{ type: string; text: string }> }>;
 };
 
-test("Worker submit tool writes one result with Harness-owned identity", async () => {
+test("Worker submit tool resolves Git HEAD instead of trusting a model-supplied SHA", async () => {
   const root = mkdtempSync(join(tmpdir(), "herdr-worker-tools-"));
-  const descriptorPath = join(root, "descriptor.json");
-  const resultPath = join(root, "worktree", ".harness", "result.json");
+  const worktreePath = join(root, "worktree");
+  const resultPath = join(worktreePath, ".harness", "result.json");
   const previousDescriptor = process.env.HERDR_HARNESS_WORKER_DESCRIPTOR;
   try {
-    mkdirSync(join(root, "worktree", ".harness"), { recursive: true });
-    writeFileSync(descriptorPath, `${JSON.stringify({
-      version: 1,
+    mkdirSync(join(worktreePath, ".harness"), { recursive: true });
+    const runner = new SyncCommandRunner();
+    const git = (...args: string[]): string => requireSuccess(runner.run("git", ["-C", worktreePath, ...args]), `git ${args[0]}`);
+    git("init", "--quiet");
+    git("config", "user.email", "worker@example.test");
+    git("config", "user.name", "Worker Test");
+    writeFileSync(join(worktreePath, "product.txt"), "validated implementation\n");
+    git("add", "product.txt");
+    git("commit", "--quiet", "-m", "implementation");
+    const actualHeadSha = git("rev-parse", "HEAD").trim();
+    const { descriptorPath } = await new GitCli(runner).prepareWorkerResult({
+      worktree: { path: worktreePath, branch: "agent/issue-1", workspaceId: "w1" },
+      rootPath: join(root, "state"),
+      resultPath,
       jobId: "job-680a9811-c498-44e2-9863-10b091b944a2",
       attemptId: "worker-eafd204e-c214-4faf-96bb-f84f2e2bd4b6",
-      resultPath,
-    })}\n`, { mode: 0o400 });
+    });
     process.env.HERDR_HARNESS_WORKER_DESCRIPTOR = descriptorPath;
 
     const tools = new Map<string, Tool>();
@@ -35,6 +48,7 @@ test("Worker submit tool writes one result with Harness-owned identity", async (
     await submit.execute("submit", {
       status: "completed",
       summary: "validated implementation",
+      // Exercise the production failure mode: a plausible but nonexistent full SHA.
       headSha: "b".repeat(40),
       failedCommands: [],
     });
@@ -46,13 +60,14 @@ test("Worker submit tool writes one result with Harness-owned identity", async (
       lane: "worker",
       status: "completed",
       summary: "validated implementation",
-      headSha: "b".repeat(40),
+      headSha: actualHeadSha,
       failedCommands: [],
     });
+    assert.equal(submit.parameters.required.includes("headSha"), false);
+    assert.equal("headSha" in submit.parameters.properties, false);
     await assert.rejects(() => submit.execute("submit-again", {
       status: "completed",
       summary: "overwrite",
-      headSha: "c".repeat(40),
       failedCommands: [],
     }), /already submitted/);
   } finally {

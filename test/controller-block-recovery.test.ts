@@ -628,6 +628,80 @@ test("held Worker infrastructure incident can be reassessed without granting ret
   assert.equal(store.state.activeJob?.approval, null);
 });
 
+test("a pre-fix Worker result with a fabricated SHA suffix can be reassessed only into a fresh Worker", async () => {
+  const actualHead = `8c0c111${"0".repeat(33)}`;
+  const reportedHead = `8c0c111${"b".repeat(33)}`;
+  const store = new MemoryStore();
+  const clock = new FakeClock();
+  const ids = new SequenceIds();
+  const git = new FakeGit();
+  git.workerFailure = {
+    class: "integrity_violation",
+    reason: `worktree HEAD ${actualHead} != worker result ${reportedHead}`,
+  };
+  const analyst = new FakeAnalyst([
+    {
+      kind: "advice",
+      action: "hold",
+      summary: "The old Worker result channel cannot prove the full SHA",
+      resolutionBrief: "",
+      evidenceRefs: ["task"],
+      unknowns: ["trusted Worker result"],
+    },
+    {
+      kind: "advice",
+      action: "retry_fresh_worker",
+      summary: "The repaired result tool now resolves Git HEAD itself",
+      resolutionBrief: "Keep the existing clean commit, rerun validation, and submit through the repaired tool without model-supplied Git provenance.",
+      evidenceRefs: ["task"],
+      unknowns: [],
+    },
+  ]);
+  const controller = new HarnessController({
+    config,
+    store,
+    github: new FakeGitHub([issue({ number: 75, title: "Reconcile Worker result SHA" })]),
+    git,
+    herdr: new FakeHerdr([{ lane: "worker", status: "completed", headSha: reportedHead }]),
+    analyst,
+    evidence: new FakeEvidence(),
+    clock,
+    ids,
+    preflight: new FakeRuntimePreflight(),
+  });
+
+  for (let index = 0; index < 8; index += 1) await controller.tick();
+  await controller.tick();
+  const held = store.state.activeJob!;
+  assert.equal(held.incident?.class, "integrity_violation");
+  assert.equal(held.analysis?.action, "hold");
+
+  await reassessIncident(store, {
+    expectedRevision: held.revision,
+    incidentId: held.incident!.id,
+    analysisId: held.analysis!.id,
+    actor: "human@example.test",
+    reason: "Deployed the Harness-owned HEAD resolver and its regression test passed.",
+  }, { clock, ids });
+  assert.equal(store.state.activeJob?.incident?.class, "infrastructure_exhausted");
+  assert.deepEqual(store.state.activeJob?.incident?.allowedActions, ["retry_fresh_worker", "hold"]);
+  assert.equal(store.state.activeJob?.analysis, null);
+
+  assert.equal((await controller.tick()).action, "analysis_recorded");
+  const reassessed = store.state.activeJob!;
+  assert.equal(reassessed.analysis?.action, "retry_fresh_worker");
+  await approveRecovery(store, {
+    expectedRevision: reassessed.revision,
+    incidentId: reassessed.incident!.id,
+    analysisId: reassessed.analysis!.id,
+    actor: "human@example.test",
+    reason: "Approve one fresh Worker to revalidate and resubmit the unchanged commit.",
+  }, { clock, ids });
+  assert.equal((await controller.tick()).action, "recovery_applied");
+  assert.equal(store.state.activeJob?.state, "worker_ready");
+  assert.equal(store.state.activeJob?.headSha, null);
+});
+
 test("controller-recorded Analyst execution failure can be reassessed without granting retry authority", async () => {
   const store = new MemoryStore();
   const clock = new FakeClock();
