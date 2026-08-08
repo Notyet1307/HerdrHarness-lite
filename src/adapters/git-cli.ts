@@ -158,7 +158,13 @@ export class GitCli implements GitPort {
     if (pathsOverlap(input.worktree.path, rootPath)) throw new Error("Worker descriptor state must be outside the product worktree");
     if (!pathIsWithin(input.worktree.path, resultPath)) throw new Error("Worker result path must stay inside the product worktree");
     const descriptorPath = join(rootPath, "descriptor.json");
-    const descriptor = { version: 1, jobId: input.jobId, attemptId: input.attemptId, resultPath };
+    const descriptor = {
+      version: 1,
+      jobId: input.jobId,
+      attemptId: input.attemptId,
+      worktreePath: resolve(input.worktree.path),
+      resultPath,
+    };
     if (existsSync(descriptorPath)) {
       const existing = JSON.parse(readFileSync(descriptorPath, "utf8")) as unknown;
       if (JSON.stringify(existing) !== JSON.stringify(descriptor)) throw new Error("Worker descriptor identity changed after preparation");

@@ -1,4 +1,4 @@
-import type { AnalystAdvice, Approval, Cancellation, HarnessState, Reassessment } from "./model.js";
+import type { AnalystAdvice, Approval, Cancellation, HarnessState, Job, Reassessment } from "./model.js";
 import { evolveJob, isBoundedText, isRetryAction, MAX_CI_REWORKS } from "./model.js";
 import { allowedActionsFor, isDecisionResolutionEligible, makeIncident } from "./policy.js";
 import type { Clock, IdGenerator, StateStore } from "./ports.js";
@@ -200,6 +200,7 @@ export async function reassessIncident(
     && job.activeAttempt.result === null
     && job.activeAttempt.expectedHeadSha === job.headSha
     && job.incident.summary.startsWith("reviewer modified the worktree outside Harness result files:");
+  const legacyWorkerHeadMismatch = isLegacyWorkerHeadMismatch(job);
   const heldCiIncident = job.approval === null
     && (job.incident.class === "ci_failure" || job.incident.class === "ci_rework_exhausted")
     && job.incident.lane === "controller"
@@ -216,7 +217,9 @@ export async function reassessIncident(
     && job.incident.class === "ci_rework_exhausted"
     && job.incident.allowedActions.length === 1
     && job.incident.allowedActions[0] === "hold";
-  const effectiveRetryAction = legacyReviewerPreflight
+  const effectiveRetryAction = legacyWorkerHeadMismatch
+    ? "retry_fresh_worker"
+    : legacyReviewerPreflight
     ? "retry_fresh_reviewer"
     : legacyCiExhausted
       ? "retry_fresh_worker"
@@ -225,12 +228,12 @@ export async function reassessIncident(
     && isControllerAnalystFailure(job.analysis);
   if (
     effectiveRetryAction === null ||
-    (!legacyReviewerPreflight && !legacyCiExhausted && !job.incident.allowedActions.includes(effectiveRetryAction)) ||
-    (!legacyReviewerPreflight && !legacyCiExhausted && !allowedActionsFor(job.incident.class, job.incident.lane).includes(effectiveRetryAction)) ||
+    (!legacyWorkerHeadMismatch && !legacyReviewerPreflight && !legacyCiExhausted && !job.incident.allowedActions.includes(effectiveRetryAction)) ||
+    (!legacyWorkerHeadMismatch && !legacyReviewerPreflight && !legacyCiExhausted && !allowedActionsFor(job.incident.class, job.incident.lane).includes(effectiveRetryAction)) ||
     (!exactAttempt && !heldCiIncident) ||
-    (!heldInfrastructure && !heldReviewerBlock && !heldReviewerPreflight && !legacyReviewerPreflight && !analystExecutionFailed && !heldCiFailure && !legacyCiExhausted)
+    (!heldInfrastructure && !heldReviewerBlock && !heldReviewerPreflight && !legacyWorkerHeadMismatch && !legacyReviewerPreflight && !analystExecutionFailed && !heldCiFailure && !legacyCiExhausted)
   ) {
-    throw new Error("only an exact held infrastructure incident, HEAD-bound Reviewer block, pre-start Reviewer residue, controller-recorded Analyst execution failure, or HEAD-bound CI incident within the rework limit can be reassessed");
+    throw new Error("only an exact held infrastructure incident, HEAD-bound Reviewer block, pre-start Reviewer residue, pre-fix Worker HEAD-report mismatch, controller-recorded Analyst execution failure, or HEAD-bound CI incident within the rework limit can be reassessed");
   }
 
   const successor = makeIncident({
@@ -238,7 +241,9 @@ export async function reassessIncident(
     jobRevision: job.revision + 1,
     lane: job.incident.lane,
     attemptId: job.incident.attemptId,
-    blockClass: heldReviewerBlock
+    blockClass: legacyWorkerHeadMismatch
+      ? "infrastructure_exhausted"
+      : heldReviewerBlock
       ? "infrastructure_exhausted"
       : legacyReviewerPreflight
         ? "reviewer_preflight_dirty"
@@ -275,6 +280,37 @@ export async function reassessIncident(
   });
   await store.save({ ...state, activeJob: nextJob }, job.revision);
   return reassessment;
+}
+
+function isLegacyWorkerHeadMismatch(job: Job): boolean {
+  const attempt = job.activeAttempt;
+  const incident = job.incident;
+  const result = attempt?.result;
+  if (
+    job.approval !== null
+    || job.pullRequest !== null
+    || incident?.class !== "integrity_violation"
+    || incident.lane !== "worker"
+    || incident.allowedActions.length !== 1
+    || incident.allowedActions[0] !== "hold"
+    || attempt?.lane !== "worker"
+    || attempt.phase !== "settled"
+    || incident.attemptId !== attempt.id
+    || attempt.baseSha !== (job.headSha ?? job.baseSha)
+    || result?.lane !== "worker"
+    || result.status !== "completed"
+    || result.jobId !== job.id
+    || result.attemptId !== attempt.id
+    || result.failedCommands.length !== 0
+    || !result.headSha
+  ) return false;
+  const match = /^worktree HEAD ([0-9a-f]{40}) != worker result ([0-9a-f]{40})$/i.exec(incident.summary);
+  if (!match) return false;
+  const actualHead = match[1]!.toLowerCase();
+  const reportedHead = match[2]!.toLowerCase();
+  return actualHead !== reportedHead
+    && actualHead.slice(0, 7) === reportedHead.slice(0, 7)
+    && reportedHead === result.headSha.toLowerCase();
 }
 
 function isControllerAnalystFailure(advice: AnalystAdvice): boolean {

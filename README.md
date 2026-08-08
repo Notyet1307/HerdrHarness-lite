@@ -183,6 +183,7 @@ Use `reassess` only when the incident is exactly one of these retryable cases:
 - Worker/Reviewer `infrastructure_exhausted` with no durable result; or
 - Reviewer `review_uncertain` with a durable `blocked` result bound to the current HEAD, after its external validation environment was repaired and probed; or
 - `reviewer_preflight_dirty` discovered before the Reviewer received a pane/agent, after the residue was preserved or cleaned by an operator; or
+- a pre-fix Worker `integrity_violation` where the completed result and observed worktree HEAD share the same seven-character prefix but differ only in the model-supplied suffix, after deploying and testing the Harness-owned HEAD resolver; or
 - the first `ci_failure` remains bound to the current PR HEAD, after a previously missing or truncated external diagnostic was retrieved; or
 - an Analyst execution failure recorded by the Controller itself.
 
