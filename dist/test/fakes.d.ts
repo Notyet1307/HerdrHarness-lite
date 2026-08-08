@@ -54,12 +54,14 @@ export declare class FakeGitHub implements GitHubPort {
         issue: number;
         jobId: string;
     }>;
+    releasedClaims: number[];
     published: PullRequestRef[];
     suspended: number[];
     mergeStatus: "open" | "merged" | "closed_unmerged";
     autoMergeEnabled: boolean;
     requiredChecks: PullRequestCheck[];
     suspendFailure: Error | null;
+    releaseClaimFailure: Error | null;
     constructor(graph: IssueSnapshot[]);
     listIssueGraph(_repo: string, _readyLabel: string): Promise<IssueSnapshot[]>;
     getIssue(_repo: string, issueNumber: number): Promise<IssueSnapshot>;
@@ -75,6 +77,11 @@ export declare class FakeGitHub implements GitHubPort {
         issueNumber: number;
         claimLabel: string;
         readyLabel: string;
+    }): Promise<void>;
+    releaseIssueClaim(input: {
+        repo: string;
+        issueNumber: number;
+        claimLabel: string;
     }): Promise<void>;
     publish(input: {
         repo: string;

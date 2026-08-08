@@ -375,6 +375,8 @@ test("happy path claims, starts Analyst, runs fresh Pi worker/reviewer, publishe
         herdr.prepared[1].handle.agentName,
     ]);
     assert.equal(github.published[0]?.headSha, "b".repeat(40));
+    assert.deepEqual(github.releasedClaims, [21]);
+    assert.ok(!github.graph[0]?.labels.includes("agent:claimed"));
     assert.equal(store.state.activeJob, null);
     assert.equal(store.state.terminalJobs[0]?.state, "done");
 });
@@ -436,7 +438,7 @@ test("a durable valid result completes even when the closed agent is no longer k
     assert.equal(store.state.activeJob?.state, "reviewer_ready");
     assert.equal(herdr.closed.length, 1);
 });
-test("a terminal job is retained when its exact Analyst session cannot be closed", async () => {
+test("terminal archive keeps Analyst close fail-closed but treats claim cleanup as best effort", async () => {
     const store = new MemoryStore();
     const github = new FakeGitHub([issue({ number: 24, title: "Retain cleanup failure" })]);
     const analyst = new FakeAnalyst();
@@ -466,5 +468,12 @@ test("a terminal job is retained when its exact Analyst session cannot be closed
     assert.match(retained.message, /session delete failed/);
     assert.equal(store.state.activeJob?.state, "done");
     assert.equal(store.state.terminalJobs.length, 0);
+    analyst.closeFailure = null;
+    github.releaseClaimFailure = new Error("label cleanup failed");
+    const archived = await controller.tick();
+    assert.equal(archived.ok, true);
+    assert.match(archived.message, /warning: claim label cleanup failed: label cleanup failed/);
+    assert.equal(store.state.activeJob, null);
+    assert.equal(store.state.terminalJobs[0]?.state, "done");
 });
 //# sourceMappingURL=controller-happy.test.js.map
