@@ -145,6 +145,9 @@ export class FakeGitHub {
 }
 export class FakeGit {
     baseSha = "a".repeat(40);
+    baseSyncHeadSha = null;
+    baseSyncFailure = null;
+    baseSyncs = [];
     workerFailure = null;
     reviewerFailure = null;
     reviewerValidationArgv = [];
@@ -152,6 +155,16 @@ export class FakeGit {
     workerVerifications = [];
     async refreshBase() {
         return this.baseSha;
+    }
+    async syncBase(input) {
+        this.baseSyncs.push({
+            expectedHeadSha: input.expectedHeadSha,
+            expectedRemoteHeadSha: input.expectedRemoteHeadSha,
+            latestBaseSha: input.latestBaseSha,
+        });
+        return this.baseSyncFailure
+            ? { ok: false, ...this.baseSyncFailure }
+            : { ok: true, headSha: this.baseSyncHeadSha ?? input.expectedHeadSha };
     }
     async verifyWorker(input) {
         this.workerVerifications.push({

@@ -107,8 +107,20 @@ export type ReviewerVerification =
   | { ok: true }
   | { ok: false; class: "integrity_violation"; kind: "head_mismatch" | "worktree_dirty"; reason: string };
 
+export type BaseSyncVerification =
+  | { ok: true; headSha: string }
+  | { ok: false; class: "agent_decision" | "integrity_violation"; reason: string };
+
 export interface GitPort {
   refreshBase(localPath: string, baseRef: string): Promise<string>;
+  syncBase(input: {
+    worktree: WorktreeHandle;
+    branch: string;
+    baseRef: string;
+    expectedHeadSha: string;
+    expectedRemoteHeadSha: string | null;
+    latestBaseSha: string;
+  }): Promise<BaseSyncVerification>;
   verifyWorker(input: {
     worktree: WorktreeHandle;
     branch: string;

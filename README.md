@@ -75,7 +75,7 @@ Each successful `tick` writes at most one durable transition. Continue from its 
 | `selected`, `claimed`, `worktree_created` | Check the message, then run one more `tick` |
 | `attempt_prepared`, `attempt_pane_ready`, `attempt_agent_ready` | Run one more `tick`; the next dispatch may remain attached for a long time |
 | dispatch command has not returned | Wait; inspect with `status` and read-only Herdr commands only, and do not start a concurrent `tick` |
-| `attempt_dispatched`, `attempt_completed`, `published`, `merged` | Run one more `tick` to consume the next stage |
+| `attempt_dispatched`, `attempt_completed`, `base_refreshed`, `published`, `merged` | Run one more `tick` to consume the next stage |
 | `publish_retry` | Correct the retryable publish condition named in the message, then run `tick` |
 | `waiting_for_merge` | Wait for GitHub required checks/merge, then run `tick`; do not bypass GitHub |
 | `blocked`, `analysis_recorded`, `waiting_for_approval` | Follow **Recover a blocked job** |
@@ -437,6 +437,8 @@ gh pr merge --auto --match-head-commit <reviewed-sha> --merge
 
 GitHub must allow auto-merge, and the target branch ruleset must define required checks. On PR HEAD drift or publish recovery, the Harness disables auto-merge before failing closed. It archives only after GitHub reports the PR merged.
 
+If `baseRef` advances before publish, or while an open PR is waiting after required checks, the Controller suspends auto-merge, verifies the local and remote reviewed anchors, merges the new base into the clean task worktree without pushing, and requires a fresh Reviewer on the resulting exact HEAD. A merge conflict is aborted and fails closed for bounded Worker recovery; the Controller never resolves conflicts itself.
+
 While the PR is open, the Controller reads GitHub's required checks for the exact reviewed HEAD. An explicit failed or cancelled check causes it to:
 
 1. disable native auto-merge before changing ledger state;
@@ -445,7 +447,7 @@ While the PR is open, the Controller reads GitHub's required checks for the exac
 4. require exact human approval before each of at most two fresh Workers may rework the same branch;
 5. verify that the remote branch still points to the previously reviewed PR HEAD, then require a fresh Reviewer before updating the same PR.
 
-The Controller does not auto-rerun CI or auto-rebase. Each CI rework needs separate Analyst advice and exact human approval. A third required-check failure after two approved CI reworks becomes `ci_rework_exhausted` and permits only `hold`.
+The Controller does not auto-rerun CI or auto-rebase. A conflict-free base merge is only an integration refresh and must pass a fresh independent review plus GitHub CI. Each CI rework needs separate Analyst advice and exact human approval. A third required-check failure after two approved CI reworks becomes `ci_rework_exhausted` and permits only `hold`.
 
 ## State and audit data
 
