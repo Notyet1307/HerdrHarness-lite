@@ -36,6 +36,15 @@ const passedCheck = {
   bucket: "pass" as const,
   diagnostic: null,
 };
+const failedCoverageCheck = {
+  name: "coverage",
+  state: "FAILURE",
+  bucket: "fail" as const,
+  workflow: "Backend",
+  link: "https://github.com/owner/repo/actions/runs/124/job/457",
+  completedAt: "2026-08-06T00:01:00Z",
+  diagnostic: "total coverage is below fail-under=90",
+};
 
 const config: HarnessConfig = {
   repo: "owner/repo",
@@ -250,6 +259,42 @@ test("failed required CI permits two exact human-approved Worker cycles before e
   assert.equal(store.state.activeJob?.ciReworkCount, 2);
   assert.equal((await controller.tick()).action, "published");
   assert.equal(store.state.activeJob?.pullRequest?.headSha, newestHead);
+});
+
+test("blocked CI refreshes its incident when another required check fails on the same HEAD", async () => {
+  const store = new MemoryStore();
+  const github = new FakeGitHub([issue({ number: 40, title: "Late CI failure" })]);
+  const controller = new HarnessController({
+    config,
+    store,
+    github,
+    git: new FakeGit(),
+    herdr: new FakeHerdr([
+      { lane: "worker", status: "completed", headSha: oldHead },
+      { lane: "reviewer", status: "pass", reviewedHeadSha: oldHead },
+    ]),
+    analyst: new FakeAnalyst(),
+    evidence: new FakeEvidence(),
+    clock: new FakeClock(),
+    ids: new SequenceIds(),
+    preflight: new FakeRuntimePreflight(),
+  });
+
+  await driveUntil(controller, store, "awaiting_merge");
+  github.requiredChecks = [failedCheck];
+  assert.equal((await controller.tick()).action, "blocked");
+  const firstIncidentId = store.state.activeJob?.incident?.id;
+
+  github.requiredChecks = [failedCoverageCheck, failedCheck];
+  const refreshed = await controller.tick();
+
+  assert.equal(refreshed.action, "blocked");
+  assert.ok(store.state.activeJob?.incident?.id !== firstIncidentId);
+  assert.equal(store.state.activeJob?.analysis, null);
+  assert.deepEqual(store.state.activeJob?.ciFailure?.checks, [failedCoverageCheck, failedCheck]);
+  assert.match(store.state.activeJob?.incident?.summary ?? "", /coverage: FAILURE/);
+  assert.equal(store.state.activeJob?.ciReworkCount, 0);
+  assert.equal(store.state.activeJob?.headSha, oldHead);
 });
 
 test("a newer base suspends auto-merge and requires a fresh review of the merged HEAD", async () => {

@@ -887,6 +887,23 @@ export class HarnessController {
             await this.saveJob(state, job, next);
             return result(true, "merged", job.id, `PR #${job.pullRequest.number} merged while CI recovery was held`);
         }
+        const failedChecks = observation.requiredChecks.filter(isFailedCheck);
+        if (observation.status === "open" &&
+            failedChecks.length > 0 &&
+            ciChecksDigest(failedChecks) !== ciChecksDigest(job.ciFailure.checks)) {
+            const ciFailure = {
+                headSha: job.pullRequest.headSha,
+                observedAt: this.deps.clock.now(),
+                checks: failedChecks,
+            };
+            return this.block(state, job, {
+                class: (job.ciReworkCount ?? 0) >= MAX_CI_REWORKS ? "ci_rework_exhausted" : "ci_failure",
+                lane: "controller",
+                summary: summarizeCiFailure(job.pullRequest.number, ciFailure),
+                attemptResult: null,
+                ciFailure,
+            });
+        }
         if (observation.status !== "open" ||
             observation.requiredChecks.length === 0 ||
             observation.requiredChecks.some((check) => check.bucket !== "pass" && check.bucket !== "skipping"))
@@ -1189,6 +1206,9 @@ function dedupeEvidence(items) {
 }
 function isFailedCheck(check) {
     return check.bucket === "fail" || check.bucket === "cancel";
+}
+function ciChecksDigest(checks) {
+    return digest([...checks].sort((left, right) => (`${left.workflow}\0${left.name}\0${left.link}`.localeCompare(`${right.workflow}\0${right.name}\0${right.link}`))));
 }
 function summarizeCiFailure(number, failure) {
     const checks = failure.checks.slice(0, 8).map((check) => (`- ${check.name}: ${check.state} (${check.bucket})${check.link ? ` ${check.link}` : ""}`));

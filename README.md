@@ -448,6 +448,8 @@ While the PR is open, the Controller reads GitHub's required checks for the exac
 4. require exact human approval before each of at most two fresh Workers may rework the same branch;
 5. verify that the remote branch still points to the previously reviewed PR HEAD, then require a fresh Reviewer before updating the same PR.
 
+While a CI incident is blocked, newly completed failures on the same PR HEAD replace the stale incident and require fresh Analyst advice before approval.
+
 The Controller does not auto-rerun CI or auto-rebase. If an operator reruns CI without changing the reviewed PR HEAD, a blocked job resumes only after every required check is pass/skipping on that exact HEAD; the CI rework count is not reset. A conflict-free base merge is only an integration refresh and must pass a fresh independent review plus GitHub CI. Each CI rework needs separate Analyst advice and exact human approval. A third required-check failure after two approved CI reworks becomes `ci_rework_exhausted` and permits only `hold` for code changes.
 
 ## State and audit data
