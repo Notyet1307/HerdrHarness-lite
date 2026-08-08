@@ -75,7 +75,7 @@ Each successful `tick` writes at most one durable transition. Continue from its 
 | `selected`, `claimed`, `worktree_created` | Check the message, then run one more `tick` |
 | `attempt_prepared`, `attempt_pane_ready`, `attempt_agent_ready` | Run one more `tick`; the next dispatch may remain attached for a long time |
 | dispatch command has not returned | Wait; inspect with `status` and read-only Herdr commands only, and do not start a concurrent `tick` |
-| `attempt_dispatched`, `attempt_completed`, `base_refreshed`, `published`, `merged` | Run one more `tick` to consume the next stage |
+| `attempt_dispatched`, `attempt_completed`, `ci_recovered`, `base_refreshed`, `published`, `merged` | Run one more `tick` to consume the next stage |
 | `publish_retry` | Correct the retryable publish condition named in the message, then run `tick` |
 | `waiting_for_merge` | Wait for GitHub required checks/merge, then run `tick`; do not bypass GitHub |
 | `blocked`, `analysis_recorded`, `waiting_for_approval` | Follow **Recover a blocked job** |
@@ -447,7 +447,7 @@ While the PR is open, the Controller reads GitHub's required checks for the exac
 4. require exact human approval before each of at most two fresh Workers may rework the same branch;
 5. verify that the remote branch still points to the previously reviewed PR HEAD, then require a fresh Reviewer before updating the same PR.
 
-The Controller does not auto-rerun CI or auto-rebase. A conflict-free base merge is only an integration refresh and must pass a fresh independent review plus GitHub CI. Each CI rework needs separate Analyst advice and exact human approval. A third required-check failure after two approved CI reworks becomes `ci_rework_exhausted` and permits only `hold`.
+The Controller does not auto-rerun CI or auto-rebase. If an operator reruns CI without changing the reviewed PR HEAD, a blocked job resumes only after every required check is pass/skipping on that exact HEAD; the CI rework count is not reset. A conflict-free base merge is only an integration refresh and must pass a fresh independent review plus GitHub CI. Each CI rework needs separate Analyst advice and exact human approval. A third required-check failure after two approved CI reworks becomes `ci_rework_exhausted` and permits only `hold` for code changes.
 
 ## State and audit data
 

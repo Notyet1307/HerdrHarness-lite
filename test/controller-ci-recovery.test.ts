@@ -239,6 +239,17 @@ test("failed required CI permits two exact human-approved Worker cycles before e
     }, { clock, ids }),
     /within the rework limit/,
   );
+
+  github.requiredChecks = [passedCheck];
+  const recovered = await controller.tick();
+  assert.equal(recovered.action, "ci_recovered");
+  assert.equal(store.state.activeJob?.state, "publish_ready");
+  assert.equal(store.state.activeJob?.incident, null);
+  assert.equal(store.state.activeJob?.analysis, null);
+  assert.equal(store.state.activeJob?.ciFailure, null);
+  assert.equal(store.state.activeJob?.ciReworkCount, 2);
+  assert.equal((await controller.tick()).action, "published");
+  assert.equal(store.state.activeJob?.pullRequest?.headSha, newestHead);
 });
 
 test("a newer base suspends auto-merge and requires a fresh review of the merged HEAD", async () => {
