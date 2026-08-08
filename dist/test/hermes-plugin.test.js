@@ -120,7 +120,7 @@ test("Hermes plugin registers the callback seam and sends a vertical approval ke
         ]);
         const card = {
             text: "🚨 <b>Harness 需要人工决定</b>",
-            approveLabel: "✅ 批准并启动全新 Reviewer",
+            approveLabel: "批准：全新 Reviewer",
             approveCallback: "hh:a:0123456789ABCDEF",
             holdCallback: "hh:h:0123456789ABCDEF",
         };
@@ -146,7 +146,8 @@ test("Hermes plugin registers the callback seam and sends a vertical approval ke
         assert.equal(body.parse_mode, "HTML");
         assert.equal(body.reply_markup.inline_keyboard.length, 2);
         assert.equal(body.reply_markup.inline_keyboard[0][0].callback_data, card.approveCallback);
-        assert.equal(body.reply_markup.inline_keyboard[1][0].text, "⏸️ 保持阻塞");
+        assert.equal(body.reply_markup.inline_keyboard[0][0].style, "primary");
+        assert.equal(body.reply_markup.inline_keyboard[1][0].text, "保持阻塞");
         const callback = spawnSync("python3", ["-c", PYTHON_CALLBACK, plugin], {
             encoding: "utf8",
             timeout: 5_000,
@@ -232,7 +233,7 @@ test("Hermes Fleet aggregates status and routes cards or callbacks to one fixed 
         assert.match(invokeFleet(fleet, "unknown status", "123456789").stdout, /未知 Harness lane/);
         const card = {
             text: "🚨 <b>Exposure 需要人工决定</b>",
-            approveLabel: "✅ 批准并启动全新 Reviewer",
+            approveLabel: "批准：全新 Reviewer",
             approveCallback: "hh:a:exposure:0123456789ABCDEF",
             holdCallback: "hh:h:exposure:0123456789ABCDEF",
         };

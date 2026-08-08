@@ -272,8 +272,8 @@ def _send_card(payload: object) -> None:
         "disable_web_page_preview": True,
         "reply_markup": {
             "inline_keyboard": [
-                [{"text": approve_label, "callback_data": approve_callback}],
-                [{"text": "⏸️ 保持阻塞", "callback_data": hold_callback}],
+                [{"text": approve_label, "callback_data": approve_callback, "style": "primary"}],
+                [{"text": "保持阻塞", "callback_data": hold_callback}],
             ],
         },
     }, ensure_ascii=False).encode("utf-8")

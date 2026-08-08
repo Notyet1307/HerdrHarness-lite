@@ -58,12 +58,14 @@ function renderNotification(state) {
         return "当前没有需要处理的 Harness 任务。";
     const incident = job.incident;
     if (!incident)
-        return `任务：${clean(job.task.repo, 160)}#${job.task.issueNumber} ${clean(job.task.title, 240)}\n状态：${job.state}`;
+        return `🟦 运行中 · 无需处理\n${clean(job.task.repo, 160)}#${job.task.issueNumber} · ${clean(job.task.title, 240)}`;
     const analysis = job.analysis?.incidentId === incident.id ? job.analysis : null;
     const recommendation = analysis?.resolutionBrief || analysis?.summary || "等待系统生成下一步建议；不执行自动恢复。";
     return [
+        `⚠️ 需要关注 · #${job.task.issueNumber}`,
         `任务：${clean(job.task.repo, 160)}#${job.task.issueNumber} ${clean(job.task.title, 240)}`,
         `原因：${clean(incident.summary, 700)}`,
+        "影响：任务暂停；Harness 未执行自动恢复。",
         `建议：${clean(recommendation, 900)}`,
     ].join("\n");
 }

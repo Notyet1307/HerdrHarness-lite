@@ -97,9 +97,8 @@ async function cycle(config: ObserverConfig): Promise<void> {
   if (!state.initialized) {
     state.initialized = true;
     enqueue(state, "observer-online", [
-      "✅ Herdr Harness Telegram Observer 已上线",
-      "模式：通知与决策入口；只有精确绑定的人工点击可请求 Harness 写入恢复批准。",
-      safeView(config, "status"),
+      "🟢 Observer 已上线 · 无需处理",
+      "只推送任务开始、终态和需要关注的异常；恢复仍需精确绑定的人工批准。",
     ].join("\n"));
   }
 
@@ -116,14 +115,14 @@ async function observeLedger(config: ObserverConfig, observer: ObserverState): P
     ledger = await new JsonStateStore(config.harnessStateDir).load();
   } catch (error) {
     if (observer.ledgerHealthy) {
-      enqueue(observer, "ledger-unavailable", `⚠️ Observer 无法读取 Harness ledger\n${clean(message(error), 700)}\n未执行任何恢复动作。`);
+      enqueue(observer, "ledger-unavailable", `🚨 自动化异常 · 需要检查\nHarness ledger 无法读取：${clean(message(error), 700)}\n未执行任何恢复动作。`);
     }
     observer.ledgerHealthy = false;
     return;
   }
 
   if (!observer.ledgerHealthy && observer.ledgerInitialized) {
-    enqueue(observer, "ledger-restored", `✅ Harness ledger 读取已恢复\n${safeView(config, "status")}`);
+    enqueue(observer, "ledger-restored", "✅ 自动化已恢复 · 无需处理\nHarness ledger 已可读取。");
   }
   observer.ledgerHealthy = true;
   if (!observer.ledgerInitialized) {
@@ -145,7 +144,7 @@ async function observeLedger(config: ObserverConfig, observer: ObserverState): P
       enqueue(
         observer,
         `terminal:${terminal.id}:${terminal.state}`,
-        `${terminal.state === "done" ? "✅" : "⛔️"} 任务${terminal.state === "done" ? "完成" : "取消"}：${clean(terminal.repo, 160)}#${terminal.issueNumber}\n完成时间：${clean(terminal.finishedAt, 80)}`,
+        `${terminal.state === "done" ? "✅ 任务已完成" : "⛔️ 任务已取消"} · 无需处理\n${clean(terminal.repo, 160)}#${terminal.issueNumber}`,
       );
     }
   }
@@ -153,7 +152,11 @@ async function observeLedger(config: ObserverConfig, observer: ObserverState): P
   const job = ledger.activeJob;
   const jobChanged = job?.id !== observer.lastJobId;
   if (job && jobChanged) {
-    enqueue(observer, `job:${job.id}`, `🆕 Harness 已领取新任务\n${safeView(config, "status")}`);
+    enqueue(
+      observer,
+      `job:${job.id}`,
+      `🟦 任务已开始 · 无需处理\n${clean(job.task.repo, 160)}#${job.task.issueNumber} · ${clean(job.task.title, 240)}`,
+    );
     if (job.analysis) {
       enqueueAnalysis(config, observer, job, "🧭 Analyst 已给出恢复建议");
     } else if (job.incident) {
@@ -180,19 +183,6 @@ function observeJob(config: ObserverConfig, observer: ObserverState, job: Job): 
   } else if (job.incident && incidentChanged) {
     enqueue(observer, `incident:${job.incident.id}`, safeView(config, "notification"));
   }
-
-  if (job.state === observer.lastJobState) return;
-  const heading = transitionHeading(observer.lastJobState, job.state);
-  if (heading) enqueue(observer, `state:${job.id}:${job.revision}:${job.state}`, `${heading}\n${safeView(config, "status")}`);
-}
-
-function transitionHeading(previous: JobState | null, next: JobState): string | null {
-  if (next === "reviewer_ready") return "🧪 Worker 已完成，准备启动独立 Reviewer";
-  if (next === "worker_ready" && previous === "reviewer_running") return "🔁 Reviewer 要求返工，准备启动全新 Worker";
-  if (next === "publish_ready") return "✅ 独立 Reviewer 已通过，任务可发布";
-  if (next === "awaiting_merge") return "📬 PR 已发布，正在等待 required checks / auto-merge";
-  if (next === "recovery_approved") return "👍 Harness 已记录人工恢复批准，等待 Controller 消费";
-  return null;
 }
 
 function baselineLedger(observer: ObserverState, ledger: HarnessState): void {
@@ -219,11 +209,11 @@ function observeControllerLog(config: ObserverConfig, observer: ObserverState): 
       observer.controllerLogOffset = stat.size;
       return;
     }
-    if (!observer.logHealthy) enqueue(observer, "controller-log-restored", "✅ Controller 日志读取已恢复。");
+    if (!observer.logHealthy) enqueue(observer, "controller-log-restored", "✅ 自动化已恢复 · 无需处理\nController 日志已可读取。");
     observer.logHealthy = true;
     if (stat.size < observer.controllerLogOffset) {
       observer.controllerLogOffset = stat.size;
-      enqueue(observer, `controller-log-reset:${stat.size}`, "⚠️ Controller 日志被截断或轮转；Observer 已从当前文件末尾重新建立基线。");
+      enqueue(observer, `controller-log-reset:${stat.size}`, "⚠️ 自动化记录异常 · 需要检查\nController 日志被截断或轮转；Observer 已重新建立基线。");
       return;
     }
     if (stat.size === observer.controllerLogOffset) return;
@@ -239,7 +229,7 @@ function observeControllerLog(config: ObserverConfig, observer: ObserverState): 
     });
   } catch (error) {
     if (observer.logHealthy) {
-      enqueue(observer, "controller-log-unavailable", `⚠️ Observer 无法读取 Controller 日志\n${clean(message(error), 700)}\n未执行任何恢复动作。`);
+      enqueue(observer, "controller-log-unavailable", `🚨 自动化异常 · 需要检查\nController 日志无法读取：${clean(message(error), 700)}\n未执行任何恢复动作。`);
     }
     observer.logHealthy = false;
   }
@@ -276,10 +266,10 @@ function observeControllerEvent(config: ObserverConfig, observer: ObserverState,
   if (alertKey === observer.lastControllerAlertKey) return;
   observer.lastControllerAlertKey = alertKey;
   enqueue(observer, `controller:${position}:${clean(event.action, 80)}`, [
-    `⚠️ Controller 推进失败 · ${clean(event.action, 80)}`,
+    "🚨 自动化异常 · 需要检查",
+    `Controller 推进失败：${clean(event.action, 80)}`,
     clean(event.message, 700),
-    safeView(config, "status"),
-    "Observer 未执行自动恢复。",
+    "未执行自动恢复；发送 /harness 查看当前状态。",
   ].join("\n"));
 
   if (event.action === "preflight_failed") {
@@ -294,11 +284,11 @@ function observeHeartbeat(config: ObserverConfig, observer: ObserverState): void
   if (stale && !observer.controllerDown) {
     observer.controllerDown = true;
     observer.controllerDownLogMtimeMs = mtime;
-    enqueue(observer, `controller-heartbeat-stopped:${mtime}`, "⏹️ Harness Controller 心跳已停止\nObserver 只负责通知，不会自动重启 Controller。");
+    enqueue(observer, `controller-heartbeat-stopped:${mtime}`, "🚨 自动化停止 · 需要检查\nHarness Controller 心跳已停止；Observer 不会自动重启。");
   } else if (!stale && observer.controllerDown && mtime > observer.controllerDownLogMtimeMs) {
     observer.controllerDown = false;
     observer.controllerDownLogMtimeMs = 0;
-    enqueue(observer, `controller-heartbeat-restored:${mtime}`, `✅ Harness Controller 心跳已恢复\n${safeView(config, "status")}`);
+    enqueue(observer, `controller-heartbeat-restored:${mtime}`, "✅ 自动化已恢复 · 无需处理\nHarness Controller 心跳已恢复。");
   }
 }
 
