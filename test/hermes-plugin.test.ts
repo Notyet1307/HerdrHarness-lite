@@ -159,6 +159,29 @@ test("Hermes plugin registers the callback seam and sends a vertical approval ke
     assert.equal(body.reply_markup.inline_keyboard[0][0].style, "primary");
     assert.equal(body.reply_markup.inline_keyboard[1][0].text, "保持阻塞");
 
+    const informational = spawnSync("python3", ["-c", PYTHON_CARD, plugin], {
+      encoding: "utf8",
+      timeout: 5_000,
+      env: {
+        ...process.env,
+        PYTHONDONTWRITEBYTECODE: "1",
+        HERDR_HARNESS_FLEET_CONFIG: "",
+        HERDR_HARNESS_TELEGRAM_CONFIG: config,
+        HARNESS_TEST_CARD: JSON.stringify({
+          text: "⚠️ <b>自动诊断未完成</b>\n<blockquote expandable>时间线</blockquote>",
+        }),
+        TELEGRAM_BOT_TOKEN: "123456:TEST_TOKEN_WITHOUT_WHITESPACE",
+        TELEGRAM_ALLOWED_USERS: "123456789",
+        TELEGRAM_ALLOW_ALL_USERS: "",
+        GATEWAY_ALLOW_ALL_USERS: "",
+        GATEWAY_ALLOWED_USERS: "",
+      },
+    });
+    assert.equal(informational.status, 0, informational.stderr);
+    const informationalBody = JSON.parse(informational.stdout).body;
+    assert.equal(informationalBody.parse_mode, "HTML");
+    assert.equal("reply_markup" in informationalBody, false);
+
     const callback = spawnSync("python3", ["-c", PYTHON_CALLBACK, plugin], {
       encoding: "utf8",
       timeout: 5_000,

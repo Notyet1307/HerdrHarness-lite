@@ -251,32 +251,36 @@ def _send_card(payload: object) -> None:
     hold_callback = payload.get("holdCallback")
     if not isinstance(text, str) or not text or len(text) > 3900:
         raise RuntimeError("card text 无效")
-    if not isinstance(approve_label, str) or not approve_label or len(approve_label) > 64:
-        raise RuntimeError("approve label 无效")
-    try:
-        approve_action, approve_lane, approve_token = _parse_callback(approve_callback)
-        hold_action, hold_lane, hold_token = _parse_callback(hold_callback)
-        if approve_action != "a" or hold_action != "h" or approve_lane != hold_lane or approve_token != hold_token:
-            raise ValueError("mismatched callbacks")
-        _route_for_callback(routing, approve_lane)
-    except ValueError as error:
-        raise RuntimeError("callback data 无效") from error
+    has_controls = any(value is not None for value in (approve_label, approve_callback, hold_callback))
+    if has_controls:
+        if not isinstance(approve_label, str) or not approve_label or len(approve_label) > 64:
+            raise RuntimeError("approve label 无效")
+        try:
+            approve_action, approve_lane, approve_token = _parse_callback(approve_callback)
+            hold_action, hold_lane, hold_token = _parse_callback(hold_callback)
+            if approve_action != "a" or hold_action != "h" or approve_lane != hold_lane or approve_token != hold_token:
+                raise ValueError("mismatched callbacks")
+            _route_for_callback(routing, approve_lane)
+        except ValueError as error:
+            raise RuntimeError("callback data 无效") from error
 
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
     if not token or any(char.isspace() for char in token) or len(token) > 256:
         raise RuntimeError("TELEGRAM_BOT_TOKEN 未配置或无效")
-    body = json.dumps({
+    payload_body = {
         "chat_id": routing[1],
         "text": text,
         "parse_mode": "HTML",
         "disable_web_page_preview": True,
-        "reply_markup": {
+    }
+    if has_controls:
+        payload_body["reply_markup"] = {
             "inline_keyboard": [
                 [{"text": approve_label, "callback_data": approve_callback, "style": "primary"}],
                 [{"text": "保持阻塞", "callback_data": hold_callback}],
             ],
-        },
-    }, ensure_ascii=False).encode("utf-8")
+        }
+    body = json.dumps(payload_body, ensure_ascii=False).encode("utf-8")
     request = Request(
         f"https://api.telegram.org/bot{token}/sendMessage",
         data=body,

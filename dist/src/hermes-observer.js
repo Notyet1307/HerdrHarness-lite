@@ -11,6 +11,15 @@ const MAX_MESSAGE_LENGTH = 3_900;
 const MAX_OUTBOX = 512;
 const LOG_CHUNK_BYTES = 1024 * 1024;
 const RETRY_DELAYS_MS = [5_000, 30_000, 120_000, 600_000, 1_800_000];
+const TIMELINE_TIME = new Intl.DateTimeFormat("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+    timeZoneName: "short",
+});
 async function main(argv) {
     if (argv[2] !== "run")
         throw new Error("usage: hermes-observer run --config /absolute/bridge.json [--once]");
@@ -282,6 +291,14 @@ async function flushOutbox(config, state) {
                 });
             }
         }
+        else if (entry.kind === "card") {
+            sent = spawnSync(config.hermesBin, ["--profile", config.hermesProfile, "harness-card"], {
+                encoding: "utf8",
+                input: JSON.stringify({ text: entry.message }),
+                timeout: 20_000,
+                maxBuffer: 1024 * 1024,
+            });
+        }
         else {
             sent = spawnSync(config.hermesBin, [
                 "--profile",
@@ -318,6 +335,9 @@ function enqueue(state, key, messageText) {
 }
 function enqueueAnalysis(config, state, job, heading) {
     const analysis = job.analysis;
+    const exactAnalysis = job.state === "blocked"
+        && job.incident !== null
+        && analysis?.incidentId === job.incident.id;
     const exactRetry = job.state === "blocked"
         && job.incident !== null
         && analysis?.incidentId === job.incident.id
@@ -325,7 +345,12 @@ function enqueueAnalysis(config, state, job, heading) {
         && job.incident.allowedActions.includes(analysis.action)
         && allowedActionsFor(job.incident.class, job.incident.lane).includes(analysis.action);
     if (!exactRetry) {
-        enqueue(state, `analysis:${analysis?.id ?? job.revision}`, safeView(config, "notification"));
+        if (exactAnalysis && analysis.action === "hold") {
+            enqueueCard(state, `analysis:${analysis.id}`, analysisCard(job, heading));
+        }
+        else {
+            enqueue(state, `analysis:${analysis?.id ?? job.revision}`, safeView(config, "notification"));
+        }
         return;
     }
     const key = `approval:${analysis.id}`;
@@ -334,6 +359,64 @@ function enqueueAnalysis(config, state, job, heading) {
     if (state.outbox.length >= MAX_OUTBOX)
         throw new Error(`observer outbox reached ${MAX_OUTBOX} entries`);
     state.outbox.push({ kind: "approval", key, analysisId: analysis.id, attempts: 0, nextAttemptAt: 0 });
+}
+function enqueueCard(state, key, messageText) {
+    if (state.outbox.some((entry) => entry.key === key))
+        return;
+    if (state.outbox.length >= MAX_OUTBOX)
+        throw new Error(`observer outbox reached ${MAX_OUTBOX} entries`);
+    state.outbox.push({ kind: "card", key, message: messageText, attempts: 0, nextAttemptAt: 0 });
+}
+function analysisCard(job, heading) {
+    const incident = job.incident;
+    const analysis = job.analysis;
+    const exhausted = analysis.summary === "Analyst evidence-gathering turns were exhausted"
+        || analysis.summary.startsWith("自动诊断未完成：在允许的证据轮数内仍缺少关键证据");
+    const conclusion = exhausted
+        ? "自动诊断未完成：在允许的证据轮数内仍缺少关键证据。"
+        : analysis.summary;
+    const recommendation = exhausted && incident.class === "ci_failure"
+        ? "保持暂停；补齐完整失败日志后重新诊断，不要直接批准或重跑。"
+        : "保持暂停；先处理未决信息，再按 Harness 策略重新诊断。";
+    const unknowns = exhausted
+        ? "• 所需证据超出 Harness 本轮允许的收集范围"
+        : analysis.unknowns.length === 0
+            ? "无"
+            : analysis.unknowns.slice(0, 3).map((value) => `• ${html(clean(value, 220), 180)}`).join("\n");
+    return [
+        `⚠️ <b>#${job.task.issueNumber} 已阻塞 · ${html(exhausted ? "自动诊断未完成" : heading, 100)}</b>`,
+        `<code>${html(clean(job.task.repo, 160), 140)}</code> · ${html(clean(job.task.title, 180), 150)}`,
+        "",
+        `<b>结论：</b>${html(clean(conclusion, 420), 340)}`,
+        `<b>原因：</b>${html(clean(incident.summary, 540), 440)}`,
+        "<b>影响：</b>自动流程保持暂停；Harness 未启动恢复 agent。",
+        `<b>建议：</b>${html(recommendation, 300)}`,
+        "<b>建议原因：</b>现有 analysis 为 hold，不能批准；继续 fail-closed 可避免把未知 CI 原因带入后续 issue。",
+        "",
+        "<blockquote expandable><b>展开时间线与证据（Controller 本机时间）</b>",
+        ...holdTimeline(job),
+        `HEAD：<code>${html(job.headSha?.slice(0, 12) ?? "尚无 HEAD", 40)}</code>`,
+        `证据引用：${html(clean(analysis.evidenceRefs.join(", ") || "无", 300), 240)}`,
+        `未决信息：${unknowns}`,
+        `Incident：<code>${html(clean(incident.id, 80), 60)}</code> · revision <code>${job.revision}</code>`,
+        "</blockquote>",
+    ].join("\n");
+}
+function holdTimeline(job) {
+    const events = [{ at: job.createdAt, text: "任务进入 Harness" }];
+    if (job.ciFailure?.observedAt)
+        events.push({ at: job.ciFailure.observedAt, text: "已观察到 GitHub 必需 CI 失败" });
+    events.push({ at: job.incident.createdAt, text: `Harness 记录 ${job.incident.class} · ${job.incident.lane}` }, { at: job.analysis.createdAt, text: "Analyst 未形成可批准的恢复建议；保持阻塞" });
+    return events
+        .sort((left, right) => Date.parse(left.at) - Date.parse(right.at))
+        .map(({ at, text }) => `<code>${html(localTime(at), 40)}</code> · ${html(text, 180)}`);
+}
+function localTime(value) {
+    const date = new Date(value);
+    if (!Number.isFinite(date.getTime()))
+        return clean(value, 40);
+    const parts = Object.fromEntries(TIMELINE_TIME.formatToParts(date).map((part) => [part.type, part.value]));
+    return `${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second} ${parts.timeZoneName}`;
 }
 function parseApprovalCard(output, analysisId) {
     try {
@@ -420,7 +503,9 @@ function loadState(path) {
             || typeof entry.key !== "string"
             || !Number.isInteger(entry.attempts)
             || !Number.isFinite(entry.nextAttemptAt)
-            || (entry.kind === "text" ? typeof entry.message !== "string" : entry.kind !== "approval" || typeof entry.analysisId !== "string"))) {
+            || (entry.kind === "text" || entry.kind === "card"
+                ? typeof entry.message !== "string"
+                : entry.kind !== "approval" || typeof entry.analysisId !== "string"))) {
         throw new Error("invalid observer state");
     }
     return value;
@@ -467,6 +552,16 @@ function bounded(value) {
 }
 function clean(value, max) {
     return value.replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim().slice(0, max);
+}
+function html(value, max) {
+    let output = "";
+    for (const char of value) {
+        const escaped = char === "&" ? "&amp;" : char === "<" ? "&lt;" : char === ">" ? "&gt;" : char;
+        if (output.length + escaped.length > max)
+            break;
+        output += escaped;
+    }
+    return output;
 }
 function message(error) {
     return error instanceof Error ? error.message : String(error);

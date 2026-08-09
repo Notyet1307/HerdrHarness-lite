@@ -117,6 +117,20 @@ test("Hermes status stays read-only and renders bounded ledger facts", () => {
         assert.ok(!notification.stdout.includes("revision"));
         assert.ok(!notification.stdout.includes("Incident："));
         assert.ok(!notification.stdout.includes("Telegram 决策卡"));
+        state.activeJob.analysis = {
+            ...state.activeJob.analysis,
+            id: "analysis-exhausted",
+            action: "hold",
+            summary: "Analyst evidence-gathering turns were exhausted",
+            resolutionBrief: "",
+            unknowns: ["more evidence is required than the Harness policy allows"],
+        };
+        writeFileSync(join(stateDir, "state.json"), `${JSON.stringify(state)}\n`, { encoding: "utf8", mode: 0o600 });
+        const exhausted = run("notification", bridgeConfig);
+        assert.equal(exhausted.status, 0);
+        assert.match(exhausted.stdout, /结论：自动诊断未完成：在允许的证据轮数内仍缺少关键证据。/);
+        assert.match(exhausted.stdout, /建议：保持暂停；补齐完整失败日志后重新诊断，不要直接批准或重跑。/);
+        assert.ok(!exhausted.stdout.includes("evidence-gathering turns were exhausted"));
         const summary = run("summary", bridgeConfig);
         assert.equal(summary.status, 0);
         assert.match(summary.stdout, /owner\/repo#48 · BLOCKED · revision 12/);

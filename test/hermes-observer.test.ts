@@ -7,7 +7,7 @@ import { spawnSync } from "node:child_process";
 
 type ObserverState = {
   controllerLogOffset: number;
-  outbox: Array<{ kind: "text" | "approval"; key: string; message?: string; analysisId?: string; attempts: number; nextAttemptAt: number }>;
+  outbox: Array<{ kind: "text" | "card" | "approval"; key: string; message?: string; analysisId?: string; attempts: number; nextAttemptAt: number }>;
 };
 
 test("Hermes observer baselines old logs and retries text or approval-card deliveries", () => {
@@ -92,7 +92,7 @@ test("Hermes observer baselines old logs and retries text or approval-card deliv
     assert.equal(runObserver().status, 0);
     assert.equal(readObserver(observerState).outbox.length, 0);
 
-    const blocked = { ...blockedState(root), terminalJobs };
+    const blocked: any = { ...blockedState(root), terminalJobs };
     const blockedLedgerWithHistory = `${JSON.stringify(blocked)}\n`;
     writeFileSync(ledgerPath, blockedLedgerWithHistory, { encoding: "utf8", mode: 0o600 });
     writeBridge("/usr/bin/false");
@@ -107,12 +107,59 @@ test("Hermes observer baselines old logs and retries text or approval-card deliv
     assert.equal(runObserver().status, 0);
     assert.ok(!readObserver(observerState).outbox.some((entry) => entry.kind === "approval"));
 
+    blocked.activeJob.revision += 1;
+    blocked.activeJob.incident.class = "ci_failure";
+    blocked.activeJob.incident.lane = "controller";
+    blocked.activeJob.incident.attemptId = null;
+    blocked.activeJob.incident.summary = "PR #87 required CI failed at a43e55d: test-docker-compose";
+    blocked.activeJob.incident.allowedActions = ["retry_fresh_worker", "hold"];
+    blocked.activeJob.pullRequest = {
+      number: 87,
+      url: "https://github.com/owner/repo/pull/87",
+      headSha: "b".repeat(40),
+    };
+    blocked.activeJob.ciFailure = {
+      headSha: "b".repeat(40),
+      observedAt: "2026-08-07T00:01:30.000Z",
+      checks: [{
+        name: "test-docker-compose",
+        state: "FAILURE",
+        bucket: "fail",
+        workflow: "Test Docker Compose",
+        link: "https://github.com/owner/repo/actions/runs/1/job/2",
+        completedAt: "2026-08-07T00:01:00.000Z",
+        diagnostic: "Expected: 409\nReceived: 202",
+      }],
+    };
+    blocked.activeJob.analysis = {
+      ...blocked.activeJob.analysis,
+      id: "analysis-exhausted",
+      action: "hold",
+      summary: "Analyst evidence-gathering turns were exhausted",
+      resolutionBrief: "",
+      unknowns: ["more evidence is required than the Harness policy allows"],
+      createdAt: "2026-08-07T00:03:00.000Z",
+    };
+    const heldLedger = `${JSON.stringify(blocked)}\n`;
+    writeFileSync(ledgerPath, heldLedger, { encoding: "utf8", mode: 0o600 });
+    writeBridge("/usr/bin/false");
+    assert.equal(runObserver().status, 0);
+    observer = readObserver(observerState);
+    const holdCard = observer.outbox.find((entry) => entry.kind === "card");
+    assert.ok(holdCard, JSON.stringify(observer.outbox));
+    assert.match(holdCard.message ?? "", /自动诊断未完成/);
+    assert.match(holdCard.message ?? "", /补齐完整失败日志后重新诊断/);
+    assert.match(holdCard.message ?? "", /<blockquote expandable>/);
+    assert.match(holdCard.message ?? "", /已观察到 GitHub 必需 CI 失败/);
+    assert.ok(!(holdCard.message ?? "").includes("evidence-gathering turns were exhausted"));
+    assert.ok((holdCard.message ?? "").length <= 3_900);
+
     appendFileSync(controllerLog, `${JSON.stringify({ ok: false, action: "preflight_failed", jobId: "job-001", message: "provider probe failed" })}\n`, { encoding: "utf8" });
     writeBridge("/usr/bin/false");
     assert.equal(runObserver().status, 0);
     observer = readObserver(observerState);
     assert.ok(observer.outbox.some((entry) => (entry.message ?? "").includes("preflight_failed") && (entry.message ?? "").includes("未执行自动恢复")));
-    assert.equal(readFileSync(ledgerPath, "utf8"), blockedLedgerWithHistory);
+    assert.equal(readFileSync(ledgerPath, "utf8"), heldLedger);
 
     function writeBridge(hermesBin: string): void {
       writeFileSync(bridgeConfig, JSON.stringify({

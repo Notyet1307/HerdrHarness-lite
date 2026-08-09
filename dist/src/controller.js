@@ -982,10 +982,10 @@ export class HarnessController {
             incidentId: incident.id,
             evidenceDigest: pack.digest,
             action: "hold",
-            summary: "Analyst evidence-gathering turns were exhausted",
+            summary: "自动诊断未完成：在允许的证据轮数内仍缺少关键证据。",
             resolutionBrief: "",
             evidenceRefs: pack.items.map((item) => item.ref),
-            unknowns: ["more evidence is required than the Harness policy allows"],
+            unknowns: ["所需证据超出 Harness 本轮允许的收集范围"],
             createdAt: this.deps.clock.now(),
         };
     }
