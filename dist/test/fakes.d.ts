@@ -210,6 +210,8 @@ export declare class FakeHerdr implements HerdrPort {
         agentStatus: "idle" | "done" | "blocked" | "unknown";
         diagnostic: string | null;
     } | null;
+    lateResultAttemptId: string | null;
+    private settledWithoutResultAttempt;
     constructor(outcomes: Outcome[]);
     createWorktree(input: {
         branch: string;

@@ -236,6 +236,12 @@ export class FakeHerdr implements HerdrPort {
   promptFailureAfterDispatch: Error | null = null;
   waitFailure: Error | null = null;
   settleWithoutResult: { agentStatus: "idle" | "done" | "blocked" | "unknown"; diagnostic: string | null } | null = null;
+  lateResultAttemptId: string | null = null;
+  private settledWithoutResultAttempt: {
+    id: string;
+    agentStatus: "idle" | "done" | "blocked" | "unknown";
+    diagnostic: string | null;
+  } | null = null;
 
   constructor(private readonly outcomes: Outcome[]) {}
 
@@ -273,7 +279,19 @@ export class FakeHerdr implements HerdrPort {
     if (this.settleWithoutResult) {
       const settled = this.settleWithoutResult;
       this.settleWithoutResult = null;
+      this.settledWithoutResultAttempt = { id: input.expectedAttemptId, ...settled };
       return { ...settled, result: null };
+    }
+    if (this.settledWithoutResultAttempt?.id === input.expectedAttemptId) {
+      if (this.lateResultAttemptId !== input.expectedAttemptId) {
+        return {
+          agentStatus: this.settledWithoutResultAttempt.agentStatus,
+          diagnostic: this.settledWithoutResultAttempt.diagnostic,
+          result: null,
+        };
+      }
+      this.settledWithoutResultAttempt = null;
+      this.lateResultAttemptId = null;
     }
     const failure = this.waitFailure;
     this.waitFailure = null;

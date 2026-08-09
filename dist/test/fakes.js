@@ -200,6 +200,8 @@ export class FakeHerdr {
     promptFailureAfterDispatch = null;
     waitFailure = null;
     settleWithoutResult = null;
+    lateResultAttemptId = null;
+    settledWithoutResultAttempt = null;
     constructor(outcomes) {
         this.outcomes = outcomes;
     }
@@ -230,7 +232,19 @@ export class FakeHerdr {
         if (this.settleWithoutResult) {
             const settled = this.settleWithoutResult;
             this.settleWithoutResult = null;
+            this.settledWithoutResultAttempt = { id: input.expectedAttemptId, ...settled };
             return { ...settled, result: null };
+        }
+        if (this.settledWithoutResultAttempt?.id === input.expectedAttemptId) {
+            if (this.lateResultAttemptId !== input.expectedAttemptId) {
+                return {
+                    agentStatus: this.settledWithoutResultAttempt.agentStatus,
+                    diagnostic: this.settledWithoutResultAttempt.diagnostic,
+                    result: null,
+                };
+            }
+            this.settledWithoutResultAttempt = null;
+            this.lateResultAttemptId = null;
         }
         const failure = this.waitFailure;
         this.waitFailure = null;

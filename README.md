@@ -160,6 +160,8 @@ node dist/src/cli.js approve \
 
 Approval is compare-and-swap protected. Continue with standalone ticks through `recovery_applied` and fresh-attempt preparation/dispatch. The Harness closes the old pane and never resumes the old agent.
 
+Before approval, a blocked `infrastructure_exhausted` attempt with no recorded result is re-observed. If that exact attempt later produces a correctly bound durable result, the Controller runs the normal result and Git verification path instead of starting a fresh agent; an invalid or mismatched result remains fail-closed. This reconciles delayed delivery only and grants no recovery authority.
+
 #### Maintainer resolved an exhausted architecture decision
 
 `resolve-decision` is not a general override for Analyst `hold`. It is accepted only when the active, HEAD-bound Reviewer returned `changes` with a `major` or `critical` finding on the final allowed review round, and the Analyst held with unresolved questions. Record the concrete maintainer decision—not merely “retry”—in `--reason`:
