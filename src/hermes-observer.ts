@@ -16,8 +16,8 @@ import {
 } from "node:fs";
 import { dirname, isAbsolute, join } from "node:path";
 import { JsonStateStore } from "./adapters/json-store.js";
-import { isRetryAction, type HarnessState, type Job, type JobState } from "./model.js";
-import { allowedActionsFor } from "./policy.js";
+import { type HarnessState, type Job, type JobState } from "./model.js";
+import { operatorActionsFor } from "./policy.js";
 import { controllerHeartbeatPath } from "./controller-heartbeat.js";
 
 const MAX_MESSAGE_LENGTH = 3_900;
@@ -341,11 +341,12 @@ async function flushOutbox(config: ObserverConfig, state: ObserverState): Promis
         return;
       }
       const job = ledger.activeJob;
+      const option = job ? operatorActionsFor(job).find((candidate) => candidate.kind === "approve_retry") : null;
       if (
         job?.state !== "blocked"
         || job.analysis?.id !== entry.analysisId
         || job.analysis.incidentId !== job.incident?.id
-        || !isRetryAction(job.analysis.action)
+        || option?.effect !== job.analysis.action
       ) {
         state.outbox = state.outbox.filter((candidate) => candidate !== entry);
         saveState(config.observerState, state);
@@ -421,12 +422,8 @@ function enqueueAnalysis(config: ObserverConfig, state: ObserverState, job: Job,
   const exactAnalysis = job.state === "blocked"
     && job.incident !== null
     && analysis?.incidentId === job.incident.id;
-  const exactRetry = job.state === "blocked"
-    && job.incident !== null
-    && analysis?.incidentId === job.incident.id
-    && isRetryAction(analysis.action)
-    && job.incident.allowedActions.includes(analysis.action)
-    && allowedActionsFor(job.incident.class, job.incident.lane).includes(analysis.action);
+  const approvalOption = operatorActionsFor(job).find((option) => option.kind === "approve_retry");
+  const exactRetry = exactAnalysis && approvalOption?.effect === analysis.action;
   if (!exactRetry) {
     if (exactAnalysis && analysis.action === "hold") {
       enqueueCard(state, `analysis:${analysis.id}`, analysisCard(job, heading));

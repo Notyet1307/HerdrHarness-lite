@@ -5,7 +5,7 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, renameSync, 
 import { dirname, isAbsolute, join } from "node:path";
 import { JsonStateStore } from "./adapters/json-store.js";
 import { isRetryAction } from "./model.js";
-import { allowedActionsFor } from "./policy.js";
+import { operatorActionsFor } from "./policy.js";
 const CHALLENGE_TTL_MS = 10 * 60 * 1_000;
 const MAX_STDIN_BYTES = 1_024;
 const LANE_ID = /^[a-z0-9][a-z0-9-]{0,31}$/;
@@ -47,12 +47,9 @@ async function requestChallenge(config, json) {
         throw new Error("当前任务不在等待恢复批准");
     if (!job.analysis || job.analysis.incidentId !== job.incident.id)
         throw new Error("当前 incident 尚无精确绑定的 Analyst 建议");
-    if (!isRetryAction(job.analysis.action))
-        throw new Error("Analyst 没有建议 fresh retry，不能批准");
-    if (!job.incident.allowedActions.includes(job.analysis.action)
-        || !allowedActionsFor(job.incident.class, job.incident.lane).includes(job.analysis.action)) {
-        throw new Error("当前 incident policy 不允许 Analyst 建议的恢复动作");
-    }
+    const option = operatorActionsFor(job).find((candidate) => candidate.kind === "approve_retry");
+    if (!option || !isRetryAction(option.effect))
+        throw new Error("当前 incident policy 不允许 fresh retry");
     const token = randomUUID().replaceAll("-", "").slice(0, 16).toUpperCase();
     const createdAt = new Date();
     const challenge = {
@@ -64,7 +61,7 @@ async function requestChallenge(config, json) {
         issueNumber: job.task.issueNumber,
         incidentId: job.incident.id,
         analysisId: job.analysis.id,
-        action: job.analysis.action,
+        action: option.effect,
         createdAt: createdAt.toISOString(),
         expiresAt: new Date(createdAt.getTime() + CHALLENGE_TTL_MS).toISOString(),
         consumedAt: null,
@@ -177,7 +174,7 @@ function assertChallengeCurrent(job, challenge, config) {
         || job.incident?.id !== challenge.incidentId
         || job.analysis?.id !== challenge.analysisId
         || job.analysis.incidentId !== job.incident.id
-        || job.analysis.action !== challenge.action) {
+        || !operatorActionsFor(job).some((option) => option.kind === "approve_retry" && option.effect === challenge.action)) {
         throw new ApprovalCommandError("binding_stale", `任务、revision、incident 或 analysis 已变化；请重新发送 ${approvalCommand(config)}`, true);
     }
 }

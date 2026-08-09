@@ -2,7 +2,7 @@
 
 ## 1. 结论
 
-当前项目的问题不是能力方向错误，而是**控制面、执行面、证据面、远程观察面同时进入了同一组 controller 模块**。继续在当前 `run-once / audit-once / monitor / repair / approve / push-device` 结构上增量修补，复杂度还会持续上升。
+本文最初用于指导 V2 精简；当前主线已经完成该迁移。现在的优化重点不是再建一套状态机，而是收敛恢复控制面：Core 从现有 `Job/Incident/Analysis` 与实时 policy 派生唯一 `OperatorAction[]`，CLI、Hermes 和人工 gate 复用它；外部结果短暂迟到时先有界重观察同一 Attempt，不立即制造新 Incident；`run/tick` 由状态目录排他 lease 保证单活。
 
 建议建立 V2 核心，保留现有项目中最有价值的五项设计：
 
@@ -30,6 +30,7 @@
 | `EvidencePack` | Analyst 可见的有限、只读、带 digest 的证据 | Harness |
 | `Analysis` | Codex Analyst 的建议，不是权限 | Analyst adapter |
 | `Approval` | 人对一个精确 Incident/Analysis 的授权 | Human gate |
+| `OperatorAction` | Core 对当前精确绑定派生的可执行人工操作；不是持久生命周期状态 | Policy projection |
 | `PullRequest` | 经 reviewer 验证的 head 的交付对象 | GitHub |
 
 ### 2.2 关系
@@ -42,19 +43,21 @@ Job   1 ── 0..1 ActiveIncident
 Incident 1 ── 0..1 Analysis
 Analysis 1 ── 0..1 Approval
 Approval 1 ── 1 RecoveryAction
+Job facts 1 ── 0..N derived OperatorAction
 ```
 
 关键绑定关系：
 
 ```text
 Approval = f(job_id, job_revision, incident_id, analysis_id, action)
+OperatorAction = f(job_id, job_revision, incident_id, analysis_id, attempt_id, head_sha, pr_head_sha, policy)
 ```
 
 其中任意一项变化，审批立即失效。
 
 ### 2.3 约束
 
-1. **单写者**：只有 controller 能修改 Job；observer、Analyst、Pi、移动端都不能写状态。
+1. **单写者**：只有 controller 能修改 Job；`run/tick` 先取得排他 lease，observer、Analyst、Pi、移动端都不能写状态。
 2. **GitHub 决定能否领取**：OPEN、ready label、无 assignee、无 OPEN blocker。
 3. **Git 决定代码事实**：branch、base/head ancestry、commit、dirty、push 状态不能由模型自报代替。
 4. **Herdr 只负责运行与观察**：workspace/tab/pane/agent 生命周期不是交付验收。
@@ -74,7 +77,8 @@ Approval = f(job_id, job_revision, incident_id, analysis_id, action)
 
 ```text
 run / tick     controller 唯一推进入口
-status         只读
+status         只读；--operator 只展示 Core 派生的当前可执行操作
+decide         按精确 option ID 委托给现有人工 gate
 reassess       只刷新 held incident 的证据与 Analyst 判断，不授权恢复
 approve        唯一重试授权入口
 cancel         可选的显式终止入口
@@ -220,6 +224,8 @@ prepared -> pane_ready -> agent_ready -> running -> settled
 
 pane identity 与 agent identity 分阶段落账；`running` 在 prompt 前落账，因此 prompt 返回丢失或进程崩溃都不会触发同一 dispatch 重放。成功结果经 Git 验证后关闭该 attempt 自有 pane；若关闭后、状态保存前崩溃，下一轮允许用 durable result 继续验收，并把 `pane_not_found` 视为幂等关闭。blocked、failed 或不确定的 pane 留到精确人工恢复时再关闭。本阶段不自动删除 worktree。
 
+Pane/start/wait 的瞬时错误或非 blocked agent 暂缺 result 时，Controller 只持久增加同一 Attempt 的 reconciliation 计数并再观察一次；成功阶段迁移会清零该计数。重复失败才创建 `infrastructure_exhausted`。已批准 fresh retry 在消费前还会最后观察一次原 Attempt；合法迟到结果回到普通结果与 Git 验证链，prompt 始终不会重放。
+
 ---
 
 ## 6. Issue、Map 与 Block 领取逻辑
@@ -362,6 +368,8 @@ Harness 负责路径限制、长度限制和读取；Analyst 不能提交 shell 
 Analyst 返回 `hold` 后，Controller 不会自动重试。只有 Worker 或 Reviewer `infrastructure_exhausted` 的运行环境发生变化时，人才能用精确 revision/incident/analysis 和 bounded reason 请求 `reassess`。Harness 将旧 incident/analysis 绑定写入审计记录，把 operator statement 标为 untrusted，创建同 lane 的 successor incident 后重新调用 Analyst；该动作本身不包含 retry 权限。
 
 ### 7.4 人工 Gate
+
+人工看到的是 Core 派生的 `OperatorAction[]`，当前只有四种本质操作：批准 fresh retry、重新分析、提供耗尽轮次的维护者决策、取消并重新入队。操作 ID 绑定当前 revision、Incident、Analysis、Attempt 与 Git fixed point；任一事实变化都会使旧 ID 失效。`decide` 只是路由层，下面仍由 `approveRecovery`、`reassessIncident`、`resolveDecision`、`cancelHeldJob` 各自复核完整边界。
 
 批准请求必须精确匹配：
 
@@ -563,7 +571,7 @@ npm run verify
 
 ```text
 TypeScript strict typecheck: PASS
-Tests: 45 passed, 0 failed
+Tests: 98 passed, 0 failed
 ```
 
 覆盖：
@@ -581,6 +589,7 @@ Tests: 45 passed, 0 failed
 11. Herdr 0.8 原生命令、响应 identity、错误分类与 pane-ready 竞态，不使用 `pane run` 模拟 agent；
 12. prompt at-most-once、关闭后崩溃恢复、成功 pane 关闭与官方 `agent get/read` 诊断。
 13. Worker focused self-check、Reviewer 强制双轴 skill dispatch、Pi package 资源、fail-fast role argv、Provider/Docker/Reviewer 环境预检与 untracked 文件 gate。
+14. Controller 排他 lease、同 Attempt 有界 reconciliation、批准消费前迟到结果收敛、统一 OperatorAction 投影与精确 option 路由。
 
 历史真实验证：在 `Notyet1307/harness-sandbox@fd9defa` 上，以 Herdr 0.8.0、Pi 0.83.0、Pi integration v8 完成独立命名 session canary；Pi 到达 `done`、写出预期 durable result、tracked tree 未改，自有 attempt pane 关闭后已从 workspace 消失。另以 issue #12 从基线 `b0fd0b0` 运行角色 canary：当时的 Worker 生成本地 `1285f52` 并完成旧版双轴自审，fresh Reviewer 再完成独立 `2/2` 双轴审查并返回 `pass`。该记录只证明旧版链路；当前 Worker 已改为 focused self-check，仍需下一次真实 canary 补充运行证据。
 

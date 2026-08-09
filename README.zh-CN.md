@@ -11,7 +11,7 @@ HerdrHarness Lite 是一个小型、失败关闭的 GitHub Issue 交付控制器
 
 ## Agent 操作手册
 
-这是操作契约。执行任何命令前先读完本节六步；README 不扩大用户授权，只要求查看时就在 `status` 后停止。先读状态，再采取动作；每次只允许一个 Controller 写账本。把命令中的大写占位符替换为当前机器的真实值。
+这是操作契约。执行任何命令前先读完本节六步；README 不扩大用户授权，只要求查看时就在 `status` 后停止。先读状态，再采取动作。`run` 和 `tick` 会取得状态目录的排他 lease，并拒绝并发 Controller。把命令中的大写占位符替换为当前机器的真实值。
 
 ### 1. 预检
 
@@ -74,6 +74,7 @@ node dist/src/cli.js tick --config /ABSOLUTE/PATH/harness.config.json
 | `preflight_failed` | 尚未 dispatch agent；修复消息指出的 Provider/Docker 环境后重跑 `tick`，或重新启动 `run` |
 | `selected`、`claimed`、`worktree_created` | 核对消息后再执行一次 `tick` |
 | `attempt_prepared`、`attempt_pane_ready`、`attempt_agent_ready` | 再执行一次 `tick`；下一步可能进入长时间 dispatch |
+| `attempt_reconciling` | 正在以同一 Attempt 身份再观察一次；再执行一次 `tick`，不要启动另一个 Controller |
 | dispatch 阶段命令仍未返回 | 等待；只用 `status` 和 Herdr 只读查看，不并发启动第二个 `tick` |
 | `attempt_dispatched`、`attempt_completed`、`ci_recovered`、`base_refreshed`、`published`、`merged` | 再执行一次 `tick` 消费下一阶段 |
 | `publish_retry` | 修复消息指出的可重试发布条件，再执行 `tick` |
@@ -93,6 +94,7 @@ Dispatch 阶段会调用 Herdr `agent prompt --wait`，因此可能在整个 Wor
 
 ```bash
 node dist/src/cli.js status --config /ABSOLUTE/PATH/harness.config.json
+node dist/src/cli.js status --config /ABSOLUTE/PATH/harness.config.json --operator
 ```
 
 从 `activeJob.activeAttempt.handle.agentName` 取出 agent 名称，再读 Herdr：
@@ -104,6 +106,8 @@ herdr --session SESSION_NAME agent read AGENT_NAME \
 ```
 
 Pi 底部显示实际 `(provider) model • thinking`。配置文件只能表达意图；运行时 footer 和真实探测才证明实际选择。
+
+普通 `status` 返回完整账本；`status --operator` 返回稳定的操作投影：当前 mode/phase，以及只对精确 revision、incident、analysis、Attempt 和 HEAD 绑定有效的操作。
 
 查看完成条件：已确认 `activeJob.state`、`revision`、attempt ID/phase、实际 provider/model，以及当前是在工作、等待还是 blocked。
 
@@ -141,6 +145,16 @@ node dist/src/cli.js status --config /ABSOLUTE/PATH/harness.config.json
 - `activeJob.headSha`
 - `activeJob.ciFailure` 与 `activeJob.ciReworkCount`（存在时）
 
+默认使用投影后的命令面，不再手工把这些字段映射成某一种恢复命令：
+
+```bash
+node dist/src/cli.js status --config /ABSOLUTE/PATH/harness.config.json --operator
+node dist/src/cli.js decide --config /ABSOLUTE/PATH/harness.config.json \
+  --option DECISION_ID --actor OPERATOR --reason "Evidence checked; execute this exact option"
+```
+
+操作 ID 由完整决策绑定派生；任一绑定事实变化后，该 ID 就不可用。`decide` 仍委托给现有 approval、reassessment、decision-resolution 或 cancellation gate；显式旧命令继续保留，供兼容自动化使用。
+
 #### 新 block
 
 当 `state=blocked` 且 `analysis=null` 时，只执行一次 `tick`。Analyst 会收到有界证据包并记录建议。
@@ -159,6 +173,8 @@ node dist/src/cli.js approve \
 ```
 
 Approval 受 compare-and-swap 保护。随后继续单独 `tick`，直到 `recovery_applied`，再依次创建并派发 fresh attempt。Harness 会关闭旧 pane，绝不恢复旧 agent。
+
+Pane/start/wait 的瞬时失败，以及非 blocked agent 暂时缺少 result，都会先获得一次持久化的同 Attempt 重观察，再创建 Incident；重复缺失仍会 fail closed。已 blocked 的 `infrastructure_exhausted` Attempt 还会在消费已批准 retry 前再观察一次。如果该精确 Attempt 产生了绑定正确的 durable result，Controller 会走正常 result 与 Git 校验路径，而不是启动 fresh agent；无效或错绑结果仍然 fail closed。Reconciliation 不重放 prompt，也不授予恢复权限。
 
 #### 维护者已解决耗尽轮次的架构决策
 
@@ -281,6 +297,8 @@ blocked incident
   -> fresh Worker or Reviewer attempt
 ```
 
+操作展示只是投影，不是第二套状态机：`JobState + Incident + Analysis + live policy -> mode/phase + 精确 OperatorAction[]`。Adapter 只负责展示这些操作；所有写入仍经过 Core recovery gate 与 ledger CAS。
+
 每次 `tick` 至多完成一次持久迁移，所以进程重启后从账本继续，不会重放整个编排脚本。
 
 ### 角色与信息边界
@@ -347,7 +365,7 @@ Harness 不会：
 | `baseRef` | 目标分支，通常为 `main` |
 | `readyLabel` | GitHub 可执行任务标签，例如 `ready-for-agent` |
 | `claimLabel` | 持久领取标记，例如 `agent:claimed` |
-| `stateDir` | 私有账本、事件、Analyst receipts、attempt descriptors 和 Controller 心跳 |
+| `stateDir` | 私有账本、事件、Analyst receipts、attempt descriptors、Controller 心跳和排他 lease |
 | `worktreeRoot` | Herdr 任务 worktree 根目录 |
 | `maxReviewRounds` | Reviewer/rework 最大轮数 |
 | `maxAnalystTurns` | Analyst 可请求的最大证据轮数 |
@@ -454,6 +472,7 @@ Controller 不会自动 rerun CI，也不会自动 rebase。若操作者在 revi
 
 - 单一 active job snapshot 与 terminal job 摘要；
 - compare-and-swap revision 和 append-only 保存事件；
+- Controller 排他 lease 与存活心跳；
 - incident、Analyst effect receipts、session identity、approval 与 reassessment；
 - required-check 失败证据与有界 CI 回修计数；
 - 每次 Reviewer attempt 的只读源码快照、验证副本、fixed-point evidence、descriptor 和外部 result。
@@ -477,7 +496,7 @@ npm run verify
 ```text
 src/model.ts       领域记录与不变量
 src/controller.ts  单写者状态机
-src/policy.ts      incident policy 与结果验证
+src/policy.ts      incident policy、operator projection 与结果验证
 src/recovery.ts    approval、reassessment 与 cancellation gates
 src/prompts.ts     Worker/Reviewer 契约
 src/ports.ts       外部边界

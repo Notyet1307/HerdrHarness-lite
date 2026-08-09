@@ -1,6 +1,33 @@
-import type { Attempt, AttemptResult, BlockClass, EvidencePack, Incident, Job, RecoveryAction } from "./model.js";
+import type { Attempt, AttemptResult, BlockClass, EvidencePack, HarnessState, Incident, Job, JobState, RecoveryAction } from "./model.js";
 import type { Clock, IdGenerator } from "./ports.js";
 export declare function allowedActionsFor(blockClass: BlockClass, lane: Incident["lane"]): RecoveryAction[];
+export type OperatorAction = {
+    id: string;
+    kind: "approve_retry" | "reassess" | "resolve_decision" | "cancel";
+    effect: "retry_fresh_worker" | "retry_fresh_reviewer" | "rerun_analysis" | "cancel_and_requeue";
+    binding: {
+        jobId: string;
+        revision: number;
+        incidentId: string;
+        analysisId: string;
+        attemptId: string | null;
+        headSha: string | null;
+        pullRequestHeadSha: string | null;
+    };
+};
+export type OperatorProjection = {
+    mode: "idle" | "running" | "waiting" | "needs_decision" | "terminal";
+    phase: "idle" | "claim" | "worker" | "reviewer" | "delivery" | "recovery" | "terminal";
+    jobId: string | null;
+    revision: number | null;
+    state: JobState | null;
+    reason: string | null;
+    actions: OperatorAction[];
+};
+/** One Core-owned projection used by operator adapters and recovery gates. */
+export declare function projectOperatorState(state: HarnessState): OperatorProjection;
+export declare function operatorActionsFor(job: Job): OperatorAction[];
+export declare function reassessmentClassFor(job: Job): BlockClass | null;
 /** Exact evidence boundary for a maintainer resolving an exhausted Reviewer architecture decision. */
 export declare function isDecisionResolutionEligible(job: Job): boolean;
 export declare function makeIncident(input: {

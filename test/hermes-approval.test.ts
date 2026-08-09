@@ -135,6 +135,39 @@ test("Telegram approval card exposes bounded decisions and hold consumes only th
   }
 });
 
+test("CLI projects and consumes one exact operator option", () => {
+  const root = mkdtempSync(join(tmpdir(), "herdr-operator-option-"));
+  try {
+    const stateDir = join(root, "state");
+    const config = join(root, "harness.json");
+    const ledgerPath = join(stateDir, "state.json");
+    mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+    writeFileSync(config, JSON.stringify({
+      stateDir,
+      herdr: { session: "test" },
+      analyst: { command: "/usr/bin/false" },
+    }), { encoding: "utf8", mode: 0o600 });
+    writeFileSync(ledgerPath, `${JSON.stringify(blockedState())}\n`, { encoding: "utf8", mode: 0o600 });
+
+    const status = runHarness(["status", "--config", config, "--operator"]);
+    assert.equal(status.status, 0);
+    const projection = JSON.parse(status.stdout);
+    assert.equal(projection.mode, "needs_decision");
+    assert.equal(projection.actions[0].kind, "approve_retry");
+
+    const decided = runHarness([
+      "decide", "--config", config,
+      "--option", projection.actions[0].id,
+      "--actor", "human@example.test",
+      "--reason", "Provider health probe passed.",
+    ]);
+    assert.equal(decided.status, 0);
+    assert.equal(readLedger(ledgerPath).activeJob.state, "recovery_approved");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 function run(command: "request" | "confirm" | "hold", config: string, token?: string, json = false) {
   return spawnSync(process.execPath, [
     resolve("dist/src/hermes-approval.js"), command, "--config", config, ...(json ? ["--json"] : []),
@@ -142,6 +175,13 @@ function run(command: "request" | "confirm" | "hold", config: string, token?: st
     encoding: "utf8",
     timeout: 10_000,
     ...(token ? { input: JSON.stringify({ token }) } : {}),
+  });
+}
+
+function runHarness(argv: string[]) {
+  return spawnSync(process.execPath, [resolve("dist/src/cli.js"), ...argv], {
+    encoding: "utf8",
+    timeout: 10_000,
   });
 }
 

@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import { JsonStateStore } from "./adapters/json-store.js";
 import { MAX_CI_REWORKS } from "./model.js";
+import { projectOperatorState } from "./policy.js";
 const MAX_MESSAGE_LENGTH = 3_500;
 const LANE_ID = /^[a-z0-9][a-z0-9-]{0,31}$/;
 async function main(argv) {
@@ -35,6 +36,7 @@ function renderStatus(state, config) {
             "下一步：是否继续领取由正在运行的 Controller 和 GitHub eligibility 决定。",
         ].join("\n");
     }
+    const projection = projectOperatorState(state);
     const lines = [
         "Herdr Harness Lite",
         `任务：${clean(job.task.repo, 160)}#${job.task.issueNumber} ${clean(job.task.title, 240)}`,
@@ -49,7 +51,7 @@ function renderStatus(state, config) {
         lines.push(`HEAD：${shortSha(job.headSha)}`);
     if (job.pullRequest)
         lines.push(`PR：#${job.pullRequest.number} ${clean(job.pullRequest.url, 500)}`);
-    lines.push(`Worker 配置：${runtimeSelection(config.workerArgv)}`, `Reviewer 配置：${runtimeSelection(config.reviewerArgv)}`, "实际运行模型：ledger 未持久化时不可从配置推断。", `更新时间：${clean(job.updatedAt, 80)}`, `下一步：${nextStep(job)}`);
+    lines.push(`Worker 配置：${runtimeSelection(config.workerArgv)}`, `Reviewer 配置：${runtimeSelection(config.reviewerArgv)}`, "实际运行模型：ledger 未持久化时不可从配置推断。", `更新时间：${clean(job.updatedAt, 80)}`, `下一步：${nextStep(job, projection)}`);
     return lines.join("\n");
 }
 function renderNotification(state) {
@@ -99,13 +101,14 @@ function renderIncident(state, laneId) {
     const incident = job.incident;
     if (!incident)
         return `当前任务 ${clean(job.task.repo, 160)}#${job.task.issueNumber} 没有待处理 incident。`;
+    const actions = projectOperatorState(state).actions;
     const lines = [
         `任务：${clean(job.task.repo, 160)}#${job.task.issueNumber} ${clean(job.task.title, 240)}`,
         `状态：${job.state} · revision ${job.revision}`,
         `Incident：${clean(incident.id, 512)}`,
         `分类：${incident.class} · lane ${incident.lane}`,
         `摘要：${clean(incident.summary, 700)}`,
-        `允许动作：${incident.allowedActions.join(", ")}`,
+        `可执行操作：${actions.length > 0 ? actions.map(operatorActionLabel).join("；") : "无"}`,
     ];
     const analysis = job.analysis?.incidentId === incident.id ? job.analysis : null;
     if (!analysis) {
@@ -116,11 +119,17 @@ function renderIncident(state, laneId) {
     if (analysis.unknowns.length > 0) {
         lines.push(`未决信息：${analysis.unknowns.slice(0, 3).map((value) => clean(value, 240)).join("；")}`);
     }
-    if (analysis.action === "hold") {
+    if (actions.some((action) => action.kind === "approve_retry")) {
+        lines.push(`下一步：使用当前 Telegram 决策卡批准 fresh retry，或发送 ${approvalCommand(laneId)} 获取新的 10 分钟挑战。`);
+    }
+    else if (actions.length > 0) {
+        lines.push("下一步：选择上面的精确操作 ID；Harness 会在执行时重新校验全部绑定。");
+    }
+    else if (analysis.action === "hold") {
         lines.push("下一步：Analyst 建议 hold；没有可批准的 fresh retry。");
     }
     else {
-        lines.push(`下一步：使用当前 Telegram 决策卡批准 fresh retry，或发送 ${approvalCommand(laneId)} 获取新的 10 分钟挑战。`);
+        lines.push("下一步：当前建议已失效或不符合策略；不要手工恢复。");
     }
     return lines.join("\n");
 }
@@ -133,7 +142,7 @@ function isEvidenceExhausted(analysis) {
     return analysis.summary === "Analyst evidence-gathering turns were exhausted"
         || analysis.summary.startsWith("自动诊断未完成：在允许的证据轮数内仍缺少关键证据");
 }
-function nextStep(job) {
+function nextStep(job, projection) {
     switch (job.state) {
         case "claimed": return "Controller 将准备 worktree。";
         case "worker_ready": return "Controller 将准备并启动 Worker。";
@@ -142,11 +151,23 @@ function nextStep(job) {
         case "reviewer_running": return "等待 Reviewer 产生 durable result。";
         case "publish_ready": return "Controller 将推送分支并创建 PR。";
         case "awaiting_merge": return "等待 required checks、auto-merge 或新的 CI incident。";
-        case "blocked": return "查看 /harness incident；若 Analyst 给出精确 fresh retry，使用 Telegram 决策卡处理。";
+        case "blocked": return projection.actions.length > 0
+            ? `查看 /harness incident；当前有 ${projection.actions.length} 个精确绑定的可执行操作。`
+            : "查看 /harness incident；当前没有可执行恢复操作。";
         case "recovery_approved": return "Controller 将重新校验并消费已批准恢复。";
         case "done": return "任务已完成。";
         case "cancelled": return "任务已取消。";
     }
+}
+function operatorActionLabel(action) {
+    const label = action.kind === "approve_retry"
+        ? "批准 fresh retry"
+        : action.kind === "reassess"
+            ? "重新分析"
+            : action.kind === "resolve_decision"
+                ? "提供人工决策"
+                : "取消并重新入队";
+    return `${label} (${action.id})`;
 }
 function runtimeSelection(argv) {
     const provider = flag(argv, "--provider");

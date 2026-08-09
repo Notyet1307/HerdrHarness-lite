@@ -92,6 +92,8 @@ export type Attempt = {
   promptDigest: string;
   handle: AgentHandle | null;
   result: AttemptResult | null;
+  /** Optional for V1 ledgers written before bounded same-attempt reconciliation. */
+  reconciliationAttempts?: number;
   startedAt: string;
   completedAt: string | null;
 };
@@ -261,6 +263,7 @@ export type CiFailure = {
 };
 
 export const MAX_CI_REWORKS = 2;
+export const MAX_ATTEMPT_RECONCILIATIONS = 1;
 
 export type JobState =
   | "claimed"
@@ -474,6 +477,14 @@ export function assertJobInvariant(job: Job): void {
     !/^[0-9a-f]{40}$/i.test(job.activeAttempt.expectedRemoteHeadSha)
   ) {
     throw new Error("attempt has an invalid remote HEAD anchor");
+  }
+  const reconciliationAttempts = job.activeAttempt?.reconciliationAttempts ?? 0;
+  if (
+    !Number.isInteger(reconciliationAttempts)
+    || reconciliationAttempts < 0
+    || reconciliationAttempts > MAX_ATTEMPT_RECONCILIATIONS
+  ) {
+    throw new Error("attempt has an invalid reconciliation count");
   }
   if ((job.state === "publish_ready" || job.state === "awaiting_merge" || job.state === "done") && !job.headSha) {
     throw new Error(`${job.state} requires headSha`);

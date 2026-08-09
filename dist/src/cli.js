@@ -12,11 +12,14 @@ import { LocalEvidence } from "./adapters/local-evidence.js";
 import { RuntimePreflightCli } from "./adapters/runtime-preflight.js";
 import { HarnessController } from "./controller.js";
 import { startControllerHeartbeat } from "./controller-heartbeat.js";
+import { acquireControllerLease } from "./controller-lease.js";
+import { projectOperatorState } from "./policy.js";
 import { approveRecovery, cancelHeldJob, reassessIncident, resolveDecision } from "./recovery.js";
 const usage = `Usage:
   herdr-harness-lite tick --config /absolute/harness.config.json
   herdr-harness-lite run --config /absolute/harness.config.json [--poll-ms 15000] [--max-cycles N]
-  herdr-harness-lite status --config /absolute/harness.config.json
+  herdr-harness-lite status --config /absolute/harness.config.json [--operator]
+  herdr-harness-lite decide --config /absolute/harness.config.json --option ID --actor TEXT --reason TEXT
   herdr-harness-lite approve --config /absolute/harness.config.json --revision N --incident ID --analysis ID --actor TEXT --reason TEXT
   herdr-harness-lite reassess --config /absolute/harness.config.json --revision N --incident ID --analysis ID --actor TEXT --reason TEXT
   herdr-harness-lite resolve-decision --config /absolute/harness.config.json --revision N --incident ID --analysis ID --actor TEXT --reason TEXT
@@ -46,7 +49,30 @@ async function main(argv) {
     const clock = new SystemClock();
     const ids = new UuidIds();
     if (command === "status") {
-        process.stdout.write(`${JSON.stringify(await store.load(), null, 2)}\n`);
+        const state = await store.load();
+        process.stdout.write(`${JSON.stringify(argv.includes("--operator") ? projectOperatorState(state) : state, null, 2)}\n`);
+        return 0;
+    }
+    if (command === "decide") {
+        const optionId = requiredFlag(argv, "--option");
+        const option = projectOperatorState(await store.load()).actions.find((candidate) => candidate.id === optionId);
+        if (!option)
+            throw new Error("operator option is stale or unavailable");
+        const request = {
+            expectedRevision: option.binding.revision,
+            incidentId: option.binding.incidentId,
+            analysisId: option.binding.analysisId,
+            actor: requiredFlag(argv, "--actor"),
+            reason: requiredFlag(argv, "--reason"),
+        };
+        const record = option.kind === "approve_retry"
+            ? await approveRecovery(store, request, { clock, ids })
+            : option.kind === "reassess"
+                ? await reassessIncident(store, request, { clock, ids })
+                : option.kind === "resolve_decision"
+                    ? await resolveDecision(store, request, { clock, ids })
+                    : await cancelHeldJob(store, request, { clock, ids });
+        process.stdout.write(`${JSON.stringify(record, null, 2)}\n`);
         return 0;
     }
     if (command === "approve" || command === "reassess" || command === "resolve-decision" || command === "cancel") {
@@ -69,43 +95,49 @@ async function main(argv) {
     }
     if (command !== "tick" && command !== "run")
         throw new Error(`unknown command: ${command}`);
-    const controller = new HarnessController({
-        config,
-        store,
-        github: new GitHubGh(new SyncCommandRunner(), config.autoMerge === true),
-        git: new GitCli(),
-        herdr: new HerdrCli(config.herdr),
-        analyst: new JsonCommandAnalyst(config.analyst.command, config.analyst.argv ?? []),
-        evidence: new LocalEvidence(),
-        preflight: new RuntimePreflightCli(),
-        clock,
-        ids,
-    });
-    if (command === "tick") {
-        const output = await controller.tick();
-        process.stdout.write(`${JSON.stringify(output)}\n`);
-        return output.ok ? 0 : 1;
-    }
-    const pollMs = optionalIntegerFlag(argv, "--poll-ms") ?? 15_000;
-    const maxCycles = optionalIntegerFlag(argv, "--max-cycles");
-    if (pollMs < 100)
-        throw new Error("--poll-ms must be at least 100");
-    const heartbeat = startControllerHeartbeat(config.stateDir);
+    const lease = acquireControllerLease(config.stateDir);
     try {
-        let cycle = 0;
-        for (;;) {
-            cycle += 1;
+        const controller = new HarnessController({
+            config,
+            store,
+            github: new GitHubGh(new SyncCommandRunner(), config.autoMerge === true),
+            git: new GitCli(),
+            herdr: new HerdrCli(config.herdr),
+            analyst: new JsonCommandAnalyst(config.analyst.command, config.analyst.argv ?? []),
+            evidence: new LocalEvidence(),
+            preflight: new RuntimePreflightCli(),
+            clock,
+            ids,
+        });
+        if (command === "tick") {
             const output = await controller.tick();
-            process.stdout.write(`${JSON.stringify({ cycle, ...output })}\n`);
-            if (output.action === "preflight_failed")
-                return 1;
-            if (maxCycles !== null && cycle >= maxCycles)
-                return output.ok ? 0 : 1;
-            Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, pollMs);
+            process.stdout.write(`${JSON.stringify(output)}\n`);
+            return output.ok ? 0 : 1;
+        }
+        const pollMs = optionalIntegerFlag(argv, "--poll-ms") ?? 15_000;
+        const maxCycles = optionalIntegerFlag(argv, "--max-cycles");
+        if (pollMs < 100)
+            throw new Error("--poll-ms must be at least 100");
+        const heartbeat = startControllerHeartbeat(config.stateDir);
+        try {
+            let cycle = 0;
+            for (;;) {
+                cycle += 1;
+                const output = await controller.tick();
+                process.stdout.write(`${JSON.stringify({ cycle, ...output })}\n`);
+                if (output.action === "preflight_failed")
+                    return 1;
+                if (maxCycles !== null && cycle >= maxCycles)
+                    return output.ok ? 0 : 1;
+                Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, pollMs);
+            }
+        }
+        finally {
+            heartbeat.stop();
         }
     }
     finally {
-        heartbeat.stop();
+        lease.stop();
     }
 }
 function loadConfig(path) {

@@ -6,6 +6,7 @@ export function isRetryAction(value) {
     return value === "retry_fresh_worker" || value === "retry_fresh_reviewer";
 }
 export const MAX_CI_REWORKS = 2;
+export const MAX_ATTEMPT_RECONCILIATIONS = 1;
 export function taskFromSelection(repo, selected) {
     const value = {
         repo,
@@ -141,6 +142,12 @@ export function assertJobInvariant(job) {
         job.activeAttempt.expectedRemoteHeadSha !== null &&
         !/^[0-9a-f]{40}$/i.test(job.activeAttempt.expectedRemoteHeadSha)) {
         throw new Error("attempt has an invalid remote HEAD anchor");
+    }
+    const reconciliationAttempts = job.activeAttempt?.reconciliationAttempts ?? 0;
+    if (!Number.isInteger(reconciliationAttempts)
+        || reconciliationAttempts < 0
+        || reconciliationAttempts > MAX_ATTEMPT_RECONCILIATIONS) {
+        throw new Error("attempt has an invalid reconciliation count");
     }
     if ((job.state === "publish_ready" || job.state === "awaiting_merge" || job.state === "done") && !job.headSha) {
         throw new Error(`${job.state} requires headSha`);

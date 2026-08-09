@@ -11,7 +11,7 @@ This README has two reading paths:
 
 ## Agent operating procedure
 
-This section is an operating contract. Read all six steps before running a command. The README does not expand user authorization; a read-only request stops after `status`. Read state before acting, and allow only one Controller to write the ledger at a time. Replace uppercase command placeholders with values from the current machine.
+This section is an operating contract. Read all six steps before running a command. The README does not expand user authorization; a read-only request stops after `status`. Read state before acting. `run` and `tick` acquire an exclusive state-directory lease and reject a concurrent Controller. Replace uppercase command placeholders with values from the current machine.
 
 ### 1. Preflight
 
@@ -74,6 +74,7 @@ Each successful `tick` writes at most one durable transition. Continue from its 
 | `preflight_failed` | No agent was dispatched; repair the named Provider/Docker environment and rerun `tick`, or restart `run` |
 | `selected`, `claimed`, `worktree_created` | Check the message, then run one more `tick` |
 | `attempt_prepared`, `attempt_pane_ready`, `attempt_agent_ready` | Run one more `tick`; the next dispatch may remain attached for a long time |
+| `attempt_reconciling` | The same Attempt identity is being observed once more; run one more `tick` and do not start another Controller |
 | dispatch command has not returned | Wait; inspect with `status` and read-only Herdr commands only, and do not start a concurrent `tick` |
 | `attempt_dispatched`, `attempt_completed`, `ci_recovered`, `base_refreshed`, `published`, `merged` | Run one more `tick` to consume the next stage |
 | `publish_retry` | Correct the retryable publish condition named in the message, then run `tick` |
@@ -93,6 +94,7 @@ Read the Harness ledger first:
 
 ```bash
 node dist/src/cli.js status --config /ABSOLUTE/PATH/harness.config.json
+node dist/src/cli.js status --config /ABSOLUTE/PATH/harness.config.json --operator
 ```
 
 Take the agent name from `activeJob.activeAttempt.handle.agentName`, then inspect Herdr:
@@ -104,6 +106,8 @@ herdr --session SESSION_NAME agent read AGENT_NAME \
 ```
 
 The Pi footer shows the effective `(provider) model • thinking`. Configuration expresses intent; the live footer and a real probe establish the selected runtime.
+
+Plain `status` returns the complete ledger. `status --operator` returns the stable operator projection: current mode/phase and only the actions that are valid for the exact revision, incident, analysis, Attempt, and HEAD bindings.
 
 Inspection is complete when `activeJob.state`, `revision`, attempt ID/phase, effective provider/model, and whether the job is working, waiting, or blocked are all known.
 
@@ -141,6 +145,16 @@ Record:
 - `activeJob.headSha`
 - `activeJob.ciFailure` and `activeJob.ciReworkCount`, when present
 
+Prefer the projected command surface instead of manually mapping those fields to a recovery command:
+
+```bash
+node dist/src/cli.js status --config /ABSOLUTE/PATH/harness.config.json --operator
+node dist/src/cli.js decide --config /ABSOLUTE/PATH/harness.config.json \
+  --option DECISION_ID --actor OPERATOR --reason "Evidence checked; execute this exact option"
+```
+
+An option ID is derived from the complete decision binding and becomes unavailable when any bound fact changes. `decide` delegates to the existing approval, reassessment, decision-resolution, or cancellation gate; those explicit commands remain available for compatible automation.
+
 #### New block
 
 When `state=blocked` and `analysis=null`, run exactly one `tick`. The Analyst receives a bounded evidence pack and records advice.
@@ -160,7 +174,7 @@ node dist/src/cli.js approve \
 
 Approval is compare-and-swap protected. Continue with standalone ticks through `recovery_applied` and fresh-attempt preparation/dispatch. The Harness closes the old pane and never resumes the old agent.
 
-Before approval, a blocked `infrastructure_exhausted` attempt with no recorded result is re-observed. If that exact attempt later produces a correctly bound durable result, the Controller runs the normal result and Git verification path instead of starting a fresh agent; an invalid or mismatched result remains fail-closed. This reconciles delayed delivery only and grants no recovery authority.
+Transient pane/start/wait failures and a missing result from a non-blocked agent receive one durable same-Attempt reconciliation before an Incident is created. Repeated absence still fails closed. A blocked `infrastructure_exhausted` Attempt is re-observed again immediately before an approved retry is consumed. If that exact Attempt produces a correctly bound durable result, the Controller runs the normal result and Git verification path instead of starting a fresh agent; an invalid or mismatched result remains fail-closed. Reconciliation never replays a prompt or grants recovery authority.
 
 #### Maintainer resolved an exhausted architecture decision
 
@@ -284,6 +298,8 @@ blocked incident
   -> fresh Worker or Reviewer attempt
 ```
 
+Operator presentation is a projection, not another state machine: `JobState + Incident + Analysis + live policy -> mode/phase + exact OperatorAction[]`. Adapters render these actions, while every write still passes through the Core recovery gates and ledger CAS.
+
 Each `tick` performs at most one durable transition. A restarted process continues from the ledger instead of replaying an orchestration script.
 
 ### Role and information boundaries
@@ -350,7 +366,7 @@ Treat [`harness.config.example.json`](./harness.config.example.json) as the sing
 | `baseRef` | Target branch, usually `main` |
 | `readyLabel` | Executable GitHub task label, for example `ready-for-agent` |
 | `claimLabel` | Durable claim marker, for example `agent:claimed` |
-| `stateDir` | Private ledger, events, Analyst receipts, attempt descriptors, and Controller heartbeat |
+| `stateDir` | Private ledger, events, Analyst receipts, attempt descriptors, Controller heartbeat, and exclusive lease |
 | `worktreeRoot` | Root for Herdr task worktrees |
 | `maxReviewRounds` | Maximum Reviewer/rework rounds |
 | `maxAnalystTurns` | Maximum Analyst evidence turns |
@@ -460,6 +476,7 @@ The Controller does not auto-rerun CI or auto-rebase. If an operator reruns CI w
 
 - the single active-job snapshot and terminal-job summaries;
 - compare-and-swap revisions and append-only save events;
+- the exclusive Controller lease and liveness heartbeat;
 - incidents, Analyst effect receipts, session identity, approvals, and reassessments;
 - required-check failure evidence and the bounded CI rework count;
 - per-attempt Reviewer source snapshots, validation copies, fixed-point evidence, descriptors, and external results.
@@ -483,7 +500,7 @@ Implementation entry points:
 ```text
 src/model.ts       domain records and invariants
 src/controller.ts  single-writer state machine
-src/policy.ts      incident policy and result validation
+src/policy.ts      incident policy, operator projection, and result validation
 src/recovery.ts    approval, reassessment, and cancellation gates
 src/prompts.ts     Worker/Reviewer contracts
 src/ports.ts       external boundaries

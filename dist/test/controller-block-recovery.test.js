@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { HarnessController } from "../src/controller.js";
 import { assertJobInvariant } from "../src/model.js";
+import { operatorActionsFor, projectOperatorState } from "../src/policy.js";
 import { approveRecovery, cancelHeldJob, reassessIncident, resolveDecision } from "../src/recovery.js";
 import { FakeAnalyst, FakeClock, FakeEvidence, FakeGit, FakeGitHub, FakeHerdr, FakeRuntimePreflight, MemoryStore, SequenceIds, issue, validReviewerArgv, validWorkerArgv, } from "./fakes.js";
 const config = {
@@ -41,6 +42,7 @@ test("an exact held pre-PR job can be cancelled, archived, and selected again", 
     const held = store.state.activeJob;
     assert.equal(held.state, "blocked");
     assert.equal(held.analysis?.action, "hold");
+    assert.deepEqual(operatorActionsFor(held).map((action) => action.kind), ["cancel"]);
     await cancelHeldJob(store, {
         expectedRevision: held.revision,
         incidentId: held.incident.id,
@@ -103,6 +105,11 @@ test("blocked work cannot resume before exact human approval and recovery always
     assert.equal(diagnosis.action, "analysis_recorded");
     const blocked = store.state.activeJob;
     assert.equal(blocked.analysis?.action, "retry_fresh_worker");
+    const retryOption = operatorActionsFor(blocked).find((action) => action.kind === "approve_retry");
+    assert.ok(retryOption);
+    assert.equal(projectOperatorState(store.state).mode, "needs_decision");
+    assert.ok(operatorActionsFor({ ...blocked, revision: blocked.revision + 1 }).find((action) => action.kind === "approve_retry")?.id
+        !== retryOption.id);
     await assert.rejects(() => approveRecovery(store, {
         expectedRevision: blocked.revision - 1,
         incidentId: blocked.incident.id,
@@ -133,7 +140,35 @@ test("blocked work cannot resume before exact human approval and recovery always
     assert.match(recoveryPrompt, /Keep the public interface unchanged/);
     assert.equal(recoveryPrompt.includes(freshAttemptId), false);
 });
-test("a late exact Worker result is reconciled before a fresh retry is approved", async () => {
+test("a transiently late Worker result is accepted on one same-attempt reconciliation", async () => {
+    const headSha = "b".repeat(40);
+    const store = new MemoryStore();
+    const herdr = new FakeHerdr([{ lane: "worker", status: "completed", headSha }]);
+    const controller = new HarnessController({
+        config,
+        store,
+        github: new FakeGitHub([issue({ number: 32, title: "Observe a transiently late Worker result" })]),
+        git: new FakeGit(),
+        herdr,
+        analyst: new FakeAnalyst(),
+        evidence: new FakeEvidence(),
+        clock: new FakeClock(),
+        ids: new SequenceIds(),
+        preflight: new FakeRuntimePreflight(),
+    });
+    for (let index = 0; index < 7; index += 1)
+        await controller.tick();
+    const attemptId = store.state.activeJob.activeAttempt.id;
+    herdr.settleWithoutResult = { agentStatus: "idle", diagnostic: "result file is still flushing" };
+    assert.equal((await controller.tick()).action, "attempt_reconciling");
+    assert.equal(store.state.activeJob?.incident, null);
+    assert.equal(store.state.activeJob?.activeAttempt?.id, attemptId);
+    herdr.lateResultAttemptId = attemptId;
+    assert.equal((await controller.tick()).action, "attempt_completed");
+    assert.equal(store.state.activeJob?.state, "reviewer_ready");
+    assert.equal(store.state.activeJob?.incident, null);
+});
+test("an approved retry rechecks and accepts a late exact Worker result before starting fresh work", async () => {
     const headSha = "b".repeat(40);
     const store = new MemoryStore();
     const clock = new FakeClock();
@@ -146,7 +181,14 @@ test("a late exact Worker result is reconciled before a fresh retry is approved"
         github: new FakeGitHub([issue({ number: 32, title: "Reconcile a late Worker result" })]),
         git,
         herdr,
-        analyst: new FakeAnalyst(),
+        analyst: new FakeAnalyst([{
+                kind: "advice",
+                action: "retry_fresh_worker",
+                summary: "The original Worker result did not arrive in time",
+                resolutionBrief: "Start a fresh Worker only if the original result is still absent.",
+                evidenceRefs: ["task"],
+                unknowns: [],
+            }]),
         evidence: new FakeEvidence(),
         clock,
         ids,
@@ -155,9 +197,18 @@ test("a late exact Worker result is reconciled before a fresh retry is approved"
     for (let index = 0; index < 7; index += 1)
         await controller.tick();
     herdr.settleWithoutResult = { agentStatus: "idle", diagnostic: "Pi is auto-compacting" };
+    assert.equal((await controller.tick()).action, "attempt_reconciling");
     assert.equal((await controller.tick()).action, "blocked");
     const blockedAttemptId = store.state.activeJob.activeAttempt.id;
     assert.equal((await controller.tick()).action, "analysis_recorded");
+    const blocked = store.state.activeJob;
+    await approveRecovery(store, {
+        expectedRevision: blocked.revision,
+        incidentId: blocked.incident.id,
+        analysisId: blocked.analysis.id,
+        actor: "human@example.test",
+        reason: "Permit a fresh Worker only after one final exact-attempt observation.",
+    }, { clock, ids });
     herdr.lateResultAttemptId = blockedAttemptId;
     assert.equal((await controller.tick()).action, "attempt_completed");
     assert.equal(store.state.activeJob?.state, "reviewer_ready");
@@ -165,6 +216,7 @@ test("a late exact Worker result is reconciled before a fresh retry is approved"
     assert.equal(store.state.activeJob?.headSha, headSha);
     assert.equal(store.state.activeJob?.incident, null);
     assert.equal(store.state.activeJob?.analysis, null);
+    assert.equal(store.state.activeJob?.approval, null);
     assert.equal(herdr.prepared.filter((entry) => entry.lane === "worker").length, 1);
     assert.deepEqual(git.workerVerifications.at(-1), {
         reportedHeadSha: headSha,
@@ -206,6 +258,7 @@ test("Reviewer infrastructure failure resumes with a fresh Reviewer on the same 
         agentStatus: "idle",
         diagnostic: "provider sessions are full",
     };
+    assert.equal((await controller.tick()).action, "attempt_reconciling");
     await controller.tick();
     assert.equal(store.state.activeJob?.state, "blocked");
     assert.equal(store.state.activeJob?.incident?.class, "infrastructure_exhausted");
@@ -215,6 +268,7 @@ test("Reviewer infrastructure failure resumes with a fresh Reviewer on the same 
     await controller.tick();
     const blocked = store.state.activeJob;
     assert.equal(blocked.analysis?.action, "retry_fresh_reviewer");
+    assert.ok(operatorActionsFor(blocked).some((action) => action.kind === "approve_retry"));
     await approveRecovery(store, {
         expectedRevision: blocked.revision,
         incidentId: blocked.incident.id,
@@ -288,11 +342,13 @@ test("held Reviewer infrastructure incident can be reassessed without granting r
     herdr.settleWithoutResult = { agentStatus: "idle", diagnostic: "provider sessions are full" };
     await controller.tick();
     await controller.tick();
+    await controller.tick();
     const held = store.state.activeJob;
     const oldIncidentId = held.incident.id;
     const oldAnalysisId = held.analysis.id;
     const oldAttemptId = held.activeAttempt.id;
     assert.equal(held.analysis?.action, "hold");
+    assert.deepEqual(operatorActionsFor(held).map((action) => action.kind), ["reassess", "cancel"]);
     await assert.rejects(() => reassessIncident(store, {
         expectedRevision: held.revision - 1,
         incidentId: oldIncidentId,
@@ -541,6 +597,7 @@ test("held Worker infrastructure incident can be reassessed without granting ret
     herdr.settleWithoutResult = { agentStatus: "idle", diagnostic: "Worker provider overloaded" };
     await controller.tick();
     await controller.tick();
+    await controller.tick();
     const held = store.state.activeJob;
     assert.equal(held.incident?.lane, "worker");
     assert.equal(held.analysis?.action, "hold");
@@ -610,6 +667,7 @@ test("a pre-fix Worker result with a fabricated SHA suffix can be reassessed onl
     const held = store.state.activeJob;
     assert.equal(held.incident?.class, "integrity_violation");
     assert.equal(held.analysis?.action, "hold");
+    assert.deepEqual(operatorActionsFor(held).map((action) => action.kind), ["reassess", "cancel"]);
     await reassessIncident(store, {
         expectedRevision: held.revision,
         incidentId: held.incident.id,
@@ -744,6 +802,7 @@ test("an exact human decision can recover an exhausted major Reviewer change int
     assert.equal(held.state, "blocked");
     assert.equal(held.activeAttempt?.round, 1);
     assert.equal(held.analysis?.action, "hold");
+    assert.deepEqual(operatorActionsFor(held).map((action) => action.kind), ["resolve_decision", "cancel"]);
     await assert.rejects(() => approveRecovery(store, {
         expectedRevision: held.revision,
         incidentId: held.incident.id,

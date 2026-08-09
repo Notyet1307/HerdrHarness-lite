@@ -111,6 +111,7 @@ test("Hermes status stays read-only and renders bounded ledger facts", () => {
     const blocked = run("incident", bridgeConfig);
     assert.equal(blocked.status, 0);
     assert.match(blocked.stdout, /Analyst 建议：retry_fresh_reviewer/);
+    assert.match(blocked.stdout, /可执行操作：批准 fresh retry \(decision-[0-9a-f]{16}\)/);
     assert.match(blocked.stdout, /Telegram 决策卡/);
 
     const notification = run("notification", bridgeConfig);

@@ -79,6 +79,8 @@ export type Attempt = {
     promptDigest: string;
     handle: AgentHandle | null;
     result: AttemptResult | null;
+    /** Optional for V1 ledgers written before bounded same-attempt reconciliation. */
+    reconciliationAttempts?: number;
     startedAt: string;
     completedAt: string | null;
 };
@@ -208,6 +210,7 @@ export type CiFailure = {
     checks: PullRequestCheck[];
 };
 export declare const MAX_CI_REWORKS = 2;
+export declare const MAX_ATTEMPT_RECONCILIATIONS = 1;
 export type JobState = "claimed" | "worker_ready" | "worker_running" | "reviewer_ready" | "reviewer_running" | "publish_ready" | "awaiting_merge" | "blocked" | "recovery_approved" | "done" | "cancelled";
 export type Job = {
     id: string;

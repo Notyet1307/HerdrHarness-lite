@@ -3,6 +3,7 @@ declare const process: {
   execPath: string;
   pid: number;
   ppid: number;
+  kill(pid: number, signal?: 0 | "SIGTERM" | "SIGKILL"): boolean;
   cwd(): string;
   env: Record<string, string | undefined>;
   stdout: { write(value: string): void };
@@ -82,7 +83,7 @@ declare module "node:fs" {
   export function utimesSync(path: string, atime: Date | number, mtime: Date | number): void;
   export function realpathSync(path: string): string;
   export function writeFileSync(
-    path: string,
+    path: string | number,
     data: string,
     options?: { encoding?: "utf8"; mode?: number; flag?: string; flush?: boolean },
   ): void;

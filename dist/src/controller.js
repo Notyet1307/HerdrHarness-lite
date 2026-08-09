@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { Buffer } from "node:buffer";
 import { basename, dirname, isAbsolute, resolve } from "node:path";
 import { selectNextTask } from "./eligibility.js";
-import { assertJobInvariant, digest, evolveJob, isRetryAction, MAX_CI_REWORKS, taskFromSelection, } from "./model.js";
+import { assertJobInvariant, digest, evolveJob, isRetryAction, MAX_ATTEMPT_RECONCILIATIONS, MAX_CI_REWORKS, taskFromSelection, } from "./model.js";
 import { allowedActionsFor, buildEvidencePack, isDecisionResolutionEligible, makeIncident, validateAttemptResult } from "./policy.js";
 import { reviewerPrompt, workerPrompt } from "./prompts.js";
 import { pathIsWithin, pathsOverlap } from "./path-safety.js";
@@ -256,6 +256,7 @@ export class HarnessController {
             promptDigest: "",
             handle: null,
             result: null,
+            reconciliationAttempts: 0,
             startedAt: now,
             completedAt: null,
         };
@@ -340,15 +341,10 @@ export class HarnessController {
                 });
             }
             catch (error) {
-                return this.block(state, job, {
-                    class: "infrastructure_exhausted",
-                    lane,
-                    summary: `Herdr ${lane} pane creation failed: ${message(error)}`,
-                    attemptResult: null,
-                });
+                return this.reconcileAttemptOrBlock(state, job, attempt, `Herdr ${lane} pane creation failed: ${message(error)}`);
             }
-            const ready = { ...attempt, phase: "pane_ready", handle };
-            const next = evolveJob(job, this.deps.clock.now(), { activeAttempt: ready });
+            const ready = { ...attempt, phase: "pane_ready", handle, reconciliationAttempts: 0 };
+            const next = evolveJob(job, this.deps.clock.now(), { activeAttempt: ready, lastError: null });
             await this.saveJob(state, job, next);
             return result(true, "attempt_pane_ready", job.id, `${lane} attempt ${attempt.id} has a durable owned pane`);
         }
@@ -360,15 +356,10 @@ export class HarnessController {
                 });
             }
             catch (error) {
-                return this.block(state, job, {
-                    class: "infrastructure_exhausted",
-                    lane,
-                    summary: `Herdr ${lane} start failed: ${message(error)}`,
-                    attemptResult: null,
-                });
+                return this.reconcileAttemptOrBlock(state, job, attempt, `Herdr ${lane} start failed: ${message(error)}`);
             }
-            const ready = { ...attempt, phase: "agent_ready" };
-            const next = evolveJob(job, this.deps.clock.now(), { activeAttempt: ready });
+            const ready = { ...attempt, phase: "agent_ready", reconciliationAttempts: 0 };
+            const next = evolveJob(job, this.deps.clock.now(), { activeAttempt: ready, lastError: null });
             await this.saveJob(state, job, next);
             return result(true, "attempt_agent_ready", job.id, `${lane} attempt ${attempt.id} has a durable fresh Pi agent`);
         }
@@ -382,8 +373,8 @@ export class HarnessController {
                     attemptResult: null,
                 });
             }
-            const running = { ...attempt, phase: "running" };
-            const next = evolveJob(job, this.deps.clock.now(), { activeAttempt: running });
+            const running = { ...attempt, phase: "running", reconciliationAttempts: 0 };
+            const next = evolveJob(job, this.deps.clock.now(), { activeAttempt: running, lastError: null });
             await this.saveJob(state, job, next);
             try {
                 await this.deps.herdr.prompt({
@@ -422,12 +413,7 @@ export class HarnessController {
                 if (integrityBlock)
                     return integrityBlock;
             }
-            return this.block(state, job, {
-                class: "infrastructure_exhausted",
-                lane,
-                summary: `Herdr ${lane} wait failed: ${message(error)}`,
-                attemptResult: null,
-            });
+            return this.reconcileAttemptOrBlock(state, job, attempt, `Herdr ${lane} wait failed: ${message(error)}`);
         }
         return this.finishObservedAttempt(state, job, attempt, observation);
     }
@@ -442,14 +428,16 @@ export class HarnessController {
         }
         const validated = validateAttemptResult(job.id, attempt, observation.result);
         if (!validated.ok) {
+            const summary = withHerdrDiagnostic(validated.reason, observation.diagnostic);
+            if (observation.result === null && observation.agentStatus !== "blocked") {
+                return this.reconcileAttemptOrBlock(state, job, attempt, summary);
+            }
             return this.block(state, job, {
                 class: observation.agentStatus === "blocked"
                     ? "agent_blocked"
-                    : observation.result === null
-                        ? "infrastructure_exhausted"
-                        : "integrity_violation",
+                    : "integrity_violation",
                 lane: attempt.lane,
-                summary: withHerdrDiagnostic(validated.reason, observation.diagnostic),
+                summary,
                 attemptResult: observation.result,
             });
         }
@@ -457,6 +445,23 @@ export class HarnessController {
             return this.finishWorker(state, job, attempt, validated.result, observation.diagnostic);
         }
         return this.finishReviewer(state, job, attempt, validated.result, observation.diagnostic);
+    }
+    async reconcileAttemptOrBlock(state, job, attempt, summary) {
+        const retries = attempt.reconciliationAttempts ?? 0;
+        if (retries >= MAX_ATTEMPT_RECONCILIATIONS) {
+            return this.block(state, job, {
+                class: "infrastructure_exhausted",
+                lane: attempt.lane,
+                summary,
+                attemptResult: null,
+            });
+        }
+        const next = evolveJob(job, this.deps.clock.now(), {
+            activeAttempt: { ...attempt, reconciliationAttempts: retries + 1 },
+            lastError: summary,
+        });
+        await this.saveJob(state, job, next);
+        return result(true, "attempt_reconciling", job.id, `${summary}; observing the same attempt once more`);
     }
     async runRuntimePreflight(lanes, jobId) {
         let dockerHost = null;
@@ -877,8 +882,7 @@ export class HarnessController {
             || job.incident.lane !== attempt.lane
             || attempt.phase !== "settled"
             || attempt.result !== null
-            || !attempt.handle
-            || job.approval !== null)
+            || !attempt.handle)
             return null;
         let observation;
         try {
@@ -1032,6 +1036,9 @@ export class HarnessController {
         };
     }
     async applyRecovery(state, job) {
+        const lateResult = await this.reconcileLateAttemptResult(state, job);
+        if (lateResult)
+            return lateResult;
         const approval = job.approval;
         const analysis = job.analysis;
         const incident = job.incident;

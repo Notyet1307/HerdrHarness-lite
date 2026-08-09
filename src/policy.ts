@@ -1,13 +1,16 @@
 import type {
   Attempt,
   AttemptResult,
+  AnalystAdvice,
   BlockClass,
   EvidencePack,
+  HarnessState,
   Incident,
   Job,
+  JobState,
   RecoveryAction,
 } from "./model.js";
-import { digest } from "./model.js";
+import { digest, isRetryAction, MAX_CI_REWORKS } from "./model.js";
 import type { Clock, IdGenerator } from "./ports.js";
 
 export function allowedActionsFor(blockClass: BlockClass, lane: Incident["lane"]): RecoveryAction[] {
@@ -27,6 +30,168 @@ export function allowedActionsFor(blockClass: BlockClass, lane: Incident["lane"]
     case "analyst_unavailable":
       return ["hold"];
   }
+}
+
+export type OperatorAction = {
+  id: string;
+  kind: "approve_retry" | "reassess" | "resolve_decision" | "cancel";
+  effect: "retry_fresh_worker" | "retry_fresh_reviewer" | "rerun_analysis" | "cancel_and_requeue";
+  binding: {
+    jobId: string;
+    revision: number;
+    incidentId: string;
+    analysisId: string;
+    attemptId: string | null;
+    headSha: string | null;
+    pullRequestHeadSha: string | null;
+  };
+};
+
+export type OperatorProjection = {
+  mode: "idle" | "running" | "waiting" | "needs_decision" | "terminal";
+  phase: "idle" | "claim" | "worker" | "reviewer" | "delivery" | "recovery" | "terminal";
+  jobId: string | null;
+  revision: number | null;
+  state: JobState | null;
+  reason: string | null;
+  actions: OperatorAction[];
+};
+
+/** One Core-owned projection used by operator adapters and recovery gates. */
+export function projectOperatorState(state: HarnessState): OperatorProjection {
+  const job = state.activeJob;
+  if (!job) {
+    return { mode: "idle", phase: "idle", jobId: null, revision: null, state: null, reason: null, actions: [] };
+  }
+  const actions = operatorActionsFor(job);
+  const terminal = job.state === "done" || job.state === "cancelled";
+  const waiting = job.state === "worker_running"
+    || job.state === "reviewer_running"
+    || job.state === "awaiting_merge"
+    || job.state === "blocked";
+  return {
+    mode: terminal ? "terminal" : actions.length > 0 ? "needs_decision" : waiting ? "waiting" : "running",
+    phase: operatorPhase(job.state),
+    jobId: job.id,
+    revision: job.revision,
+    state: job.state,
+    reason: job.incident?.summary ?? job.lastError,
+    actions,
+  };
+}
+
+export function operatorActionsFor(job: Job): OperatorAction[] {
+  const incident = job.incident;
+  const analysis = job.analysis;
+  if (
+    job.state !== "blocked"
+    || job.approval !== null
+    || !incident
+    || !analysis
+    || analysis.incidentId !== incident.id
+  ) return [];
+
+  const actions: OperatorAction[] = [];
+  if (
+    isRetryAction(analysis.action)
+    && incident.allowedActions.includes(analysis.action)
+    && allowedActionsFor(incident.class, incident.lane).includes(analysis.action)
+  ) actions.push(makeOperatorAction(job, "approve_retry", analysis.action));
+  if (isDecisionResolutionEligible(job)) {
+    actions.push(makeOperatorAction(job, "resolve_decision", "retry_fresh_worker"));
+  }
+  if (reassessmentClassFor(job) !== null) actions.push(makeOperatorAction(job, "reassess", "rerun_analysis"));
+  if (
+    analysis.action === "hold"
+    && job.claimConfirmed
+    && job.pullRequest === null
+  ) actions.push(makeOperatorAction(job, "cancel", "cancel_and_requeue"));
+  return actions;
+}
+
+export function reassessmentClassFor(job: Job): BlockClass | null {
+  const incident = job.incident;
+  const analysis = job.analysis;
+  if (
+    job.state !== "blocked"
+    || !incident
+    || !analysis
+    || analysis.incidentId !== incident.id
+    || analysis.action !== "hold"
+  ) return null;
+
+  const retryActions = incident.allowedActions.filter(isRetryAction);
+  const retryAction = retryActions.length === 1 ? retryActions[0]! : null;
+  const exactAttempt = job.approval === null
+    && job.activeAttempt?.lane === incident.lane
+    && job.activeAttempt.id === incident.attemptId
+    && job.activeAttempt.phase === "settled";
+  const heldInfrastructure = incident.class === "infrastructure_exhausted" && job.activeAttempt?.result === null;
+  const heldReviewerBlock = incident.class === "review_uncertain"
+    && incident.lane === "reviewer"
+    && job.activeAttempt?.lane === "reviewer"
+    && job.activeAttempt.expectedHeadSha === job.headSha
+    && job.activeAttempt.result?.lane === "reviewer"
+    && job.activeAttempt.result.status === "blocked"
+    && job.activeAttempt.result.reviewedHeadSha === job.headSha;
+  const heldReviewerPreflight = incident.class === "reviewer_preflight_dirty"
+    && incident.lane === "reviewer"
+    && job.activeAttempt?.lane === "reviewer"
+    && job.activeAttempt.handle === null
+    && job.activeAttempt.result === null
+    && job.activeAttempt.expectedHeadSha === job.headSha;
+  const legacyReviewerPreflight = incident.class === "integrity_violation"
+    && incident.lane === "reviewer"
+    && incident.allowedActions.length === 1
+    && incident.allowedActions[0] === "hold"
+    && job.activeAttempt?.lane === "reviewer"
+    && job.activeAttempt.handle === null
+    && job.activeAttempt.result === null
+    && job.activeAttempt.expectedHeadSha === job.headSha
+    && incident.summary.startsWith("reviewer modified the worktree outside Harness result files:");
+  const legacyWorkerHeadMismatch = isLegacyWorkerHeadMismatch(job);
+  const heldCiIncident = job.approval === null
+    && (incident.class === "ci_failure" || incident.class === "ci_rework_exhausted")
+    && incident.lane === "controller"
+    && incident.attemptId === null
+    && job.activeAttempt === null
+    && job.pullRequest !== null
+    && job.ciFailure !== null
+    && job.ciFailure !== undefined
+    && job.ciFailure.headSha === job.pullRequest.headSha
+    && job.headSha === job.pullRequest.headSha
+    && (job.ciReworkCount ?? 0) < MAX_CI_REWORKS;
+  const heldCiFailure = heldCiIncident && incident.class === "ci_failure";
+  const legacyCiExhausted = heldCiIncident
+    && incident.class === "ci_rework_exhausted"
+    && incident.allowedActions.length === 1
+    && incident.allowedActions[0] === "hold";
+  const effectiveRetryAction = legacyWorkerHeadMismatch
+    ? "retry_fresh_worker"
+    : legacyReviewerPreflight
+      ? "retry_fresh_reviewer"
+      : legacyCiExhausted
+        ? "retry_fresh_worker"
+        : retryAction;
+  const analystExecutionFailed = analysis.evidenceDigest === incident.evidenceDigest
+    && isControllerAnalystFailure(analysis);
+  if (
+    effectiveRetryAction === null
+    || (!legacyWorkerHeadMismatch && !legacyReviewerPreflight && !legacyCiExhausted && !incident.allowedActions.includes(effectiveRetryAction))
+    || (!legacyWorkerHeadMismatch && !legacyReviewerPreflight && !legacyCiExhausted && !allowedActionsFor(incident.class, incident.lane).includes(effectiveRetryAction))
+    || (!exactAttempt && !heldCiIncident)
+    || (!heldInfrastructure && !heldReviewerBlock && !heldReviewerPreflight && !legacyWorkerHeadMismatch && !legacyReviewerPreflight && !analystExecutionFailed && !heldCiFailure && !legacyCiExhausted)
+  ) return null;
+
+  return legacyWorkerHeadMismatch
+    ? "infrastructure_exhausted"
+    : heldReviewerBlock
+      ? "infrastructure_exhausted"
+      : legacyReviewerPreflight
+        ? "reviewer_preflight_dirty"
+        : legacyCiExhausted
+          ? "ci_failure"
+          : incident.class;
 }
 
 /** Exact evidence boundary for a maintainer resolving an exhausted Reviewer architecture decision. */
@@ -57,6 +222,83 @@ export function isDecisionResolutionEligible(job: Job): boolean {
     && review.status === "changes"
     && review.reviewedHeadSha === job.headSha
     && review.findings.some((finding) => finding.severity === "major" || finding.severity === "critical");
+}
+
+function makeOperatorAction(
+  job: Job,
+  kind: OperatorAction["kind"],
+  effect: OperatorAction["effect"],
+): OperatorAction {
+  const binding = {
+    jobId: job.id,
+    revision: job.revision,
+    incidentId: job.incident!.id,
+    analysisId: job.analysis!.id,
+    attemptId: job.activeAttempt?.id ?? null,
+    headSha: job.headSha,
+    pullRequestHeadSha: job.pullRequest?.headSha ?? null,
+  };
+  return {
+    id: `decision-${digest({ kind, effect, binding }).slice(0, 16)}`,
+    kind,
+    effect,
+    binding,
+  };
+}
+
+function operatorPhase(state: JobState): OperatorProjection["phase"] {
+  switch (state) {
+    case "claimed": return "claim";
+    case "worker_ready":
+    case "worker_running": return "worker";
+    case "reviewer_ready":
+    case "reviewer_running": return "reviewer";
+    case "publish_ready":
+    case "awaiting_merge": return "delivery";
+    case "blocked":
+    case "recovery_approved": return "recovery";
+    case "done":
+    case "cancelled": return "terminal";
+  }
+}
+
+function isLegacyWorkerHeadMismatch(job: Job): boolean {
+  const attempt = job.activeAttempt;
+  const incident = job.incident;
+  const result = attempt?.result;
+  if (
+    job.approval !== null
+    || job.pullRequest !== null
+    || incident?.class !== "integrity_violation"
+    || incident.lane !== "worker"
+    || incident.allowedActions.length !== 1
+    || incident.allowedActions[0] !== "hold"
+    || attempt?.lane !== "worker"
+    || attempt.phase !== "settled"
+    || incident.attemptId !== attempt.id
+    || attempt.baseSha !== (job.headSha ?? job.baseSha)
+    || result?.lane !== "worker"
+    || result.status !== "completed"
+    || result.jobId !== job.id
+    || result.attemptId !== attempt.id
+    || result.failedCommands.length !== 0
+    || !result.headSha
+  ) return false;
+  const match = /^worktree HEAD ([0-9a-f]{40}) != worker result ([0-9a-f]{40})$/i.exec(incident.summary);
+  if (!match) return false;
+  const actualHead = match[1]!.toLowerCase();
+  const reportedHead = match[2]!.toLowerCase();
+  return actualHead !== reportedHead
+    && actualHead.slice(0, 7) === reportedHead.slice(0, 7)
+    && reportedHead === result.headSha.toLowerCase();
+}
+
+function isControllerAnalystFailure(advice: AnalystAdvice): boolean {
+  return advice.action === "hold"
+    && advice.resolutionBrief === ""
+    && advice.evidenceRefs.length === 0
+    && advice.unknowns.length === 1
+    && advice.summary === `Analyst diagnosis failed closed: ${advice.unknowns[0]}`;
 }
 
 export function makeIncident(input: {
