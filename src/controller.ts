@@ -9,6 +9,7 @@ import {
   isRetryAction,
   MAX_CI_REWORKS,
   taskFromSelection,
+  type AgentStatus,
   type AnalystAdvice,
   type Attempt,
   type AttemptResult,
@@ -523,7 +524,16 @@ export class HarnessController {
       });
     }
 
-    if (lane === "reviewer") {
+    return this.finishObservedAttempt(state, job, attempt, observation);
+  }
+
+  private async finishObservedAttempt(
+    state: HarnessState,
+    job: Job,
+    attempt: Attempt,
+    observation: { agentStatus: AgentStatus; result: AttemptResult | null; diagnostic: string | null },
+  ): Promise<TickResult> {
+    if (attempt.lane === "reviewer") {
       const reportedHeadSha = observation.result?.lane === "reviewer"
         ? (observation.result.reviewedHeadSha ?? null)
         : null;
@@ -539,12 +549,14 @@ export class HarnessController {
           : observation.result === null
             ? "infrastructure_exhausted"
             : "integrity_violation",
-        lane,
+        lane: attempt.lane,
         summary: withHerdrDiagnostic(validated.reason, observation.diagnostic),
         attemptResult: observation.result,
       });
     }
-    if (lane === "worker") return this.finishWorker(state, job, attempt, validated.result as WorkerResult, observation.diagnostic);
+    if (attempt.lane === "worker") {
+      return this.finishWorker(state, job, attempt, validated.result as WorkerResult, observation.diagnostic);
+    }
     return this.finishReviewer(state, job, attempt, validated.result as ReviewerResult, observation.diagnostic);
   }
 
@@ -982,6 +994,8 @@ export class HarnessController {
   }
 
   private async diagnoseOrWait(state: HarnessState, job: Job): Promise<TickResult> {
+    const lateResult = await this.reconcileLateAttemptResult(state, job);
+    if (lateResult) return lateResult;
     const recovered = await this.reconcileBlockedCi(state, job);
     if (recovered) return recovered;
     if (!job.incident) throw new Error("blocked job has no incident");
@@ -1011,6 +1025,43 @@ export class HarnessController {
     const next = evolveJob(job, this.deps.clock.now(), { analysis: advice });
     await this.saveJob(state, job, next);
     return result(true, "analysis_recorded", job.id, `Analyst advice ${advice.id} recorded with action=${advice.action}`);
+  }
+
+  private async reconcileLateAttemptResult(state: HarnessState, job: Job): Promise<TickResult | null> {
+    const attempt = job.activeAttempt;
+    if (
+      job.incident?.class !== "infrastructure_exhausted"
+      || !attempt
+      || job.incident.attemptId !== attempt.id
+      || job.incident.lane !== attempt.lane
+      || attempt.phase !== "settled"
+      || attempt.result !== null
+      || !attempt.handle
+      || job.approval !== null
+    ) return null;
+
+    let observation;
+    try {
+      observation = await this.deps.herdr.wait({
+        handle: attempt.handle,
+        resultPath: attempt.resultPath,
+        expectedJobId: job.id,
+        expectedAttemptId: attempt.id,
+        expectedLane: attempt.lane,
+      });
+    } catch {
+      return null;
+    }
+    if (observation.result === null) return null;
+
+    const reconciledJob: Job = {
+      ...job,
+      incident: null,
+      analysis: null,
+      approval: null,
+      lastError: null,
+    };
+    return this.finishObservedAttempt(state, reconciledJob, attempt, observation);
   }
 
   private async reconcileBlockedCi(state: HarnessState, job: Job): Promise<TickResult | null> {

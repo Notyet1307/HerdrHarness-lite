@@ -31,6 +31,7 @@ export declare class HarnessController {
     private advanceClaim;
     private prepareAttempt;
     private driveAttempt;
+    private finishObservedAttempt;
     private runRuntimePreflight;
     private verifyReviewerIntegrity;
     private verifyReviewerPreflight;
@@ -41,6 +42,7 @@ export declare class HarnessController {
     private observeMerge;
     private refreshBaseForReview;
     private diagnoseOrWait;
+    private reconcileLateAttemptResult;
     private reconcileBlockedCi;
     private runDiagnosis;
     private applyRecovery;

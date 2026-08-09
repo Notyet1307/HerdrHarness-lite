@@ -429,7 +429,10 @@ export class HarnessController {
                 attemptResult: null,
             });
         }
-        if (lane === "reviewer") {
+        return this.finishObservedAttempt(state, job, attempt, observation);
+    }
+    async finishObservedAttempt(state, job, attempt, observation) {
+        if (attempt.lane === "reviewer") {
             const reportedHeadSha = observation.result?.lane === "reviewer"
                 ? (observation.result.reviewedHeadSha ?? null)
                 : null;
@@ -445,13 +448,14 @@ export class HarnessController {
                     : observation.result === null
                         ? "infrastructure_exhausted"
                         : "integrity_violation",
-                lane,
+                lane: attempt.lane,
                 summary: withHerdrDiagnostic(validated.reason, observation.diagnostic),
                 attemptResult: observation.result,
             });
         }
-        if (lane === "worker")
+        if (attempt.lane === "worker") {
             return this.finishWorker(state, job, attempt, validated.result, observation.diagnostic);
+        }
         return this.finishReviewer(state, job, attempt, validated.result, observation.diagnostic);
     }
     async runRuntimePreflight(lanes, jobId) {
@@ -830,6 +834,9 @@ export class HarnessController {
         return result(true, "base_refreshed", job.id, `base advanced to ${latestBaseSha}; refreshed HEAD ${verification.headSha} requires fresh review`);
     }
     async diagnoseOrWait(state, job) {
+        const lateResult = await this.reconcileLateAttemptResult(state, job);
+        if (lateResult)
+            return lateResult;
         const recovered = await this.reconcileBlockedCi(state, job);
         if (recovered)
             return recovered;
@@ -861,6 +868,41 @@ export class HarnessController {
         const next = evolveJob(job, this.deps.clock.now(), { analysis: advice });
         await this.saveJob(state, job, next);
         return result(true, "analysis_recorded", job.id, `Analyst advice ${advice.id} recorded with action=${advice.action}`);
+    }
+    async reconcileLateAttemptResult(state, job) {
+        const attempt = job.activeAttempt;
+        if (job.incident?.class !== "infrastructure_exhausted"
+            || !attempt
+            || job.incident.attemptId !== attempt.id
+            || job.incident.lane !== attempt.lane
+            || attempt.phase !== "settled"
+            || attempt.result !== null
+            || !attempt.handle
+            || job.approval !== null)
+            return null;
+        let observation;
+        try {
+            observation = await this.deps.herdr.wait({
+                handle: attempt.handle,
+                resultPath: attempt.resultPath,
+                expectedJobId: job.id,
+                expectedAttemptId: attempt.id,
+                expectedLane: attempt.lane,
+            });
+        }
+        catch {
+            return null;
+        }
+        if (observation.result === null)
+            return null;
+        const reconciledJob = {
+            ...job,
+            incident: null,
+            analysis: null,
+            approval: null,
+            lastError: null,
+        };
+        return this.finishObservedAttempt(state, reconciledJob, attempt, observation);
     }
     async reconcileBlockedCi(state, job) {
         if ((job.incident?.class !== "ci_failure" && job.incident?.class !== "ci_rework_exhausted") ||
