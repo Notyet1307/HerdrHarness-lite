@@ -360,7 +360,7 @@ export class GitHubGh implements GitHubPort {
 
   private readFailedLog(repo: string, runId: string): string {
     const result = this.runner.run("gh", ["run", "view", runId, "--repo", repo, "--log-failed"]);
-    if (result.ok) return boundedTail(result.stdout, 12_000);
+    if (result.ok) return boundedFailedLog(result.stdout, 12_000);
     const diagnostic = (result.error ?? result.stderr.trim()) || result.stdout.trim() || `exit ${result.code}`;
     return bounded(`failed log unavailable: ${diagnostic}`, 2_000);
   }
@@ -458,4 +458,32 @@ function bounded(value: string, max: number): string {
 
 function boundedTail(value: string, max: number): string {
   return value.length <= max ? value : `...[truncated]\n${value.slice(-max)}`;
+}
+
+function boundedFailedLog(value: string, max: number): string {
+  if (value.length <= max) return value;
+  const signal = [
+    /\bExpected:\s/gi,
+    /\bReceived:\s/gi,
+    /Error:\s+expect\b/gi,
+    /\bAssertionError\b/gi,
+    /##\[error\]/gi,
+    /Traceback \(most recent call last\)/g,
+    /\bpanic:/gi,
+    /\berror(?:\[[^\]]+\])?:/gi,
+  ].map((pattern) => lastMatchIndex(value, pattern)).find((index) => index >= 0) ?? -1;
+  if (signal < 0 || signal >= value.length - max) return boundedTail(value, max);
+
+  const prefix = "...[focused failure excerpt]\n";
+  const divider = "\n...[final log tail]\n";
+  const tailLength = Math.min(3_000, Math.floor(max / 4));
+  const focusLength = max - prefix.length - divider.length - tailLength;
+  const focusStart = Math.max(0, signal - Math.floor(focusLength / 2));
+  return `${prefix}${value.slice(focusStart, focusStart + focusLength)}${divider}${value.slice(-tailLength)}`;
+}
+
+function lastMatchIndex(value: string, pattern: RegExp): number {
+  let index = -1;
+  for (const match of value.matchAll(pattern)) index = match.index;
+  return index;
 }

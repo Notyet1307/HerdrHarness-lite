@@ -29,6 +29,6 @@ Set `HERDR_HARNESS_FLEET_CONFIG` to the absolute fleet config path for both the 
 
 `/harness` returns one compact line per lane. Approval cards carry the lane ID in callback data; the Router accepts only a registered lane and then invokes that lane's existing exact-binding approval command. It never edits a ledger directly.
 
-The Observer pushes one concise start message and one terminal message on a normal run. Intermediate Worker, Reviewer, publish, and merge-wait transitions stay available through `/harness` instead of creating new notifications. Incidents, Controller health failures, and exact approval cards remain proactive. Approval cards keep a Simplified-Chinese conclusion, impact, recommendation, and rationale visible; the timestamped timeline and technical evidence stay behind an expandable details block.
+The Observer pushes one concise start message and one terminal message on a normal run. Intermediate Worker, Reviewer, publish, and merge-wait transitions stay available through `/harness` instead of creating new notifications. Incidents, Controller health failures, and exact approval cards remain proactive. Approval cards and Analyst holds keep a Simplified-Chinese conclusion, impact, recommendation, and rationale visible; the timestamped timeline and technical evidence stay behind an expandable details block. Hold cards are informational and never include approval controls.
 
 Without `HERDR_HARNESS_FLEET_CONFIG`, the existing single-instance commands and `hh:a:<token>` callbacks remain supported.

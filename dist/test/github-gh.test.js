@@ -113,8 +113,12 @@ test("observing an open PR returns required check failures with bounded failed l
         args: ["pr", "merge", "42", "--repo", "owner/repo", "--disable-auto"],
     });
 });
-test("bounded failed logs retain the failure tail instead of build startup noise", async () => {
-    const runner = new FailedChecksRunner(`${"build startup noise\n".repeat(1_000)}playwright timeout\nlogin returned 400\n`);
+test("bounded failed logs retain the assertion before a long cleanup tail", async () => {
+    const runner = new FailedChecksRunner([
+        "build startup noise\n".repeat(1_000),
+        "Error: expect(received).toBe(expected)\nExpected: 409\nReceived: 202\n",
+        "docker cleanup\n".repeat(1_000),
+    ].join(""));
     const github = new GitHubGh(runner, true);
     const observation = await github.observePullRequest("owner/repo", {
         number: 42,
@@ -122,9 +126,12 @@ test("bounded failed logs retain the failure tail instead of build startup noise
         headSha,
     });
     const diagnostic = observation.requiredChecks[0]?.diagnostic ?? "";
-    assert.match(diagnostic, /^\.\.\.\[truncated\]\n/);
+    assert.match(diagnostic, /^\.\.\.\[focused failure excerpt\]\n/);
     assert.equal(diagnostic.startsWith("build startup noise"), false);
-    assert.match(diagnostic, /playwright timeout\nlogin returned 400\n$/);
+    assert.match(diagnostic, /Expected: 409\nReceived: 202/);
+    assert.match(diagnostic, /\.\.\.\[final log tail\]\n/);
+    assert.match(diagnostic, /docker cleanup\n$/);
+    assert.ok(diagnostic.length <= 12_000);
 });
 class PublishRunner {
     calls = [];

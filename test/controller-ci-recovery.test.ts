@@ -297,6 +297,40 @@ test("blocked CI refreshes its incident when another required check fails on the
   assert.equal(store.state.activeJob?.headSha, oldHead);
 });
 
+test("CI evidence-turn exhaustion records an actionable Simplified-Chinese hold", async () => {
+  const store = new MemoryStore();
+  const github = new FakeGitHub([issue({ number: 77, title: "Stage 4 results" })]);
+  const analyst = new FakeAnalyst(Array.from({ length: config.maxAnalystTurns }, () => ({
+    kind: "need_evidence" as const,
+    requests: [{ kind: "test_output" as const, path: null, reason: "the failing assertion is still missing" }],
+  })));
+  const controller = new HarnessController({
+    config,
+    store,
+    github,
+    git: new FakeGit(),
+    herdr: new FakeHerdr([
+      { lane: "worker", status: "completed", headSha: oldHead },
+      { lane: "reviewer", status: "pass", reviewedHeadSha: oldHead },
+    ]),
+    analyst,
+    evidence: new FakeEvidence(),
+    clock: new FakeClock(),
+    ids: new SequenceIds(),
+    preflight: new FakeRuntimePreflight(),
+  });
+
+  await driveUntil(controller, store, "awaiting_merge");
+  github.requiredChecks = [failedCheck];
+  assert.equal((await controller.tick()).action, "blocked");
+  assert.equal((await controller.tick()).action, "analysis_recorded");
+
+  const analysis = store.state.activeJob?.analysis;
+  assert.equal(analysis?.action, "hold");
+  assert.equal(analysis?.summary, "自动诊断未完成：在允许的证据轮数内仍缺少关键证据。");
+  assert.deepEqual(analysis?.unknowns, ["所需证据超出 Harness 本轮允许的收集范围"]);
+});
+
 test("a newer base suspends auto-merge and requires a fresh review of the merged HEAD", async () => {
   const store = new MemoryStore();
   const github = new FakeGitHub([issue({ number: 40, title: "Refresh base" })]);

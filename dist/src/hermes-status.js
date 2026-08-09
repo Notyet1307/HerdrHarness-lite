@@ -60,10 +60,16 @@ function renderNotification(state) {
     if (!incident)
         return `🟦 运行中 · 无需处理\n${clean(job.task.repo, 160)}#${job.task.issueNumber} · ${clean(job.task.title, 240)}`;
     const analysis = job.analysis?.incidentId === incident.id ? job.analysis : null;
-    const recommendation = analysis?.resolutionBrief || analysis?.summary || "等待系统生成下一步建议；不执行自动恢复。";
+    const conclusion = analysis ? presentedAnalysisSummary(analysis) : "Harness 已记录阻塞，正在等待自动诊断。";
+    const recommendation = analysis?.action === "hold"
+        ? isEvidenceExhausted(analysis)
+            ? "保持暂停；补齐完整失败日志后重新诊断，不要直接批准或重跑。"
+            : "保持暂停；先处理未决信息，再按 Harness 策略重新诊断。"
+        : analysis?.resolutionBrief || analysis?.summary || "等待系统生成下一步建议；不执行自动恢复。";
     return [
         `⚠️ 需要关注 · #${job.task.issueNumber}`,
         `任务：${clean(job.task.repo, 160)}#${job.task.issueNumber} ${clean(job.task.title, 240)}`,
+        `结论：${clean(conclusion, 700)}`,
         `原因：${clean(incident.summary, 700)}`,
         "影响：任务暂停；Harness 未执行自动恢复。",
         `建议：${clean(recommendation, 900)}`,
@@ -106,7 +112,7 @@ function renderIncident(state, laneId) {
         lines.push("Analyst：尚无与当前 incident 精确绑定的 durable analysis。", "下一步：等待 Controller 调用 Analyst；不要手工恢复。");
         return lines.join("\n");
     }
-    lines.push(`Analysis：${clean(analysis.id, 512)}`, `Analyst 建议：${analysis.action}`, `判断：${clean(analysis.summary, 700)}`, `恢复说明：${clean(analysis.resolutionBrief, 900)}`);
+    lines.push(`Analysis：${clean(analysis.id, 512)}`, `Analyst 建议：${analysis.action}`, `判断：${clean(presentedAnalysisSummary(analysis), 700)}`, `恢复说明：${clean(analysis.resolutionBrief, 900)}`);
     if (analysis.unknowns.length > 0) {
         lines.push(`未决信息：${analysis.unknowns.slice(0, 3).map((value) => clean(value, 240)).join("；")}`);
     }
@@ -117,6 +123,15 @@ function renderIncident(state, laneId) {
         lines.push(`下一步：使用当前 Telegram 决策卡批准 fresh retry，或发送 ${approvalCommand(laneId)} 获取新的 10 分钟挑战。`);
     }
     return lines.join("\n");
+}
+function presentedAnalysisSummary(analysis) {
+    return isEvidenceExhausted(analysis)
+        ? "自动诊断未完成：在允许的证据轮数内仍缺少关键证据。"
+        : analysis.summary;
+}
+function isEvidenceExhausted(analysis) {
+    return analysis.summary === "Analyst evidence-gathering turns were exhausted"
+        || analysis.summary.startsWith("自动诊断未完成：在允许的证据轮数内仍缺少关键证据");
 }
 function nextStep(job) {
     switch (job.state) {
