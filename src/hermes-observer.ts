@@ -39,16 +39,22 @@ type ObserverConfigFile = {
   nodeBin: string;
   statusScript: string;
   approvalScript: string;
-  hermesBin: string;
-  hermesProfile: string;
-  target: "telegram";
+  deliveryCommand?: string[];
+  hermesBin?: string;
+  hermesProfile?: string;
+  target?: "telegram";
   observerState: string;
   controllerLog: string;
   pollMs: number;
   heartbeatTimeoutMs: number;
 };
 
-type ObserverConfig = ObserverConfigFile & { bridgeConfig: string; harnessStateDir: string; controllerHeartbeat: string };
+type ObserverConfig = Omit<ObserverConfigFile, "deliveryCommand"> & {
+  deliveryCommand: string[] | null;
+  bridgeConfig: string;
+  harnessStateDir: string;
+  controllerHeartbeat: string;
+};
 
 type TextOutboxEntry = {
   kind: "text";
@@ -366,27 +372,19 @@ async function flushOutbox(config: ObserverConfig, state: ObserverState): Promis
         retryEntry(config, state, entry, "approval script returned an invalid card payload");
         return;
       } else {
-        sent = spawnSync(config.hermesBin, ["--profile", config.hermesProfile, "harness-card"], {
-          encoding: "utf8",
-          input: JSON.stringify(card),
-          timeout: 20_000,
-          maxBuffer: 1024 * 1024,
-        });
+        sent = sendCard(config, card);
       }
     } else if (entry.kind === "card") {
-      sent = spawnSync(config.hermesBin, ["--profile", config.hermesProfile, "harness-card"], {
-        encoding: "utf8",
-        input: JSON.stringify({ text: entry.message }),
-        timeout: 20_000,
-        maxBuffer: 1024 * 1024,
-      });
+      sent = sendCard(config, { text: entry.message });
+    } else if (config.deliveryCommand) {
+      sent = sendCard(config, { text: entry.message, parseMode: "plain" });
     } else {
-      sent = spawnSync(config.hermesBin, [
+      sent = spawnSync(config.hermesBin!, [
         "--profile",
-        config.hermesProfile,
+        config.hermesProfile!,
         "send",
         "--to",
-        config.target,
+        config.target!,
         "--quiet",
         entry.message,
       ], { encoding: "utf8", timeout: 20_000, maxBuffer: 1024 * 1024 });
@@ -402,6 +400,16 @@ async function flushOutbox(config: ObserverConfig, state: ObserverState): Promis
     retryEntry(config, state, entry, sent.error?.message || sent.stderr || `exit ${sent.status}`);
     return;
   }
+}
+
+function sendCard(config: ObserverConfig, payload: unknown): ReturnType<typeof spawnSync> {
+  const command = config.deliveryCommand ?? [config.hermesBin!, "--profile", config.hermesProfile!, "harness-card"];
+  return spawnSync(command[0]!, command.slice(1), {
+    encoding: "utf8",
+    input: JSON.stringify(payload),
+    timeout: 20_000,
+    maxBuffer: 1024 * 1024,
+  });
 }
 
 function retryEntry(config: ObserverConfig, state: ObserverState, entry: OutboxEntry, error: string): void {
@@ -532,11 +540,18 @@ function parseApprovalCard(output: string, analysisId: string): unknown | null {
 function loadConfig(path: string): ObserverConfig {
   assertSecureAbsoluteFile(path, "bridge config");
   const parsed = JSON.parse(readFileSync(path, "utf8")) as Partial<ObserverConfigFile>;
-  const paths = ["harnessConfig", "nodeBin", "statusScript", "approvalScript", "hermesBin", "observerState", "controllerLog"] as const;
+  const paths = ["harnessConfig", "nodeBin", "statusScript", "approvalScript", "observerState", "controllerLog"] as const;
   for (const name of paths) {
     if (!parsed[name] || !isAbsolute(parsed[name])) throw new Error(`${name} must be an absolute path`);
   }
-  if (!parsed.hermesProfile || !/^[A-Za-z0-9._-]+$/.test(parsed.hermesProfile) || parsed.target !== "telegram") {
+  const deliveryCommand = parseDeliveryCommand(parsed.deliveryCommand);
+  if (!deliveryCommand && (
+    !parsed.hermesBin
+    || !isAbsolute(parsed.hermesBin)
+    || !parsed.hermesProfile
+    || !/^[A-Za-z0-9._-]+$/.test(parsed.hermesProfile)
+    || parsed.target !== "telegram"
+  )) {
     throw new Error("a safe hermesProfile and target=telegram are required");
   }
   if (!Number.isInteger(parsed.pollMs) || parsed.pollMs! < 1_000) throw new Error("pollMs must be an integer of at least 1000");
@@ -550,10 +565,26 @@ function loadConfig(path: string): ObserverConfig {
   if (!existsSync(harness.stateDir)) throw new Error("Harness stateDir does not exist");
   return {
     ...file,
+    deliveryCommand,
     bridgeConfig: path,
     harnessStateDir: harness.stateDir,
     controllerHeartbeat: controllerHeartbeatPath(harness.stateDir),
   };
+}
+
+function parseDeliveryCommand(value: unknown): string[] | null {
+  if (value === undefined) return null;
+  if (
+    !Array.isArray(value)
+    || value.length === 0
+    || value.length > 16
+    || value.some((part) => typeof part !== "string" || !part || part.includes("\0"))
+    || !isAbsolute(value[0]!)
+  ) {
+    throw new Error("deliveryCommand must be an absolute executable plus at most 15 arguments");
+  }
+  if (!existsSync(value[0]!)) throw new Error("deliveryCommand executable does not exist");
+  return value;
 }
 
 function assertSecureAbsoluteFile(path: string, label: string): void {
