@@ -32,3 +32,16 @@ Set `HERDR_HARNESS_FLEET_CONFIG` to the absolute fleet config path for both the 
 The Observer pushes one concise start message and one terminal message on a normal run. Intermediate Worker, Reviewer, publish, and merge-wait transitions stay available through `/harness` instead of creating new notifications. Incidents, Controller health failures, and exact approval cards remain proactive. Approval cards and Analyst holds keep a Simplified-Chinese conclusion, impact, recommendation, and rationale visible; the timestamped timeline and technical evidence stay behind an expandable details block. Hold cards are informational and never include approval controls.
 
 Without `HERDR_HARNESS_FLEET_CONFIG`, the existing single-instance commands and `hh:a:<token>` callbacks remain supported.
+
+## Standalone transport
+
+To remove the custom Hermes callback dependency, run the separate
+[`harness-telegram-bridge`](https://github.com/Notyet1307/harness-telegram-bridge)
+with its own Telegram Bot Token. Copy `bridge.standalone.config.example.json`
+for each Observer and set `deliveryCommand` to the Bridge `send-card` command.
+
+`deliveryCommand` is optional and backward compatible. When absent, the
+Observer keeps using `hermesBin`, `hermesProfile`, and `target` exactly as
+before. The command receives one card JSON object on stdin; ordinary text
+notifications include `parseMode: "plain"`. Do not run Hermes and the
+standalone Bridge as update consumers for the same Bot Token.

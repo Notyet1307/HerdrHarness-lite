@@ -176,6 +176,56 @@ test("Hermes observer baselines old logs and retries text or approval-card deliv
         rmSync(root, { recursive: true, force: true });
     }
 });
+test("Observer can deliver through a standalone command without Hermes configuration", () => {
+    const root = mkdtempSync(join(tmpdir(), "herdr-standalone-observer-"));
+    try {
+        const stateDir = join(root, "harness-state");
+        const observerState = join(root, "observer", "state.json");
+        const harnessConfig = join(root, "harness.json");
+        const bridgeConfig = join(root, "bridge.json");
+        const controllerLog = join(root, "controller.log");
+        const captureScript = join(root, "capture.mjs");
+        const captureFile = join(root, "card.json");
+        mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+        writeFileSync(join(stateDir, "state.json"), `${JSON.stringify({ version: 1, activeJob: null, terminalJobs: [] })}\n`, { encoding: "utf8", mode: 0o600 });
+        writeFileSync(join(stateDir, "controller-heartbeat.json"), "{}\n", { encoding: "utf8", mode: 0o600 });
+        writeFileSync(controllerLog, "", { encoding: "utf8", mode: 0o600 });
+        writeFileSync(harnessConfig, JSON.stringify({ repo: "owner/repo", stateDir, workerArgv: [], reviewerArgv: [] }), { encoding: "utf8", mode: 0o600 });
+        writeFileSync(captureScript, [
+            'import { writeFileSync } from "node:fs";',
+            "const chunks = [];",
+            "for await (const chunk of process.stdin) chunks.push(Buffer.from(chunk));",
+            "writeFileSync(process.argv[2], Buffer.concat(chunks));",
+        ].join("\n"), { encoding: "utf8", mode: 0o600 });
+        writeFileSync(bridgeConfig, JSON.stringify({
+            laneId: "exposure",
+            harnessConfig,
+            nodeBin: process.execPath,
+            statusScript: resolve("dist/src/hermes-status.js"),
+            approvalScript: resolve("dist/src/hermes-approval.js"),
+            harnessCliScript: resolve("dist/src/cli.js"),
+            approvalState: join(root, "approval", "state.json"),
+            telegramAllowedUser: "123456789",
+            deliveryCommand: [process.execPath, captureScript, captureFile],
+            observerState,
+            controllerLog,
+            pollMs: 1_000,
+            heartbeatTimeoutMs: 60_000,
+        }), { encoding: "utf8", mode: 0o600 });
+        const result = spawnSync(process.execPath, [resolve("dist/src/hermes-observer.js"), "run", "--config", bridgeConfig, "--once"], {
+            encoding: "utf8",
+            timeout: 10_000,
+        });
+        assert.equal(result.status, 0, result.stderr);
+        assert.equal(readObserver(observerState).outbox.length, 0);
+        const payload = JSON.parse(readFileSync(captureFile, "utf8"));
+        assert.match(payload.text, /^🟢 Observer 已上线/);
+        assert.equal(payload.parseMode, "plain");
+    }
+    finally {
+        rmSync(root, { recursive: true, force: true });
+    }
+});
 function readObserver(path) {
     return JSON.parse(readFileSync(path, "utf8"));
 }

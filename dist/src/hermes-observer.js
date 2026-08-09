@@ -283,21 +283,14 @@ async function flushOutbox(config, state) {
                 return;
             }
             else {
-                sent = spawnSync(config.hermesBin, ["--profile", config.hermesProfile, "harness-card"], {
-                    encoding: "utf8",
-                    input: JSON.stringify(card),
-                    timeout: 20_000,
-                    maxBuffer: 1024 * 1024,
-                });
+                sent = sendCard(config, card);
             }
         }
         else if (entry.kind === "card") {
-            sent = spawnSync(config.hermesBin, ["--profile", config.hermesProfile, "harness-card"], {
-                encoding: "utf8",
-                input: JSON.stringify({ text: entry.message }),
-                timeout: 20_000,
-                maxBuffer: 1024 * 1024,
-            });
+            sent = sendCard(config, { text: entry.message });
+        }
+        else if (config.deliveryCommand) {
+            sent = sendCard(config, { text: entry.message, parseMode: "plain" });
         }
         else {
             sent = spawnSync(config.hermesBin, [
@@ -319,6 +312,15 @@ async function flushOutbox(config, state) {
         retryEntry(config, state, entry, sent.error?.message || sent.stderr || `exit ${sent.status}`);
         return;
     }
+}
+function sendCard(config, payload) {
+    const command = config.deliveryCommand ?? [config.hermesBin, "--profile", config.hermesProfile, "harness-card"];
+    return spawnSync(command[0], command.slice(1), {
+        encoding: "utf8",
+        input: JSON.stringify(payload),
+        timeout: 20_000,
+        maxBuffer: 1024 * 1024,
+    });
 }
 function retryEntry(config, state, entry, error) {
     entry.attempts += 1;
@@ -441,12 +443,17 @@ function parseApprovalCard(output, analysisId) {
 function loadConfig(path) {
     assertSecureAbsoluteFile(path, "bridge config");
     const parsed = JSON.parse(readFileSync(path, "utf8"));
-    const paths = ["harnessConfig", "nodeBin", "statusScript", "approvalScript", "hermesBin", "observerState", "controllerLog"];
+    const paths = ["harnessConfig", "nodeBin", "statusScript", "approvalScript", "observerState", "controllerLog"];
     for (const name of paths) {
         if (!parsed[name] || !isAbsolute(parsed[name]))
             throw new Error(`${name} must be an absolute path`);
     }
-    if (!parsed.hermesProfile || !/^[A-Za-z0-9._-]+$/.test(parsed.hermesProfile) || parsed.target !== "telegram") {
+    const deliveryCommand = parseDeliveryCommand(parsed.deliveryCommand);
+    if (!deliveryCommand && (!parsed.hermesBin
+        || !isAbsolute(parsed.hermesBin)
+        || !parsed.hermesProfile
+        || !/^[A-Za-z0-9._-]+$/.test(parsed.hermesProfile)
+        || parsed.target !== "telegram")) {
         throw new Error("a safe hermesProfile and target=telegram are required");
     }
     if (!Number.isInteger(parsed.pollMs) || parsed.pollMs < 1_000)
@@ -462,10 +469,25 @@ function loadConfig(path) {
         throw new Error("Harness stateDir does not exist");
     return {
         ...file,
+        deliveryCommand,
         bridgeConfig: path,
         harnessStateDir: harness.stateDir,
         controllerHeartbeat: controllerHeartbeatPath(harness.stateDir),
     };
+}
+function parseDeliveryCommand(value) {
+    if (value === undefined)
+        return null;
+    if (!Array.isArray(value)
+        || value.length === 0
+        || value.length > 16
+        || value.some((part) => typeof part !== "string" || !part || part.includes("\0"))
+        || !isAbsolute(value[0])) {
+        throw new Error("deliveryCommand must be an absolute executable plus at most 15 arguments");
+    }
+    if (!existsSync(value[0]))
+        throw new Error("deliveryCommand executable does not exist");
+    return value;
 }
 function assertSecureAbsoluteFile(path, label) {
     if (!isAbsolute(path))
