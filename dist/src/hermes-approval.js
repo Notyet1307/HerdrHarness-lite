@@ -9,6 +9,15 @@ import { allowedActionsFor } from "./policy.js";
 const CHALLENGE_TTL_MS = 10 * 60 * 1_000;
 const MAX_STDIN_BYTES = 1_024;
 const LANE_ID = /^[a-z0-9][a-z0-9-]{0,31}$/;
+const TIMELINE_TIME = new Intl.DateTimeFormat("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+    timeZoneName: "short",
+});
 class ApprovalCommandError extends Error {
     code;
     terminal;
@@ -183,23 +192,25 @@ function approvalCard(job, token, laneId) {
     const head = job.headSha ? job.headSha.slice(0, 12) : "尚无 HEAD";
     return {
         text: [
-            `🚨 <b>需要你决定 · #${job.task.issueNumber}</b>`,
-            `<code>${html(clean(job.task.repo, 160), 140)}</code>`,
+            `🚨 <b>#${job.task.issueNumber} 已阻塞 · 需要你决定</b>`,
+            `<code>${html(clean(job.task.repo, 160), 140)}</code> · ${html(clean(job.task.title, 180), 150)}`,
             "",
-            `<b>原因：</b>${html(clean(incident.summary, 360), 280)}`,
-            "<b>影响：</b>任务保持 blocked；Harness 不会继续推进，也尚未启动恢复 agent。",
+            `<b>结论：</b>${html(clean(analysis.summary, 420), 340)}`,
+            "<b>影响：</b>自动流程暂停；Harness 尚未启动恢复 agent。",
             `<b>建议：</b>${html(actionLabel(analysis.action), 100)}`,
-            html(clean(analysis.summary, 320), 260),
+            html(clean(analysis.resolutionBrief, 540), 440),
+            "<b>建议原因：</b>这是与当前阻塞精确绑定、且符合 Harness 策略的恢复动作；批准后 Controller 仍会重新校验任务、HEAD 与全部绑定。",
             "",
             "⏱️ <b>10 分钟内有效</b>；新卡片会使旧卡片失效。",
             "",
-            "<blockquote expandable><b>技术详情</b>",
+            "<blockquote expandable><b>展开时间线与证据（Controller 本机时间）</b>",
+            ...analysisTimeline(job),
             ...(laneId ? [`实例：<code>${html(laneId, 32)}</code>`] : []),
             `HEAD：<code>${html(head, 40)}</code>`,
-            `恢复说明：${html(clean(analysis.resolutionBrief, 600), 480)}`,
+            `原始阻塞：${html(clean(incident.summary, 600), 480)}`,
+            `证据引用：${html(clean(analysis.evidenceRefs.join(", ") || "无", 300), 240)}`,
             `未决信息：${unknowns}`,
             `Incident：<code>${html(clean(incident.id, 80), 60)}</code> · revision <code>${job.revision}</code>`,
-            "批准后 Controller 仍会重新校验任务、HEAD 与全部绑定。",
             "</blockquote>",
         ].join("\n"),
         approveLabel: analysis.action === "retry_fresh_worker"
@@ -208,6 +219,43 @@ function approvalCard(job, token, laneId) {
         approveCallback: `hh:a:${laneId ? `${laneId}:` : ""}${token}`,
         holdCallback: `hh:h:${laneId ? `${laneId}:` : ""}${token}`,
     };
+}
+function analysisTimeline(job) {
+    const incident = job.incident;
+    const analysis = job.analysis;
+    if (!isRetryAction(analysis.action))
+        throw new Error("approval timeline requires a fresh retry action");
+    const attempt = incident.attemptId === null
+        ? null
+        : job.attempts.find((candidate) => candidate.id === incident.attemptId)
+            ?? (job.activeAttempt?.id === incident.attemptId ? job.activeAttempt : null);
+    const events = [{ at: job.createdAt, text: "任务进入 Harness" }];
+    if (attempt) {
+        const lane = attempt.lane === "worker" ? "Worker" : "Reviewer";
+        events.push({ at: attempt.startedAt, text: `${lane} 开始（第 ${attempt.round} 轮）` });
+        if (attempt.completedAt) {
+            events.push({
+                at: attempt.completedAt,
+                text: attempt.result
+                    ? `${lane} 结束；持久化结果状态：${attempt.result.status}`
+                    : `${lane} 结束；ledger 尚未收到持久化结果`,
+            });
+        }
+    }
+    if (job.ciFailure?.observedAt) {
+        events.push({ at: job.ciFailure.observedAt, text: "已观察到 GitHub 必需 CI 失败" });
+    }
+    events.push({ at: incident.createdAt, text: `Harness 记录 ${incident.class} · ${incident.lane}` }, { at: analysis.createdAt, text: `Analyst 建议：${actionLabel(analysis.action)}` });
+    return events
+        .sort((left, right) => Date.parse(left.at) - Date.parse(right.at))
+        .map(({ at, text }) => `<code>${html(localTime(at), 40)}</code> · ${html(text, 180)}`);
+}
+function localTime(value) {
+    const date = new Date(value);
+    if (!Number.isFinite(date.getTime()))
+        return clean(value, 40);
+    const parts = Object.fromEntries(TIMELINE_TIME.formatToParts(date).map((part) => [part.type, part.value]));
+    return `${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second} ${parts.timeZoneName}`;
 }
 function readToken() {
     const input = readFileSync(0, "utf8");
