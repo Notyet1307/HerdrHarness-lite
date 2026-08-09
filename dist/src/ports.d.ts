@@ -1,4 +1,4 @@
-import type { AgentHandle, AgentStatus, AnalystSession, AnalystTurn, Attempt, AttemptResult, EvidenceItem, EvidencePack, EvidenceRequest, HarnessState, IssueSnapshot, Job, PullRequestObservation, PullRequestRef, SelectedTask, TaskSnapshot, WorktreeHandle } from "./model.js";
+import type { AgentHandle, AgentStatus, AnalystSession, AnalystTurn, Attempt, AttemptResult, ExecutionContext, EvidenceItem, EvidencePack, EvidenceRequest, ExecutionResource, HarnessState, IssueSnapshot, Job, PullRequestObservation, PullRequestRef, SelectedTask, TaskSnapshot, WorktreeHandle } from "./model.js";
 export type HarnessConfig = {
     repo: string;
     localPath: string;
@@ -15,6 +15,8 @@ export type HarnessConfig = {
     /** Native Pi arguments only; Herdr selects `pi` and Controller validates the role contract. */
     workerArgv: string[];
     reviewerArgv: string[];
+    /** Worker-only canary. Reviewer always remains on the Herdr interactive Pi adapter. */
+    workerRuntime?: "herdr-pi-cli" | "pi-rpc";
     preflight?: {
         /** Command used for bounded live Provider probes. Defaults to `pi`. */
         piBin?: string;
@@ -23,11 +25,24 @@ export type HarnessConfig = {
     };
 };
 export interface RuntimePreflightPort {
+    inspectPi(input: {
+        cwd: string;
+        piBin: string;
+    }): Promise<{
+        executable: string;
+        version: string;
+    }>;
+    assertNoAmbientSystemPrompt(input: {
+        cwd: string;
+    }): Promise<{
+        agentDir: string;
+    }>;
     probeProvider(input: {
         lane: Attempt["lane"];
         cwd: string;
         roleArgv: string[];
         piBin: string;
+        agentDir?: string;
     }): Promise<void>;
     probeDocker(input: {
         cwd: string;
@@ -129,6 +144,16 @@ export interface GitPort {
     }): Promise<{
         descriptorPath: string;
     }>;
+    prepareTrustedContext(input: {
+        localPath: string;
+        rootPath: string;
+        trustAnchorSha: string;
+        jobId: string;
+        attemptId: string;
+        lane: Attempt["lane"];
+        agentDir: string;
+    }): Promise<ExecutionContext>;
+    verifyTrustedContext(context: ExecutionContext): Promise<void>;
     prepareReviewer(input: {
         worktree: WorktreeHandle;
         rootPath: string;
@@ -139,6 +164,9 @@ export interface GitPort {
         expectedHeadSha: string;
         validationArgv: string[];
         dockerHost: string | null;
+        reviewAxisAgent: ExecutionResource;
+        piExecutable: string;
+        piRuntimeVersion: string;
     }): Promise<{
         reviewPath: string;
         descriptorPath: string;
@@ -151,7 +179,39 @@ export interface GitPort {
         allowedResultPaths: string[];
     }): Promise<ReviewerVerification>;
 }
-export interface HerdrPort {
+export interface AttemptRuntimePort {
+    startAgent(input: {
+        handle: AgentHandle;
+        attempt: Attempt;
+        cwd: string;
+        argv: string[];
+    }): Promise<void>;
+    prompt(input: {
+        handle: AgentHandle;
+        attempt: Attempt;
+        dispatchId: string;
+        skill: "implement" | "code-review";
+        text: string;
+    }): Promise<void>;
+    wait(input: {
+        handle: AgentHandle;
+        attempt: Attempt;
+        resultPath: string;
+        expectedJobId: string;
+        expectedAttemptId: string;
+        expectedLane: Attempt["lane"];
+    }): Promise<{
+        agentStatus: AgentStatus;
+        result: AttemptResult | null;
+        diagnostic: string | null;
+    }>;
+    terminate?(input: {
+        handle: AgentHandle;
+        attempt: Attempt;
+        reason: "completed" | "recovery" | "cancelled";
+    }): Promise<void>;
+}
+export interface HerdrPort extends AttemptRuntimePort {
     createWorktree(input: {
         sourcePath: string;
         branch: string;
@@ -165,27 +225,11 @@ export interface HerdrPort {
         cwd?: string;
         env?: Record<string, string>;
     }): Promise<AgentHandle>;
-    startAgent(input: {
+    runInPane(input: {
         handle: AgentHandle;
+        command: string;
         argv: string[];
     }): Promise<void>;
-    prompt(input: {
-        handle: AgentHandle;
-        dispatchId: string;
-        skill: "implement" | "code-review";
-        text: string;
-    }): Promise<void>;
-    wait(input: {
-        handle: AgentHandle;
-        resultPath: string;
-        expectedJobId: string;
-        expectedAttemptId: string;
-        expectedLane: Attempt["lane"];
-    }): Promise<{
-        agentStatus: AgentStatus;
-        result: AttemptResult | null;
-        diagnostic: string | null;
-    }>;
     close(handle: AgentHandle): Promise<void>;
 }
 export interface AnalystPort {

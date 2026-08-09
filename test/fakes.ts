@@ -1,21 +1,27 @@
 import { join, resolve } from "node:path";
-import { digest, type AnalystSession, type AnalystTurn, type AttemptResult, type EvidenceItem, type EvidenceRequest, type HarnessState, type IssueSnapshot, type Job, type PullRequestCheck, type PullRequestObservation, type PullRequestRef, type SelectedTask } from "../src/model.js";
+import { digest, type AnalystSession, type AnalystTurn, type AttemptResult, type EvidenceItem, type EvidenceRequest, type ExecutionContext, type ExecutionResource, type HarnessState, type IssueSnapshot, type Job, type PullRequestCheck, type PullRequestObservation, type PullRequestRef, type SelectedTask } from "../src/model.js";
 import type { AnalystPort, Clock, EvidencePort, GitHubPort, GitPort, HerdrPort, IdGenerator, RuntimePreflightPort, StateStore } from "../src/ports.js";
 
 export const validCodeReviewSkillPath = resolve("pi/skills/code-review");
 export const validFocusedSelfCheckSkillPath = resolve("pi/skills/focused-self-check");
+export const validTddSkillPath = resolve("pi/skills/tdd");
 export const validPiSubagentsExtensionPath = resolve("test/fixtures/pi-subagents/index.js");
 export const validWorkerToolsExtensionPath = resolve("pi/extensions/worker-tools.js");
+export const validReviewerSubagentConfigExtensionPath = resolve("pi/extensions/reviewer-subagent-config.js");
 export const validReviewerToolsExtensionPath = resolve("pi/extensions/reviewer-tools.js");
 export const validImplementSkillPath = resolve("test/fixtures/pi-skills/skills/implement");
-export const validTddSkillPath = resolve("test/fixtures/pi-skills/skills/tdd");
+export const substituteTddSkillPath = resolve("test/fixtures/pi-skills/skills/tdd");
 export const substituteCodeReviewSkillPath = resolve("test/fixtures/substitute-review/other/SKILL.md");
 export const untrustedImplementSkillPath = resolve("test/fixtures/untrusted-skills/skills/implement");
 
 export const validWorkerArgv = [
   "--no-approve",
   "--no-skills",
+  "--no-session",
   "--no-extensions",
+  "--no-context-files",
+  "--no-prompt-templates",
+  "--no-themes",
   "--extension", validWorkerToolsExtensionPath,
   "--skill", validImplementSkillPath,
   "--skill", validTddSkillPath,
@@ -27,7 +33,12 @@ export const validWorkerArgv = [
 export const validReviewerArgv = [
   "--no-approve",
   "--no-skills",
+  "--no-session",
   "--no-extensions",
+  "--no-context-files",
+  "--no-prompt-templates",
+  "--no-themes",
+  "--extension", validReviewerSubagentConfigExtensionPath,
   "--extension", validPiSubagentsExtensionPath,
   "--extension", validReviewerToolsExtensionPath,
   "--skill", validCodeReviewSkillPath,
@@ -52,13 +63,40 @@ export class SequenceIds implements IdGenerator {
 }
 
 export class FakeRuntimePreflight implements RuntimePreflightPort {
-  providerCalls: Array<{ lane: "worker" | "reviewer"; cwd: string; roleArgv: string[]; piBin: string }> = [];
+  inspectionCalls: Array<{ cwd: string; piBin: string }> = [];
+  providerCalls: Array<{
+    lane: "worker" | "reviewer";
+    cwd: string;
+    roleArgv: string[];
+    piBin: string;
+    agentDir?: string;
+  }> = [];
   dockerCalls: string[] = [];
   providerFailure: Error | null = null;
   dockerFailure: Error | null = null;
   dockerHost = "unix:///tmp/docker.sock";
+  executable = "/opt/pi";
+  version = "0.84.0";
+  agentDir = "/pi-agent";
+  ambientFailure: Error | null = null;
 
-  async probeProvider(input: { lane: "worker" | "reviewer"; cwd: string; roleArgv: string[]; piBin: string }): Promise<void> {
+  async inspectPi(input: { cwd: string; piBin: string }): Promise<{ executable: string; version: string }> {
+    this.inspectionCalls.push(input);
+    return { executable: this.executable, version: this.version };
+  }
+
+  async assertNoAmbientSystemPrompt(): Promise<{ agentDir: string }> {
+    if (this.ambientFailure) throw this.ambientFailure;
+    return { agentDir: this.agentDir };
+  }
+
+  async probeProvider(input: {
+    lane: "worker" | "reviewer";
+    cwd: string;
+    roleArgv: string[];
+    piBin: string;
+    agentDir?: string;
+  }): Promise<void> {
     this.providerCalls.push({ ...input, roleArgv: [...input.roleArgv] });
     if (this.providerFailure) throw this.providerFailure;
   }
@@ -170,6 +208,8 @@ export class FakeGit implements GitPort {
   reviewerFailure: string | null = null;
   reviewerValidationArgv: string[][] = [];
   reviewerDockerHosts: Array<string | null> = [];
+  trustedContexts: ExecutionContext[] = [];
+  trustedContextFailure: Error | null = null;
   workerVerifications: Array<{
     reportedHeadSha: string;
     expectedRemoteHeadSha: string | null;
@@ -206,13 +246,39 @@ export class FakeGit implements GitPort {
     return { descriptorPath: join(input.rootPath, "descriptor.json") };
   }
 
-  async prepareReviewer(input: { rootPath: string; validationArgv: string[]; dockerHost: string | null }): Promise<{ reviewPath: string; descriptorPath: string; evidencePath: string }> {
+  async prepareTrustedContext(input: {
+    rootPath: string;
+    trustAnchorSha: string;
+    lane: "worker" | "reviewer";
+    agentDir: string;
+  }): Promise<ExecutionContext> {
+    const context: ExecutionContext = {
+      version: 1,
+      mode: "explicit-v1",
+      lane: input.lane,
+      trustAnchorSha: input.trustAnchorSha,
+      entries: [],
+      bundlePath: join(input.rootPath, "trusted-context.md"),
+      bundleDigest: "c".repeat(64),
+      manifestPath: join(input.rootPath, "trusted-context.json"),
+      manifestDigest: "d".repeat(64),
+      agentDir: input.agentDir,
+    };
+    this.trustedContexts.push(context);
+    return context;
+  }
+
+  async verifyTrustedContext(): Promise<void> {
+    if (this.trustedContextFailure) throw this.trustedContextFailure;
+  }
+
+  async prepareReviewer(input: { rootPath: string; validationArgv: string[]; dockerHost: string | null; reviewAxisAgent: ExecutionResource; piExecutable: string; piRuntimeVersion: string }): Promise<{ reviewPath: string; descriptorPath: string; evidencePath: string }> {
     this.reviewerValidationArgv.push([...input.validationArgv]);
     this.reviewerDockerHosts.push(input.dockerHost);
     return {
-      reviewPath: join(input.rootPath, "source"),
-      descriptorPath: join(input.rootPath, "descriptor.json"),
-      evidencePath: join(input.rootPath, "review-evidence.txt"),
+      reviewPath: join(input.rootPath, "workspace", "source"),
+      descriptorPath: join(input.rootPath, "workspace", "descriptor.json"),
+      evidencePath: join(input.rootPath, "workspace", "review-evidence.txt"),
     };
   }
 
@@ -231,6 +297,8 @@ type Outcome = (
 export class FakeHerdr implements HerdrPort {
   prepared: Array<{ attemptId: string; lane: string; cwd: string; env: Record<string, string>; handle: { agentName: string; paneId: string; tabId: string; workspaceId: string } }> = [];
   started: string[] = [];
+  startedArgv: string[][] = [];
+  paneCommands: Array<{ command: string; argv: string[] }> = [];
   prompts: Array<{ dispatchId: string; skill: "implement" | "code-review"; text: string }> = [];
   closed: string[] = [];
   promptFailureAfterDispatch: Error | null = null;
@@ -260,8 +328,13 @@ export class FakeHerdr implements HerdrPort {
     return handle;
   }
 
-  async startAgent(input: { handle: { agentName: string } }): Promise<void> {
+  async startAgent(input: { handle: { agentName: string }; argv: string[] }): Promise<void> {
     this.started.push(input.handle.agentName);
+    this.startedArgv.push([...input.argv]);
+  }
+
+  async runInPane(input: { command: string; argv: string[] }): Promise<void> {
+    this.paneCommands.push({ command: input.command, argv: [...input.argv] });
   }
 
   async prompt(input: { dispatchId: string; skill: "implement" | "code-review"; text: string }): Promise<void> {

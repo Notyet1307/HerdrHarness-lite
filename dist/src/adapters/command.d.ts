@@ -10,6 +10,7 @@ export interface CommandRunner {
         cwd?: string;
         input?: string;
         timeoutMs?: number;
+        env?: Record<string, string | undefined>;
     }): CommandResult;
 }
 export declare class SyncCommandRunner implements CommandRunner {
@@ -17,6 +18,7 @@ export declare class SyncCommandRunner implements CommandRunner {
         cwd?: string;
         input?: string;
         timeoutMs?: number;
+        env?: Record<string, string | undefined>;
     }): CommandResult;
 }
 export declare function requireSuccess(result: CommandResult, label: string): string;

@@ -9,11 +9,21 @@ export type CommandResult = {
 };
 
 export interface CommandRunner {
-  run(command: string, args: string[], options?: { cwd?: string; input?: string; timeoutMs?: number }): CommandResult;
+  run(command: string, args: string[], options?: {
+    cwd?: string;
+    input?: string;
+    timeoutMs?: number;
+    env?: Record<string, string | undefined>;
+  }): CommandResult;
 }
 
 export class SyncCommandRunner implements CommandRunner {
-  run(command: string, args: string[], options: { cwd?: string; input?: string; timeoutMs?: number } = {}): CommandResult {
+  run(command: string, args: string[], options: {
+    cwd?: string;
+    input?: string;
+    timeoutMs?: number;
+    env?: Record<string, string | undefined>;
+  } = {}): CommandResult {
     const spawnOptions: {
       encoding: "utf8";
       maxBuffer: number;
@@ -24,7 +34,7 @@ export class SyncCommandRunner implements CommandRunner {
     } = {
       encoding: "utf8",
       maxBuffer: 20 * 1024 * 1024,
-      env: process.env,
+      env: options.env ?? process.env,
     };
     if (options.cwd !== undefined) spawnOptions.cwd = options.cwd;
     if (options.input !== undefined) spawnOptions.input = options.input;

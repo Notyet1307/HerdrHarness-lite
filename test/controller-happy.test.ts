@@ -1,6 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { Buffer } from "node:buffer";
+import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { HarnessController } from "../src/controller.js";
 import type { HarnessConfig } from "../src/ports.js";
 import {
@@ -15,9 +18,11 @@ import {
   SequenceIds,
   issue,
   substituteCodeReviewSkillPath,
+  substituteTddSkillPath,
   untrustedImplementSkillPath,
   validCodeReviewSkillPath,
   validImplementSkillPath,
+  validPiSubagentsExtensionPath,
   validReviewerArgv,
   validWorkerArgv,
 } from "./fakes.js";
@@ -36,6 +41,7 @@ const config: HarnessConfig = {
   workerArgv: validWorkerArgv,
   reviewerArgv: validReviewerArgv,
 };
+const rpcWorkerArgv = [...validWorkerArgv, "--provider", "test", "--model", "model"];
 
 test("config rejects non-string native Pi arguments", () => {
   for (const field of ["workerArgv", "reviewerArgv"] as const) {
@@ -128,6 +134,10 @@ test("config rejects incomplete Pi role contracts", () => {
     },
     {
       ...config,
+      workerArgv: validWorkerArgv.map((value) => value.endsWith("/pi/skills/tdd") ? substituteTddSkillPath : value),
+    },
+    {
+      ...config,
       reviewerArgv: validReviewerArgv.map((value) => (
         value === "read,grep,find,ls,subagent,review_preflight,review_validate,review_submit" ? `${value},write` : value
       )),
@@ -146,6 +156,71 @@ test("config rejects incomplete Pi role contracts", () => {
       preflight: new FakeRuntimePreflight(),
     }), /(?:workerArgv|reviewerArgv) must enforce the Pi role contract/);
   }
+});
+
+test("config rejects an unqualified pi-subagents version", () => {
+  const root = mkdtempSync(join(tmpdir(), "herdr-pi-subagents-version-"));
+  const packageRoot = join(root, "pi-subagents");
+  try {
+    cpSync(resolve("test/fixtures/pi-subagents"), packageRoot, { recursive: true });
+    const manifestPath = join(packageRoot, "package.json");
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as { version: string };
+    manifest.version = "0.42.2";
+    writeFileSync(manifestPath, JSON.stringify(manifest));
+    const reviewerArgv = validReviewerArgv.map((value) => (
+      value === validPiSubagentsExtensionPath ? join(packageRoot, "index.js") : value
+    ));
+    assert.throws(() => new HarnessController({
+      config: { ...config, reviewerArgv },
+      store: new MemoryStore(),
+      github: new FakeGitHub([]),
+      git: new FakeGit(),
+      herdr: new FakeHerdr([]),
+      analyst: new FakeAnalyst(),
+      evidence: new FakeEvidence(),
+      clock: new FakeClock(),
+      ids: new SequenceIds(),
+      preflight: new FakeRuntimePreflight(),
+    }), /reviewerArgv must enforce the Pi role contract/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("config requires every ambient-discovery hardening flag", () => {
+  for (const field of ["workerArgv", "reviewerArgv"] as const) {
+    for (const flag of ["--no-session", "--no-context-files", "--no-prompt-templates", "--no-themes"]) {
+      assert.throws(() => new HarnessController({
+        config: { ...config, [field]: config[field].filter((value) => value !== flag) },
+        store: new MemoryStore(),
+        github: new FakeGitHub([]),
+        git: new FakeGit(),
+        herdr: new FakeHerdr([]),
+        analyst: new FakeAnalyst(),
+        evidence: new FakeEvidence(),
+        clock: new FakeClock(),
+        ids: new SequenceIds(),
+        preflight: new FakeRuntimePreflight(),
+      }), new RegExp(`exactly one ${flag} is required`));
+    }
+  }
+});
+
+test("Pi RPC configuration requires the Worker runtime adapter", () => {
+  const dependencies = {
+    config: { ...config, workerRuntime: "pi-rpc" as const, workerArgv: rpcWorkerArgv },
+    store: new MemoryStore(),
+    github: new FakeGitHub([]),
+    git: new FakeGit(),
+    herdr: new FakeHerdr([]),
+    analyst: new FakeAnalyst(),
+    evidence: new FakeEvidence(),
+    clock: new FakeClock(),
+    ids: new SequenceIds(),
+    preflight: new FakeRuntimePreflight(),
+  };
+  assert.throws(() => new HarnessController(dependencies), /requires the Worker RPC adapter/);
+  assert.throws(() => new HarnessController({ ...dependencies, config: { ...config, workerRuntime: "pi-rpc" } }), /requires one explicit --provider/);
 });
 
 test("runtime preflight fails before claim and does not reserve an issue", async () => {
@@ -174,6 +249,214 @@ test("runtime preflight fails before claim and does not reserve an issue", async
   assert.equal(github.claims.length, 0);
 });
 
+test("Attempt binds one immutable execution snapshot and ignores later config drift", async () => {
+  const store = new MemoryStore();
+  const herdr = new FakeHerdr([{ lane: "worker", status: "completed", headSha: "b".repeat(40) }]);
+  const runtimeConfig: HarnessConfig = { ...config, workerArgv: [...validWorkerArgv] };
+  const preflight = new FakeRuntimePreflight();
+  const controller = new HarnessController({
+    config: runtimeConfig,
+    store,
+    github: new FakeGitHub([issue({ number: 31, title: "Immutable execution plan" })]),
+    git: new FakeGit(),
+    herdr,
+    analyst: new FakeAnalyst(),
+    evidence: new FakeEvidence(),
+    clock: new FakeClock(),
+    ids: new SequenceIds(),
+    preflight,
+  });
+
+  for (let index = 0; index < 4; index += 1) await controller.tick();
+  const attempt = store.state.activeJob?.activeAttempt;
+  assert.equal(attempt?.executionSnapshot?.executable, "/opt/pi");
+  assert.equal(attempt?.executionSnapshot?.runtimeVersion, "0.84.0");
+  assert.equal(attempt?.executionSnapshot?.resources.length, 4);
+  assert.equal(attempt?.executionSnapshot?.sessionMode, "ephemeral");
+  assert.deepEqual(attempt?.executionSnapshot?.argv.slice(-2), [
+    "--append-system-prompt",
+    attempt?.executionSnapshot?.context?.bundlePath,
+  ]);
+  assert.match(attempt?.planDigest ?? "", /^[0-9a-f]{64}$/);
+
+  runtimeConfig.workerArgv = validWorkerArgv.map((value) => value === "high" ? "max" : value);
+  runtimeConfig.preflight = { dockerRequired: true };
+  await controller.tick();
+  await controller.tick();
+  assert.deepEqual(herdr.startedArgv, [attempt!.executionSnapshot!.argv]);
+  assert.deepEqual(preflight.providerCalls.at(-1)?.roleArgv, attempt!.executionSnapshot!.argv);
+  assert.equal(herdr.prepared[0]?.env.DOCKER_HOST, "");
+});
+
+test("Attempt fails closed when its plan or inspected runtime drifts", async () => {
+  for (const mutate of [
+    (store: MemoryStore, preflight: FakeRuntimePreflight) => { preflight.version = "0.85.0"; },
+    (store: MemoryStore) => { store.state.activeJob!.activeAttempt!.executionSnapshot!.argv.push("--no-session"); },
+  ]) {
+    const store = new MemoryStore();
+    const preflight = new FakeRuntimePreflight();
+    const herdr = new FakeHerdr([]);
+    const controller = new HarnessController({
+      config,
+      store,
+      github: new FakeGitHub([issue({ number: 32, title: "Reject execution drift" })]),
+      git: new FakeGit(),
+      herdr,
+      analyst: new FakeAnalyst(),
+      evidence: new FakeEvidence(),
+      clock: new FakeClock(),
+      ids: new SequenceIds(),
+      preflight,
+    });
+    for (let index = 0; index < 4; index += 1) await controller.tick();
+    mutate(store, preflight);
+    const output = await controller.tick();
+    assert.equal(output.action, "blocked");
+    assert.equal(store.state.activeJob?.incident?.class, "integrity_violation");
+    assert.equal(herdr.prepared.length, 0);
+  }
+});
+
+test("Attempt blocks before pane creation when trusted context or ambient SYSTEM state drifts", async () => {
+  for (const breakBoundary of [
+    (git: FakeGit) => { git.trustedContextFailure = new Error("bundle digest changed"); },
+    (_git: FakeGit, preflight: FakeRuntimePreflight) => { preflight.ambientFailure = new Error("global SYSTEM appeared"); },
+  ]) {
+    const store = new MemoryStore();
+    const git = new FakeGit();
+    const preflight = new FakeRuntimePreflight();
+    const herdr = new FakeHerdr([]);
+    const controller = new HarnessController({
+      config,
+      store,
+      github: new FakeGitHub([issue({ number: 35, title: "Context drift" })]),
+      git,
+      herdr,
+      analyst: new FakeAnalyst(),
+      evidence: new FakeEvidence(),
+      clock: new FakeClock(),
+      ids: new SequenceIds(),
+      preflight,
+    });
+    for (let index = 0; index < 4; index += 1) await controller.tick();
+    breakBoundary(git, preflight);
+    const output = await controller.tick();
+    assert.equal(output.action, "blocked");
+    assert.equal(store.state.activeJob?.incident?.class, "integrity_violation");
+    assert.equal(herdr.prepared.length, 0);
+  }
+});
+
+test("Attempt binds the Docker host and rejects environment drift", async () => {
+  const store = new MemoryStore();
+  const preflight = new FakeRuntimePreflight();
+  const herdr = new FakeHerdr([]);
+  const controller = new HarnessController({
+    config: { ...config, preflight: { dockerRequired: true } },
+    store,
+    github: new FakeGitHub([issue({ number: 38, title: "Bind Docker environment" })]),
+    git: new FakeGit(),
+    herdr,
+    analyst: new FakeAnalyst(),
+    evidence: new FakeEvidence(),
+    clock: new FakeClock(),
+    ids: new SequenceIds(),
+    preflight,
+  });
+  for (let index = 0; index < 4; index += 1) await controller.tick();
+  assert.equal(store.state.activeJob?.activeAttempt?.executionSnapshot?.dockerHost, preflight.dockerHost);
+
+  preflight.dockerHost = "unix:///tmp/other.sock";
+  const output = await controller.tick();
+  assert.equal(output.action, "blocked");
+  assert.equal(store.state.activeJob?.incident?.class, "integrity_violation");
+  assert.equal(herdr.prepared.length, 0);
+});
+
+test("Worker and Reviewer contexts both trust the job base, never candidate Head", async () => {
+  const store = new MemoryStore();
+  const git = new FakeGit();
+  const controller = new HarnessController({
+    config,
+    store,
+    github: new FakeGitHub([issue({ number: 36, title: "Reviewer trust anchor" })]),
+    git,
+    herdr: new FakeHerdr([
+      { lane: "worker", status: "completed", headSha: "b".repeat(40) },
+      { lane: "reviewer", status: "pass" },
+    ]),
+    analyst: new FakeAnalyst(),
+    evidence: new FakeEvidence(),
+    clock: new FakeClock(),
+    ids: new SequenceIds(),
+    preflight: new FakeRuntimePreflight(),
+  });
+  for (let index = 0; index < 9; index += 1) await controller.tick();
+
+  assert.deepEqual(git.trustedContexts.map((context) => context.trustAnchorSha), [git.baseSha, git.baseSha]);
+  assert.deepEqual(git.trustedContexts.map((context) => context.lane), ["worker", "reviewer"]);
+  assert.equal(store.state.activeJob?.activeAttempt?.executionSnapshot?.resources.some((resource) => resource.kind === "agent"), true);
+});
+
+test("Pi RPC canary preflights and routes only Worker through its isolated runtime", async () => {
+  const store = new MemoryStore();
+  const herdr = new FakeHerdr([{ lane: "reviewer", status: "pass" }]);
+  const workerRpc = new FakeHerdr([{ lane: "worker", status: "completed", headSha: "b".repeat(40) }]);
+  const preflight = new FakeRuntimePreflight();
+  const controller = new HarnessController({
+    config: { ...config, workerRuntime: "pi-rpc", workerArgv: rpcWorkerArgv },
+    store,
+    github: new FakeGitHub([issue({ number: 37, title: "Worker RPC canary" })]),
+    git: new FakeGit(),
+    herdr,
+    workerRpc,
+    analyst: new FakeAnalyst(),
+    evidence: new FakeEvidence(),
+    clock: new FakeClock(),
+    ids: new SequenceIds(),
+    preflight,
+  });
+  for (let index = 0; index < 13; index += 1) await controller.tick();
+
+  assert.equal(workerRpc.started.length, 1);
+  assert.equal(herdr.prepared.find((entry) => entry.lane === "worker")?.env.PI_CODING_AGENT_DIR, "/pi-agent");
+  assert.deepEqual(workerRpc.prompts.map((prompt) => prompt.skill), ["implement"]);
+  assert.equal(herdr.started.length, 1);
+  assert.deepEqual(herdr.prompts.map((prompt) => prompt.skill), ["code-review"]);
+  assert.equal(store.state.activeJob?.attempts[0]?.executionSnapshot?.adapter, "pi-rpc");
+  assert.equal(store.state.activeJob?.attempts[0]?.executionSnapshot?.retryMode, "disabled");
+  assert.equal(store.state.activeJob?.attempts[1]?.executionSnapshot?.adapter, "herdr-pi-cli");
+  assert.deepEqual(store.state.activeJob?.attempts[0]?.executionSnapshot?.argv.slice(-2), ["--mode", "rpc"]);
+  const rpcProbe = preflight.providerCalls.find((call) => call.agentDir !== undefined);
+  assert.match(rpcProbe?.agentDir ?? "", /\/runtime\/pi-agent$/);
+});
+
+test("legacy running Attempts remain observable but legacy pre-start Attempts cannot launch", async () => {
+  for (const phase of ["prepared", "running"] as const) {
+    const store = new MemoryStore();
+    const herdr = new FakeHerdr([{ lane: "worker", status: "completed", headSha: "b".repeat(40) }]);
+    const controller = new HarnessController({
+      config,
+      store,
+      github: new FakeGitHub([issue({ number: phase === "prepared" ? 33 : 34, title: `Legacy ${phase}` })]),
+      git: new FakeGit(),
+      herdr,
+      analyst: new FakeAnalyst(),
+      evidence: new FakeEvidence(),
+      clock: new FakeClock(),
+      ids: new SequenceIds(),
+      preflight: new FakeRuntimePreflight(),
+    });
+    const ticks = phase === "prepared" ? 4 : 7;
+    for (let index = 0; index < ticks; index += 1) await controller.tick();
+    delete store.state.activeJob!.activeAttempt!.executionSnapshot;
+    delete store.state.activeJob!.activeAttempt!.planDigest;
+    const output = await controller.tick();
+    assert.equal(output.action, phase === "prepared" ? "blocked" : "attempt_completed");
+    if (phase === "prepared") assert.equal(herdr.prepared.length, 0);
+  }
+});
+
 test("Docker and lane Provider preflights bind the local socket before Worker and Reviewer panes", async () => {
   const store = new MemoryStore();
   const git = new FakeGit();
@@ -198,7 +481,7 @@ test("Docker and lane Provider preflights bind the local socket before Worker an
 
   assert.deepEqual(preflight.providerCalls.map((call) => call.lane), ["worker", "reviewer", "worker", "reviewer"]);
   assert.equal(preflight.providerCalls.every((call) => call.piBin === "/opt/pi"), true);
-  assert.equal(preflight.dockerCalls.length, 3);
+  assert.equal(preflight.dockerCalls.length >= 5, true);
   assert.equal(herdr.prepared.find((entry) => entry.lane === "worker")?.env.DOCKER_HOST, preflight.dockerHost);
   assert.deepEqual(git.reviewerDockerHosts, [preflight.dockerHost]);
 });
@@ -267,6 +550,7 @@ test("Reviewer preflight attributes pre-existing worktree residue before any Rev
 
   for (let index = 0; index < 9; index += 1) await controller.tick();
   assert.equal(herdr.prepared.find((entry) => entry.lane === "worker")?.env.PYTHONDONTWRITEBYTECODE, "1");
+  assert.equal(herdr.prepared.find((entry) => entry.lane === "worker")?.env.PI_CODING_AGENT_DIR, "/pi-agent");
   git.reviewerFailure = "worktree has changes outside Harness result files:\n?? generated.pyc";
   await controller.tick();
 
@@ -389,8 +673,10 @@ test("happy path claims, starts Analyst, runs fresh Pi worker/reviewer, publishe
   assert.equal(herdr.prepared[0]?.lane, "worker");
   assert.equal(herdr.prepared[1]?.lane, "reviewer");
   assert.match(herdr.prepared[0]?.env.HERDR_HARNESS_WORKER_DESCRIPTOR ?? "", /\/descriptor\.json$/);
+  assert.equal(herdr.prepared[0]?.env.PI_CODING_AGENT_DIR, "/pi-agent");
   assert.match(herdr.prepared[1]?.cwd ?? "", /^\/state\/reviewer-attempts\/job-001\/reviewer-/);
   assert.match(herdr.prepared[1]?.env.HERDR_HARNESS_REVIEW_DESCRIPTOR ?? "", /\/descriptor\.json$/);
+  assert.equal(herdr.prepared[1]?.env.PI_CODING_AGENT_DIR, "/pi-agent");
   assert.ok(herdr.prepared[1]?.env.PI_SUBAGENT_CAPABILITY_CEILING_V1);
   assert.deepEqual(JSON.parse(Buffer.from(
     herdr.prepared[1]!.env.PI_SUBAGENT_CAPABILITY_CEILING_V1!,

@@ -9,6 +9,7 @@ import { HerdrCli } from "./adapters/herdr-cli.js";
 import { JsonCommandAnalyst } from "./adapters/json-command-analyst.js";
 import { JsonStateStore } from "./adapters/json-store.js";
 import { LocalEvidence } from "./adapters/local-evidence.js";
+import { PiRpcRuntime } from "./adapters/pi-rpc-runtime.js";
 import { RuntimePreflightCli } from "./adapters/runtime-preflight.js";
 import { HarnessController } from "./controller.js";
 import { startControllerHeartbeat } from "./controller-heartbeat.js";
@@ -97,12 +98,14 @@ async function main(argv) {
         throw new Error(`unknown command: ${command}`);
     const lease = acquireControllerLease(config.stateDir);
     try {
+        const herdr = new HerdrCli(config.herdr);
         const controller = new HarnessController({
             config,
             store,
             github: new GitHubGh(new SyncCommandRunner(), config.autoMerge === true),
             git: new GitCli(),
-            herdr: new HerdrCli(config.herdr),
+            herdr,
+            workerRpc: new PiRpcRuntime(herdr),
             analyst: new JsonCommandAnalyst(config.analyst.command, config.analyst.argv ?? []),
             evidence: new LocalEvidence(),
             preflight: new RuntimePreflightCli(),

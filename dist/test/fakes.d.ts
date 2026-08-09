@@ -1,12 +1,14 @@
-import { type AnalystSession, type AnalystTurn, type AttemptResult, type EvidenceItem, type EvidenceRequest, type HarnessState, type IssueSnapshot, type Job, type PullRequestCheck, type PullRequestObservation, type PullRequestRef, type SelectedTask } from "../src/model.js";
+import { type AnalystSession, type AnalystTurn, type AttemptResult, type EvidenceItem, type EvidenceRequest, type ExecutionContext, type ExecutionResource, type HarnessState, type IssueSnapshot, type Job, type PullRequestCheck, type PullRequestObservation, type PullRequestRef, type SelectedTask } from "../src/model.js";
 import type { AnalystPort, Clock, EvidencePort, GitHubPort, GitPort, HerdrPort, IdGenerator, RuntimePreflightPort, StateStore } from "../src/ports.js";
 export declare const validCodeReviewSkillPath: string;
 export declare const validFocusedSelfCheckSkillPath: string;
+export declare const validTddSkillPath: string;
 export declare const validPiSubagentsExtensionPath: string;
 export declare const validWorkerToolsExtensionPath: string;
+export declare const validReviewerSubagentConfigExtensionPath: string;
 export declare const validReviewerToolsExtensionPath: string;
 export declare const validImplementSkillPath: string;
-export declare const validTddSkillPath: string;
+export declare const substituteTddSkillPath: string;
 export declare const substituteCodeReviewSkillPath: string;
 export declare const untrustedImplementSkillPath: string;
 export declare const validWorkerArgv: string[];
@@ -20,21 +22,41 @@ export declare class SequenceIds implements IdGenerator {
     next(prefix: string): string;
 }
 export declare class FakeRuntimePreflight implements RuntimePreflightPort {
+    inspectionCalls: Array<{
+        cwd: string;
+        piBin: string;
+    }>;
     providerCalls: Array<{
         lane: "worker" | "reviewer";
         cwd: string;
         roleArgv: string[];
         piBin: string;
+        agentDir?: string;
     }>;
     dockerCalls: string[];
     providerFailure: Error | null;
     dockerFailure: Error | null;
     dockerHost: string;
+    executable: string;
+    version: string;
+    agentDir: string;
+    ambientFailure: Error | null;
+    inspectPi(input: {
+        cwd: string;
+        piBin: string;
+    }): Promise<{
+        executable: string;
+        version: string;
+    }>;
+    assertNoAmbientSystemPrompt(): Promise<{
+        agentDir: string;
+    }>;
     probeProvider(input: {
         lane: "worker" | "reviewer";
         cwd: string;
         roleArgv: string[];
         piBin: string;
+        agentDir?: string;
     }): Promise<void>;
     probeDocker(input: {
         cwd: string;
@@ -114,6 +136,8 @@ export declare class FakeGit implements GitPort {
     reviewerFailure: string | null;
     reviewerValidationArgv: string[][];
     reviewerDockerHosts: Array<string | null>;
+    trustedContexts: ExecutionContext[];
+    trustedContextFailure: Error | null;
     workerVerifications: Array<{
         reportedHeadSha: string;
         expectedRemoteHeadSha: string | null;
@@ -147,10 +171,20 @@ export declare class FakeGit implements GitPort {
     }): Promise<{
         descriptorPath: string;
     }>;
+    prepareTrustedContext(input: {
+        rootPath: string;
+        trustAnchorSha: string;
+        lane: "worker" | "reviewer";
+        agentDir: string;
+    }): Promise<ExecutionContext>;
+    verifyTrustedContext(): Promise<void>;
     prepareReviewer(input: {
         rootPath: string;
         validationArgv: string[];
         dockerHost: string | null;
+        reviewAxisAgent: ExecutionResource;
+        piExecutable: string;
+        piRuntimeVersion: string;
     }): Promise<{
         reviewPath: string;
         descriptorPath: string;
@@ -198,6 +232,11 @@ export declare class FakeHerdr implements HerdrPort {
         };
     }>;
     started: string[];
+    startedArgv: string[][];
+    paneCommands: Array<{
+        command: string;
+        argv: string[];
+    }>;
     prompts: Array<{
         dispatchId: string;
         skill: "implement" | "code-review";
@@ -242,6 +281,11 @@ export declare class FakeHerdr implements HerdrPort {
         handle: {
             agentName: string;
         };
+        argv: string[];
+    }): Promise<void>;
+    runInPane(input: {
+        command: string;
+        argv: string[];
     }): Promise<void>;
     prompt(input: {
         dispatchId: string;

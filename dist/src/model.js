@@ -143,6 +143,12 @@ export function assertJobInvariant(job) {
         !/^[0-9a-f]{40}$/i.test(job.activeAttempt.expectedRemoteHeadSha)) {
         throw new Error("attempt has an invalid remote HEAD anchor");
     }
+    if (job.activeAttempt?.planDigest !== undefined && !/^[0-9a-f]{64}$/i.test(job.activeAttempt.planDigest)) {
+        throw new Error("attempt has an invalid plan digest");
+    }
+    if (job.activeAttempt?.executionSnapshot !== undefined && job.activeAttempt.planDigest === undefined) {
+        throw new Error("attempt execution snapshot requires a plan digest");
+    }
     const reconciliationAttempts = job.activeAttempt?.reconciliationAttempts ?? 0;
     if (!Number.isInteger(reconciliationAttempts)
         || reconciliationAttempts < 0

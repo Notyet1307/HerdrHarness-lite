@@ -2,17 +2,23 @@ import { join, resolve } from "node:path";
 import { digest } from "../src/model.js";
 export const validCodeReviewSkillPath = resolve("pi/skills/code-review");
 export const validFocusedSelfCheckSkillPath = resolve("pi/skills/focused-self-check");
+export const validTddSkillPath = resolve("pi/skills/tdd");
 export const validPiSubagentsExtensionPath = resolve("test/fixtures/pi-subagents/index.js");
 export const validWorkerToolsExtensionPath = resolve("pi/extensions/worker-tools.js");
+export const validReviewerSubagentConfigExtensionPath = resolve("pi/extensions/reviewer-subagent-config.js");
 export const validReviewerToolsExtensionPath = resolve("pi/extensions/reviewer-tools.js");
 export const validImplementSkillPath = resolve("test/fixtures/pi-skills/skills/implement");
-export const validTddSkillPath = resolve("test/fixtures/pi-skills/skills/tdd");
+export const substituteTddSkillPath = resolve("test/fixtures/pi-skills/skills/tdd");
 export const substituteCodeReviewSkillPath = resolve("test/fixtures/substitute-review/other/SKILL.md");
 export const untrustedImplementSkillPath = resolve("test/fixtures/untrusted-skills/skills/implement");
 export const validWorkerArgv = [
     "--no-approve",
     "--no-skills",
+    "--no-session",
     "--no-extensions",
+    "--no-context-files",
+    "--no-prompt-templates",
+    "--no-themes",
     "--extension", validWorkerToolsExtensionPath,
     "--skill", validImplementSkillPath,
     "--skill", validTddSkillPath,
@@ -23,7 +29,12 @@ export const validWorkerArgv = [
 export const validReviewerArgv = [
     "--no-approve",
     "--no-skills",
+    "--no-session",
     "--no-extensions",
+    "--no-context-files",
+    "--no-prompt-templates",
+    "--no-themes",
+    "--extension", validReviewerSubagentConfigExtensionPath,
     "--extension", validPiSubagentsExtensionPath,
     "--extension", validReviewerToolsExtensionPath,
     "--skill", validCodeReviewSkillPath,
@@ -45,11 +56,25 @@ export class SequenceIds {
     }
 }
 export class FakeRuntimePreflight {
+    inspectionCalls = [];
     providerCalls = [];
     dockerCalls = [];
     providerFailure = null;
     dockerFailure = null;
     dockerHost = "unix:///tmp/docker.sock";
+    executable = "/opt/pi";
+    version = "0.84.0";
+    agentDir = "/pi-agent";
+    ambientFailure = null;
+    async inspectPi(input) {
+        this.inspectionCalls.push(input);
+        return { executable: this.executable, version: this.version };
+    }
+    async assertNoAmbientSystemPrompt() {
+        if (this.ambientFailure)
+            throw this.ambientFailure;
+        return { agentDir: this.agentDir };
+    }
     async probeProvider(input) {
         this.providerCalls.push({ ...input, roleArgv: [...input.roleArgv] });
         if (this.providerFailure)
@@ -152,6 +177,8 @@ export class FakeGit {
     reviewerFailure = null;
     reviewerValidationArgv = [];
     reviewerDockerHosts = [];
+    trustedContexts = [];
+    trustedContextFailure = null;
     workerVerifications = [];
     async refreshBase() {
         return this.baseSha;
@@ -176,13 +203,33 @@ export class FakeGit {
     async prepareWorkerResult(input) {
         return { descriptorPath: join(input.rootPath, "descriptor.json") };
     }
+    async prepareTrustedContext(input) {
+        const context = {
+            version: 1,
+            mode: "explicit-v1",
+            lane: input.lane,
+            trustAnchorSha: input.trustAnchorSha,
+            entries: [],
+            bundlePath: join(input.rootPath, "trusted-context.md"),
+            bundleDigest: "c".repeat(64),
+            manifestPath: join(input.rootPath, "trusted-context.json"),
+            manifestDigest: "d".repeat(64),
+            agentDir: input.agentDir,
+        };
+        this.trustedContexts.push(context);
+        return context;
+    }
+    async verifyTrustedContext() {
+        if (this.trustedContextFailure)
+            throw this.trustedContextFailure;
+    }
     async prepareReviewer(input) {
         this.reviewerValidationArgv.push([...input.validationArgv]);
         this.reviewerDockerHosts.push(input.dockerHost);
         return {
-            reviewPath: join(input.rootPath, "source"),
-            descriptorPath: join(input.rootPath, "descriptor.json"),
-            evidencePath: join(input.rootPath, "review-evidence.txt"),
+            reviewPath: join(input.rootPath, "workspace", "source"),
+            descriptorPath: join(input.rootPath, "workspace", "descriptor.json"),
+            evidencePath: join(input.rootPath, "workspace", "review-evidence.txt"),
         };
     }
     async verifyReviewer() {
@@ -195,6 +242,8 @@ export class FakeHerdr {
     outcomes;
     prepared = [];
     started = [];
+    startedArgv = [];
+    paneCommands = [];
     prompts = [];
     closed = [];
     promptFailureAfterDispatch = null;
@@ -220,6 +269,10 @@ export class FakeHerdr {
     }
     async startAgent(input) {
         this.started.push(input.handle.agentName);
+        this.startedArgv.push([...input.argv]);
+    }
+    async runInPane(input) {
+        this.paneCommands.push({ command: input.command, argv: [...input.argv] });
     }
     async prompt(input) {
         this.prompts.push({ dispatchId: input.dispatchId, skill: input.skill, text: input.text });

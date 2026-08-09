@@ -188,6 +188,16 @@ export class HerdrCli implements HerdrPort {
     if (object(startedValue.agent).interactive_ready !== true) throw new Error("Herdr agent is not ready for interactive input");
   }
 
+  async runInPane(input: { handle: AgentHandle; command: string; argv: string[] }): Promise<void> {
+    if (!input.command.trim() || /[\0\r\n]/.test(input.command) || input.argv.some((value) => /[\0\r\n]/.test(value))) {
+      throw new Error("invalid Herdr pane command");
+    }
+    requireSuccess(
+      this.runner.run(this.bin, this.args(["pane", "run", input.handle.paneId, "exec", input.command, ...input.argv])),
+      "herdr pane run",
+    );
+  }
+
   async prompt(input: {
     handle: AgentHandle;
     dispatchId: string;

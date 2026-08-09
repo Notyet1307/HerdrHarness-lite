@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { Buffer } from "node:buffer";
 import { basename, dirname, isAbsolute, resolve } from "node:path";
+import { attemptPlanDigest, buildExecutionSnapshot, executionPlanMatches } from "./attempt-plan.js";
 import { selectNextTask } from "./eligibility.js";
 import {
   assertJobInvariant,
@@ -16,6 +17,7 @@ import {
   type AttemptResult,
   type CiFailure,
   type EvidenceItem,
+  type ExecutionSnapshot,
   type HarnessState,
   type Incident,
   type Job,
@@ -26,6 +28,7 @@ import {
 import { allowedActionsFor, buildEvidencePack, isDecisionResolutionEligible, makeIncident, validateAttemptResult } from "./policy.js";
 import type {
   AnalystPort,
+  AttemptRuntimePort,
   Clock,
   EvidencePort,
   GitHubPort,
@@ -38,14 +41,20 @@ import type {
 } from "./ports.js";
 import { reviewerPrompt, workerPrompt } from "./prompts.js";
 import { pathIsWithin, pathsOverlap } from "./path-safety.js";
+import { piRpcAgentDir } from "./pi-rpc-spool.js";
 
 const BUNDLED_CODE_REVIEW_SKILL = resolve(import.meta.dirname, "../../pi/skills/code-review");
 const BUNDLED_FOCUSED_SELF_CHECK_SKILL = resolve(import.meta.dirname, "../../pi/skills/focused-self-check");
+const BUNDLED_TDD_SKILL = resolve(import.meta.dirname, "../../pi/skills/tdd");
 const BUNDLED_WORKER_TOOLS_EXTENSION = resolve(import.meta.dirname, "../../pi/extensions/worker-tools.js");
+const BUNDLED_REVIEW_SUBAGENT_CONFIG_EXTENSION = resolve(import.meta.dirname, "../../pi/extensions/reviewer-subagent-config.js");
 const BUNDLED_REVIEWER_TOOLS_EXTENSION = resolve(import.meta.dirname, "../../pi/extensions/reviewer-tools.js");
+const BUNDLED_REVIEW_AXIS_AGENT = resolve(import.meta.dirname, "../../pi/agents/herdr-harness-review-axis.md");
 const WORKER_DESCRIPTOR_ENV = "HERDR_HARNESS_WORKER_DESCRIPTOR";
 const REVIEW_DESCRIPTOR_ENV = "HERDR_HARNESS_REVIEW_DESCRIPTOR";
+const PI_AGENT_DIR_ENV = "PI_CODING_AGENT_DIR";
 const REVIEW_SUBAGENT_CEILING_ENV = "PI_SUBAGENT_CAPABILITY_CEILING_V1";
+const SUPPORTED_PI_SUBAGENTS_VERSION = "0.42.1";
 const REVIEW_SUBAGENT_CEILING = Buffer.from(JSON.stringify({
   version: 1,
   allowedTools: ["find", "grep", "ls", "read"],
@@ -96,6 +105,7 @@ type Dependencies = {
   clock: Clock;
   ids: IdGenerator;
   preflight: RuntimePreflightPort;
+  workerRpc?: AttemptRuntimePort;
 };
 
 /**
@@ -106,6 +116,9 @@ type Dependencies = {
 export class HarnessController {
   constructor(private readonly deps: Dependencies) {
     validateConfig(deps.config);
+    if (deps.config.workerRuntime === "pi-rpc" && !deps.workerRpc) {
+      throw new Error("workerRuntime=pi-rpc requires the Worker RPC adapter");
+    }
   }
 
   async tick(): Promise<TickResult> {
@@ -348,8 +361,48 @@ export class HarnessController {
       startedAt: now,
       completedAt: null,
     };
+    let executionSnapshot: ExecutionSnapshot;
+    try {
+      const ambient = await this.deps.preflight.assertNoAmbientSystemPrompt({ cwd: job.worktree.path });
+      const context = await this.deps.git.prepareTrustedContext({
+        localPath: this.deps.config.localPath,
+        rootPath: attemptRoot,
+        trustAnchorSha: job.baseSha,
+        jobId: job.id,
+        attemptId,
+        lane,
+        agentDir: ambient.agentDir,
+      });
+      const runtime = await this.deps.preflight.inspectPi({
+        cwd: this.deps.config.localPath,
+        piBin: this.deps.config.preflight?.piBin ?? "pi",
+      });
+      const dockerHost = this.deps.config.preflight?.dockerRequired === true
+        ? (await this.deps.preflight.probeDocker({ cwd: this.deps.config.localPath })).host
+        : null;
+      executionSnapshot = buildExecutionSnapshot({
+        adapter: lane === "worker" && this.deps.config.workerRuntime === "pi-rpc" ? "pi-rpc" : "herdr-pi-cli",
+        executable: runtime.executable,
+        runtimeVersion: runtime.version,
+        argv: [
+          ...(lane === "worker" ? this.deps.config.workerArgv : this.deps.config.reviewerArgv),
+          "--append-system-prompt",
+          context.bundlePath,
+          ...(lane === "worker" && this.deps.config.workerRuntime === "pi-rpc" ? ["--mode", "rpc"] : []),
+        ],
+        context,
+        retryMode: lane === "worker" && this.deps.config.workerRuntime === "pi-rpc" ? "disabled" : "runtime-default",
+        compactionMode: lane === "worker" && this.deps.config.workerRuntime === "pi-rpc" ? "disabled" : "runtime-default",
+        dockerHost,
+        extraResources: lane === "reviewer" ? [{ kind: "agent", path: BUNDLED_REVIEW_AXIS_AGENT }] : [],
+      });
+    } catch (error) {
+      return result(false, "preflight_failed", job.id, message(error));
+    }
+    attempt = { ...attempt, executionSnapshot };
     const prompt = lane === "worker" ? workerPrompt(job, attempt) : reviewerPrompt(job, attempt);
     attempt = { ...attempt, promptDigest: digest(prompt) };
+    attempt = { ...attempt, planDigest: attemptPlanDigest(attempt) };
     const next = evolveJob(job, now, {
       state: lane === "worker" ? "worker_running" : "reviewer_running",
       activeAttempt: attempt,
@@ -370,6 +423,34 @@ export class HarnessController {
       });
     }
 
+    if (!attempt.executionSnapshot || !attempt.planDigest) {
+      if (attempt.phase !== "running") {
+        return this.block(state, job, {
+          class: "integrity_violation",
+          lane,
+          summary: "legacy attempt has no immutable execution plan and cannot produce new runtime side effects",
+          attemptResult: null,
+        });
+      }
+    } else if (!executionPlanMatches(attempt)) {
+      return this.block(state, job, {
+        class: "integrity_violation",
+        lane,
+        summary: "attempt execution plan changed after preparation",
+        attemptResult: null,
+      });
+    } else if (!attempt.executionSnapshot.context && attempt.phase !== "running") {
+      return this.block(state, job, {
+        class: "integrity_violation",
+        lane,
+        summary: "attempt has no explicit trusted context and cannot produce new runtime side effects",
+        attemptResult: null,
+      });
+    } else if (attempt.phase !== "running") {
+      const integrityBlock = await this.verifyExecutionSnapshot(state, job, attempt);
+      if (integrityBlock) return integrityBlock;
+    }
+
     if (attempt.phase === "prepared") {
       if (lane === "reviewer") {
         const integrityBlock = await this.verifyReviewerPreflight(
@@ -381,12 +462,18 @@ export class HarnessController {
         );
         if (integrityBlock) return integrityBlock;
       }
-      const preflight = await this.runRuntimePreflight([lane], job.id);
+      const preflight = await this.runRuntimePreflight([lane], job.id, attempt.executionSnapshot);
       if (!preflight.ok) return preflight.result;
       let handle;
       try {
         let cwd = job.worktree.path;
-        let env: Record<string, string> = lane === "worker" ? { PYTHONDONTWRITEBYTECODE: "1" } : {};
+        let env: Record<string, string> = lane === "worker"
+          ? {
+              PYTHONDONTWRITEBYTECODE: "1",
+              [PI_AGENT_DIR_ENV]: attempt.executionSnapshot!.context!.agentDir,
+              DOCKER_HOST: preflight.dockerHost ?? "",
+            }
+          : {};
         if (lane === "worker") {
           const channel = await this.deps.git.prepareWorkerResult({
             worktree: job.worktree,
@@ -396,7 +483,6 @@ export class HarnessController {
             attemptId: attempt.id,
           });
           env[WORKER_DESCRIPTOR_ENV] = channel.descriptorPath;
-          if (preflight.dockerHost) env.DOCKER_HOST = preflight.dockerHost;
         }
         if (lane === "reviewer") {
           if (!attempt.expectedHeadSha) throw new Error("Reviewer attempt has no expected HEAD");
@@ -408,6 +494,8 @@ export class HarnessController {
               attemptResult: null,
             });
           }
+          const reviewAxisAgents = attempt.executionSnapshot!.resources.filter((resource) => resource.kind === "agent");
+          if (reviewAxisAgents.length !== 1) throw new Error("Reviewer execution snapshot must bind exactly one child agent");
           const workspace = await this.deps.git.prepareReviewer({
             worktree: job.worktree,
             rootPath: dirname(attempt.resultPath),
@@ -418,11 +506,16 @@ export class HarnessController {
             expectedHeadSha: attempt.expectedHeadSha,
             validationArgv: attempt.reviewerValidationArgv,
             dockerHost: preflight.dockerHost,
+            reviewAxisAgent: reviewAxisAgents[0]!,
+            piExecutable: attempt.executionSnapshot!.executable,
+            piRuntimeVersion: attempt.executionSnapshot!.runtimeVersion,
           });
           cwd = workspace.reviewPath;
           env = {
             [REVIEW_DESCRIPTOR_ENV]: workspace.descriptorPath,
             [REVIEW_SUBAGENT_CEILING_ENV]: REVIEW_SUBAGENT_CEILING,
+            [PI_AGENT_DIR_ENV]: attempt.executionSnapshot!.context!.agentDir,
+            DOCKER_HOST: preflight.dockerHost ?? "",
           };
         }
         handle = await this.deps.herdr.createAttemptPane({
@@ -442,9 +535,11 @@ export class HarnessController {
 
     if (attempt.phase === "pane_ready" && attempt.handle) {
       try {
-        await this.deps.herdr.startAgent({
+        await this.runtimeFor(attempt).startAgent({
           handle: attempt.handle,
-          argv: lane === "worker" ? this.deps.config.workerArgv : this.deps.config.reviewerArgv,
+          attempt,
+          cwd: this.attemptCwd(job, attempt),
+          argv: attempt.executionSnapshot!.argv,
         });
       } catch (error) {
         return this.reconcileAttemptOrBlock(state, job, attempt, `Herdr ${lane} start failed: ${message(error)}`);
@@ -469,8 +564,9 @@ export class HarnessController {
       const next = evolveJob(job, this.deps.clock.now(), { activeAttempt: running, lastError: null });
       await this.saveJob(state, job, next);
       try {
-        await this.deps.herdr.prompt({
+        await this.runtimeFor(attempt).prompt({
           handle: attempt.handle,
+          attempt,
           dispatchId: attempt.id,
           skill: lane === "worker" ? "implement" : "code-review",
           text: prompt,
@@ -497,8 +593,9 @@ export class HarnessController {
 
     let observation;
     try {
-      observation = await this.deps.herdr.wait({
+      observation = await this.runtimeFor(attempt).wait({
         handle: attempt.handle,
+        attempt,
         resultPath: attempt.resultPath,
         expectedJobId: job.id,
         expectedAttemptId: attempt.id,
@@ -576,21 +673,26 @@ export class HarnessController {
   private async runRuntimePreflight(
     lanes: Attempt["lane"][],
     jobId: string | null,
+    executionSnapshot?: ExecutionSnapshot,
   ): Promise<
     | { ok: true; dockerHost: string | null }
     | { ok: false; result: TickResult }
   > {
-    let dockerHost: string | null = null;
+    let dockerHost: string | null = executionSnapshot?.dockerHost ?? null;
     try {
-      if (this.deps.config.preflight?.dockerRequired === true) {
+      if (!executionSnapshot && this.deps.config.preflight?.dockerRequired === true) {
         dockerHost = (await this.deps.preflight.probeDocker({ cwd: this.deps.config.localPath })).host;
       }
+      const rpcAgentDir = executionSnapshot?.adapter === "pi-rpc"
+        ? piRpcAgentDir(executionSnapshot)
+        : undefined;
       for (const lane of lanes) {
         await this.deps.preflight.probeProvider({
           lane,
           cwd: this.deps.config.localPath,
-          roleArgv: lane === "worker" ? this.deps.config.workerArgv : this.deps.config.reviewerArgv,
-          piBin: this.deps.config.preflight?.piBin ?? "pi",
+          roleArgv: executionSnapshot?.argv ?? (lane === "worker" ? this.deps.config.workerArgv : this.deps.config.reviewerArgv),
+          piBin: executionSnapshot?.executable ?? this.deps.config.preflight?.piBin ?? "pi",
+          ...(rpcAgentDir ? { agentDir: rpcAgentDir } : {}),
         });
       }
       return { ok: true, dockerHost };
@@ -600,6 +702,73 @@ export class HarnessController {
         result: result(false, "preflight_failed", jobId, message(error)),
       };
     }
+  }
+
+  private async verifyExecutionSnapshot(
+    state: HarnessState,
+    job: Job,
+    attempt: Attempt,
+  ): Promise<TickResult | null> {
+    const expected = attempt.executionSnapshot!;
+    try {
+      const ambient = await this.deps.preflight.assertNoAmbientSystemPrompt({ cwd: job.worktree!.path });
+      if (!expected.context || ambient.agentDir !== expected.context.agentDir) {
+        throw new Error("Pi agent directory changed after attempt preparation");
+      }
+      await this.deps.git.verifyTrustedContext(expected.context);
+      if (expected.dockerHost !== null) {
+        const docker = await this.deps.preflight.probeDocker({ cwd: this.deps.config.localPath });
+        if (docker.host !== expected.dockerHost) throw new Error("Docker host changed after attempt preparation");
+      }
+      const runtime = await this.deps.preflight.inspectPi({ cwd: this.deps.config.localPath, piBin: expected.executable });
+      const observed = buildExecutionSnapshot({
+        adapter: expected.adapter,
+        executable: runtime.executable,
+        runtimeVersion: runtime.version,
+        argv: expected.argv,
+        retryMode: expected.retryMode,
+        compactionMode: expected.compactionMode,
+        dockerHost: expected.dockerHost,
+        context: expected.context,
+        extraResources: expected.resources
+          .filter((resource) => resource.kind === "agent")
+          .map((resource) => ({ kind: "agent" as const, path: resource.path })),
+      });
+      if (digest(observed) === digest(expected)) return null;
+    } catch (error) {
+      return this.block(state, job, {
+        class: "integrity_violation",
+        lane: attempt.lane,
+        summary: `attempt execution snapshot cannot be verified: ${message(error)}`,
+        attemptResult: null,
+      });
+    }
+    return this.block(state, job, {
+      class: "integrity_violation",
+      lane: attempt.lane,
+      summary: "Pi executable, version, arguments, or resources changed after attempt preparation",
+      attemptResult: null,
+    });
+  }
+
+  private runtimeFor(attempt: Attempt): AttemptRuntimePort {
+    if (attempt.executionSnapshot?.adapter === "pi-rpc") {
+      if (!this.deps.workerRpc || attempt.lane !== "worker") throw new Error("Pi RPC is only available for Worker attempts");
+      return this.deps.workerRpc;
+    }
+    return this.deps.herdr;
+  }
+
+  private attemptCwd(job: Job, attempt: Attempt): string {
+    if (!job.worktree) throw new Error("attempt has no worktree cwd");
+    return attempt.lane === "worker" ? job.worktree.path : resolve(dirname(attempt.resultPath), "source");
+  }
+
+  private async closeAttempt(attempt: Attempt, reason: "completed" | "recovery" | "cancelled"): Promise<void> {
+    if (!attempt.handle) throw new Error("attempt has no pane identity");
+    const runtime = this.runtimeFor(attempt);
+    if (runtime.terminate) await runtime.terminate({ handle: attempt.handle, attempt, reason });
+    await this.deps.herdr.close(attempt.handle);
   }
 
   private async verifyReviewerIntegrity(
@@ -811,7 +980,7 @@ export class HarnessController {
       return result(false, "attempt_completed", job.id, `${attempt.lane} pane identity is missing; completion was not recorded`);
     }
     try {
-      await this.deps.herdr.close(attempt.handle);
+      await this.closeAttempt(attempt, "completed");
       return null;
     } catch (error) {
       return result(false, "attempt_completed", job.id, `${attempt.lane} pane close is not confirmed: ${message(error)}`);
@@ -1054,8 +1223,9 @@ export class HarnessController {
 
     let observation;
     try {
-      observation = await this.deps.herdr.wait({
+      observation = await this.runtimeFor(attempt).wait({
         handle: attempt.handle,
+        attempt,
         resultPath: attempt.resultPath,
         expectedJobId: job.id,
         expectedAttemptId: attempt.id,
@@ -1305,7 +1475,7 @@ export class HarnessController {
 
     if (job.activeAttempt?.handle) {
       try {
-        await this.deps.herdr.close(job.activeAttempt.handle);
+        await this.closeAttempt(job.activeAttempt, "recovery");
       } catch (error) {
         return result(false, "recovery_applied", job.id, `old agent could not be closed safely: ${message(error)}`);
       }
@@ -1343,7 +1513,7 @@ export class HarnessController {
   private async archive(state: HarnessState, job: Job): Promise<TickResult> {
     if (job.state === "cancelled") {
       try {
-        if (job.activeAttempt?.handle) await this.deps.herdr.close(job.activeAttempt.handle);
+        if (job.activeAttempt?.handle) await this.closeAttempt(job.activeAttempt, "cancelled");
         await this.deps.github.requeueIssue({
           repo: this.deps.config.repo,
           issueNumber: job.task.issueNumber,
@@ -1520,6 +1690,15 @@ function validateConfig(config: HarnessConfig): void {
       throw new Error("preflight.dockerRequired must be boolean");
     }
   }
+  if (config.workerRuntime !== undefined && config.workerRuntime !== "herdr-pi-cli" && config.workerRuntime !== "pi-rpc") {
+    throw new Error("workerRuntime must be herdr-pi-cli or pi-rpc");
+  }
+  if (config.workerRuntime === "pi-rpc" && (
+    flagValues(config.workerArgv, "--provider").length !== 1
+    || flagValues(config.workerArgv, "--model").length !== 1
+  )) {
+    throw new Error("workerRuntime=pi-rpc requires one explicit --provider and one exact --model ID");
+  }
   validatePiRoleArgv(
     "workerArgv",
     config.workerArgv,
@@ -1549,6 +1728,9 @@ function validatePiRoleArgv(
   validateAllowedPiArgv(argv, fail);
   if (!argv.includes("--no-approve")) fail("--no-approve is required");
   if (!argv.includes("--no-skills")) fail("--no-skills is required");
+  for (const flag of ["--no-session", "--no-context-files", "--no-prompt-templates", "--no-themes"]) {
+    if (argv.filter((argument) => argument === flag).length !== 1) fail(`exactly one ${flag} is required`);
+  }
   if (name === "reviewerArgv") {
     validateReviewerExtensions(argv, fail);
   } else {
@@ -1578,11 +1760,14 @@ function validatePiRoleArgv(
   )) {
     fail("focused-self-check must resolve to the bundled Harness skill");
   }
-  for (const skillName of ["implement", "tdd"]) {
-    if (!skills.includes(skillName)) continue;
-    const matches = loadedSkillIdentities.filter((skill) => skill.name === skillName);
+  const tddSkills = loadedSkillIdentities.filter((skill) => skill.name === "tdd");
+  if (skills.includes("tdd") && (tddSkills.length !== 1 || tddSkills[0]!.directory !== BUNDLED_TDD_SKILL)) {
+    fail("tdd must resolve to the bundled Harness context-closed adapter");
+  }
+  if (skills.includes("implement")) {
+    const matches = loadedSkillIdentities.filter((skill) => skill.name === "implement");
     if (matches.length !== 1 || !hasMattPocockProvenance(matches[0]!)) {
-      fail(`${skillName} must come from the installed mattpocock/skills package`);
+      fail("implement must come from the installed mattpocock/skills package");
     }
   }
   const toolValues = flagValues(argv, "--tools");
@@ -1611,7 +1796,15 @@ function flagValues(argv: string[], flag: string): string[] {
 
 function validateAllowedPiArgv(argv: string[], fail: (reason: string) => never): void {
   const valueFlags = new Set(["--skill", "--tools", "--thinking", "--provider", "--model", "--extension"]);
-  const booleanFlags = new Set(["--no-approve", "--no-skills", "--no-session", "--no-extensions"]);
+  const booleanFlags = new Set([
+    "--no-approve",
+    "--no-skills",
+    "--no-session",
+    "--no-extensions",
+    "--no-context-files",
+    "--no-prompt-templates",
+    "--no-themes",
+  ]);
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index]!;
     if (booleanFlags.has(argument)) continue;
@@ -1627,15 +1820,17 @@ function validateReviewerExtensions(argv: string[], fail: (reason: string) => ne
     fail("exactly one --no-extensions is required");
   }
   const extensions = flagValues(argv, "--extension");
-  if (extensions.length !== 2 || extensions.some((path) => !isAbsolute(path))) {
-    fail("exactly two absolute --extension paths are required");
+  if (extensions.length !== 3 || extensions.some((path) => !isAbsolute(path))) {
+    fail("exactly three absolute --extension paths are required");
   }
-  if (extensions.filter((path) => resolve(path) === BUNDLED_REVIEWER_TOOLS_EXTENSION).length !== 1) {
-    fail("reviewer-tools must resolve to the bundled Harness extension");
+  if (resolve(extensions[0]!) !== BUNDLED_REVIEW_SUBAGENT_CONFIG_EXTENSION) {
+    fail("Reviewer subagent config isolation must load first");
   }
-  const subagents = extensions.filter((path) => resolve(path) !== BUNDLED_REVIEWER_TOOLS_EXTENSION);
-  if (subagents.length !== 1 || !isPiSubagentsExtension(subagents[0]!)) {
-    fail("the other Reviewer extension must be the declared pi-subagents package entrypoint");
+  if (!isPiSubagentsExtension(extensions[1]!)) {
+    fail("pi-subagents must load after the config isolator");
+  }
+  if (resolve(extensions[2]!) !== BUNDLED_REVIEWER_TOOLS_EXTENSION) {
+    fail("reviewer-tools must load after pi-subagents and restore the Pi agent directory");
   }
 }
 
@@ -1645,11 +1840,13 @@ function isPiSubagentsExtension(path: string): boolean {
   try {
     const manifest = JSON.parse(readFileSync(resolve(packageRoot, "package.json"), "utf8")) as {
       name?: unknown;
+      version?: unknown;
       pi?: { extensions?: unknown };
       exports?: Record<string, unknown>;
     };
     const capabilityEntrypoint = manifest.exports?.["./capability-ceiling"];
     return manifest.name === "pi-subagents"
+      && manifest.version === SUPPORTED_PI_SUBAGENTS_VERSION
       && existsSync(extensionPath)
       && Array.isArray(manifest.pi?.extensions)
       && manifest.pi.extensions.some((entry) => typeof entry === "string" && resolve(packageRoot, entry) === extensionPath)

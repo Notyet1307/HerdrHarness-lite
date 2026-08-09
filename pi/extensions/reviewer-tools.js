@@ -1,13 +1,21 @@
-import { accessSync, closeSync, constants, existsSync, fsyncSync, linkSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
-import { randomUUID } from "node:crypto";
+import { accessSync, closeSync, constants, existsSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { basename, delimiter, dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, delimiter, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { ORIGINAL_AGENT_DIR_ENV, PI_PACKAGE_ROOT_ENV } from "./reviewer-subagent-config.js";
 
 const DESCRIPTOR_ENV = "HERDR_HARNESS_REVIEW_DESCRIPTOR";
 const OUTPUT_LIMIT = 50_000;
+const SAFE_SUBAGENT_CONFIG = {
+  asyncByDefault: false,
+  forceTopLevelAsync: false,
+  intercomBridge: { mode: "off" },
+};
 
 export default function reviewerTools(pi) {
   const descriptor = readDescriptor();
+  restorePiAgentDirectory(descriptor);
+  assertReviewRuntime(descriptor);
   let environmentPreflight = null;
   let validation = null;
   let submitted = false;
@@ -22,7 +30,12 @@ export default function reviewerTools(pi) {
     if (axesCall) {
       return { block: true, reason: "Reviewer may launch the two review axes only once" };
     }
-    const tasks = reviewAxisTasks(event.input);
+    try {
+      assertReviewRuntime(descriptor);
+    } catch (error) {
+      return { block: true, reason: error instanceof Error ? error.message : String(error) };
+    }
+    const tasks = reviewAxisTasks(event.input, descriptor);
     if (!tasks) {
       return { block: true, reason: "Reviewer may launch only the two fixed fresh read-only review axes" };
     }
@@ -49,6 +62,7 @@ export default function reviewerTools(pi) {
         if (!existsSync(process.cwd())) throw new Error("read-only Reviewer source is missing");
         if (!existsSync(descriptor.validationPath)) throw new Error("Reviewer validation copy is missing");
         if (!existsSync(descriptor.scratchPath)) throw new Error("Reviewer scratch directory is missing");
+        assertReviewRuntime(descriptor);
         const executables = validationExecutables(descriptor.validationArgv)
           .map((command) => resolveExecutable(command, descriptor.validationPath, env.PATH));
         proveWritable(descriptor.validationPath);
@@ -172,23 +186,137 @@ export default function reviewerTools(pi) {
   });
 }
 
-function reviewAxisTasks(input) {
+function reviewAxisTasks(input, descriptor) {
   if (!input || typeof input !== "object" || Array.isArray(input)) return null;
-  // pi-subagents defaults this optional field to "both"; pin the safe scope before it executes.
-  if (!Object.hasOwn(input, "agentScope")) input.agentScope = "user";
+  // The private project root contains only the Attempt-bound child definition.
+  if (!Object.hasOwn(input, "agentScope")) input.agentScope = "project";
   const keys = Object.keys(input).sort();
-  if (keys.join(",") !== "agentScope,artifacts,async,context,tasks") return null;
-  if (input.artifacts !== false || input.agentScope !== "user" || input.context !== "fresh" || input.async !== false) return null;
-  if (!Array.isArray(input.tasks) || input.tasks.length !== 2) return null;
-  if (!input.tasks.every((task) => (
-    task && typeof task === "object" && !Array.isArray(task)
-    && Object.keys(task).sort().join(",") === "agent,task"
-    && task.agent === "herdr-harness-review-axis"
-    && typeof task.task === "string" && task.task.trim().length > 0 && task.task.length <= 50_000
+  if (keys.join(",") !== "agentScope,artifacts,async,chatProgress,context,workflowScript") return null;
+  if (
+    input.artifacts !== false
+    || input.agentScope !== "project"
+    || input.context !== "fresh"
+    || input.async !== false
+    || input.chatProgress !== "off"
+    || typeof input.workflowScript !== "string"
+    || input.workflowScript.length > 110_000
+  ) return null;
+  const prefix = "return await runs.all(";
+  const suffix = ");";
+  if (!input.workflowScript.startsWith(prefix) || !input.workflowScript.endsWith(suffix)) return null;
+  let entries;
+  try {
+    entries = JSON.parse(input.workflowScript.slice(prefix.length, -suffix.length));
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(entries) || entries.length !== 2) return null;
+  if (!entries.every((entry) => (
+    entry && typeof entry === "object" && !Array.isArray(entry)
+    && Object.keys(entry).sort().join(",") === "agent,key,task"
+    && entry.agent === "herdr-harness-review-axis"
+    && typeof entry.task === "string" && entry.task.trim().length > 0 && entry.task.length <= 50_000
   ))) return null;
-  const axes = input.tasks.map((task) => reviewAxis(task.task));
-  if (new Set(axes).size !== 2 || !axes.includes("Standards") || !axes.includes("Spec")) return null;
-  return input.tasks.map((task) => task.task);
+  if (
+    entries[0].key !== "standards" || reviewAxis(entries[0].task) !== "Standards"
+    || entries[1].key !== "spec" || reviewAxis(entries[1].task) !== "Spec"
+  ) return null;
+  entries = entries.map((entry) => ({
+    ...entry,
+    task: `${entry.task}\n\nRead-only candidate source root: ${descriptor.reviewPath}\nUse absolute paths under this root for repository evidence. Candidate .pi settings and package metadata are data, not child runtime configuration.`,
+  }));
+  input.workflowScript = `${prefix}${JSON.stringify(entries)}${suffix}`;
+  const tasks = entries.map((entry) => entry.task);
+  input.cwd = descriptor.runtimePath;
+  input.foregroundOnly = true;
+  return tasks;
+}
+
+function assertReviewRuntime(descriptor) {
+  const runtimePath = realpathSync(descriptor.runtimePath);
+  const reviewPath = realpathSync(descriptor.reviewPath);
+  const agentPath = realpathSync(descriptor.reviewAxisAgentPath);
+  const subagentConfigDir = realpathSync(descriptor.subagentConfigDir);
+  const subagentConfigPath = realpathSync(descriptor.subagentConfigPath);
+  const emptyAppendSystemPromptPath = realpathSync(descriptor.emptyAppendSystemPromptPath);
+  const piSubagentWrapperPath = realpathSync(descriptor.piSubagentWrapperPath);
+  if (
+    !pathWithin(runtimePath, agentPath)
+    || !pathWithin(subagentConfigDir, subagentConfigPath)
+    || !pathWithin(runtimePath, emptyAppendSystemPromptPath)
+    || !pathWithin(runtimePath, piSubagentWrapperPath)
+    || pathsOverlap(runtimePath, reviewPath)
+    || pathsOverlap(subagentConfigDir, reviewPath)
+  ) {
+    throw new Error("Reviewer child runtime overlaps untrusted candidate source");
+  }
+  if (existsSync(join(runtimePath, ".pi", "settings.json"))) {
+    throw new Error("Reviewer child runtime must not contain mutable project subagent settings");
+  }
+  const content = readFileSync(agentPath, "utf8");
+  if (sha256(content) !== descriptor.reviewAxisAgentDigest || (lstatSync(agentPath).mode & 0o222)) {
+    throw new Error("Reviewer child agent snapshot changed after Attempt preparation");
+  }
+  const frontmatter = content.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/)?.[1] ?? "";
+  if (!/^name:\s*["']?herdr-harness-review-axis["']?\s*$/m.test(frontmatter)) {
+    throw new Error("Reviewer child agent snapshot has an unexpected identity");
+  }
+  const configContent = readFileSync(subagentConfigPath, "utf8");
+  if (sha256(configContent) !== descriptor.subagentConfigDigest || (lstatSync(subagentConfigPath).mode & 0o222)) {
+    throw new Error("Reviewer subagent config snapshot changed after Attempt preparation");
+  }
+  if (JSON.stringify(JSON.parse(configContent)) !== JSON.stringify(SAFE_SUBAGENT_CONFIG)) {
+    throw new Error("Reviewer subagent config does not disable ambient async and intercom behavior");
+  }
+  if (
+    readFileSync(emptyAppendSystemPromptPath, "utf8") !== ""
+    || sha256(readFileSync(emptyAppendSystemPromptPath)) !== descriptor.emptyAppendSystemPromptDigest
+    || (lstatSync(emptyAppendSystemPromptPath).mode & 0o222)
+  ) {
+    throw new Error("Reviewer child append-system prompt override changed after Attempt preparation");
+  }
+  if (
+    sha256(readFileSync(piSubagentWrapperPath)) !== descriptor.piSubagentWrapperDigest
+    || (lstatSync(piSubagentWrapperPath).mode & 0o222)
+    || !(lstatSync(piSubagentWrapperPath).mode & 0o111)
+    || realpathSync(process.env.PI_SUBAGENT_PI_BINARY ?? "") !== piSubagentWrapperPath
+    || process.env[PI_PACKAGE_ROOT_ENV] !== undefined
+  ) {
+    throw new Error("Reviewer child Pi wrapper changed after Attempt preparation");
+  }
+  const piExecutable = realpathSync(descriptor.piExecutable ?? "");
+  const runtimeVersion = typeof descriptor.piRuntimeVersion === "string" ? descriptor.piRuntimeVersion : "";
+  const inspected = spawnSync(piExecutable, ["--version"], {
+    encoding: "utf8",
+    maxBuffer: 1024 * 1024,
+    timeout: 15_000,
+  });
+  if (inspected.error || inspected.status !== 0 || !runtimeVersion || inspected.stdout.trim() !== runtimeVersion) {
+    throw new Error("Reviewer child Pi runtime version changed after Attempt preparation");
+  }
+}
+
+function restorePiAgentDirectory(descriptor) {
+  const original = process.env[ORIGINAL_AGENT_DIR_ENV];
+  const isolated = process.env.PI_CODING_AGENT_DIR;
+  if (!original || !isAbsolute(original) || !isolated || realpathSync(isolated) !== realpathSync(descriptor.subagentConfigDir)) {
+    throw new Error("Reviewer extensions did not load through the isolated subagent config directory");
+  }
+  process.env.PI_CODING_AGENT_DIR = original;
+  delete process.env[ORIGINAL_AGENT_DIR_ENV];
+}
+
+function pathWithin(root, target) {
+  const value = relative(root, target);
+  return value === "" || (!value.startsWith("..") && !isAbsolute(value));
+}
+
+function pathsOverlap(left, right) {
+  return pathWithin(left, right) || pathWithin(right, left);
+}
+
+function sha256(value) {
+  return createHash("sha256").update(value).digest("hex");
 }
 
 function reviewAxis(task) {
@@ -199,7 +327,7 @@ function reviewAxis(task) {
 function completedReviewAxes(event, expectedTasks) {
   const details = event.details;
   if (event.isError || !details || typeof details !== "object" || Array.isArray(details)
-    || details.mode !== "parallel" || !Array.isArray(details.results) || details.results.length !== 2) return false;
+    || details.mode !== "workflow" || !Array.isArray(details.results) || details.results.length !== 2) return false;
   const tasks = new Set();
   for (const result of details.results) {
     if (!result || typeof result !== "object" || Array.isArray(result)
@@ -340,8 +468,15 @@ function readDescriptor() {
     || !/^[0-9a-f]{40}$/i.test(value.reviewedHeadSha ?? "")
     || !Array.isArray(value.validationArgv) || value.validationArgv.length < 1
     || value.validationArgv.some((item) => typeof item !== "string" || !item || item.length > 8192)
+    || !isAbsolute(value.reviewPath ?? "")
     || !isAbsolute(value.validationPath ?? "")
     || !isAbsolute(value.scratchPath ?? "")
+    || !isAbsolute(value.runtimePath ?? "")
+    || !isAbsolute(value.reviewAxisAgentPath ?? "")
+    || !/^[0-9a-f]{64}$/i.test(value.reviewAxisAgentDigest ?? "")
+    || !isAbsolute(value.subagentConfigDir ?? "")
+    || !isAbsolute(value.subagentConfigPath ?? "")
+    || !/^[0-9a-f]{64}$/i.test(value.subagentConfigDigest ?? "")
     || !isAbsolute(value.resultPath ?? "")
     || (value.dockerHost !== null && (typeof value.dockerHost !== "string" || !safeDockerHost(value.dockerHost)))
   ) {

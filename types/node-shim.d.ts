@@ -18,12 +18,16 @@ declare const console: {
 
 interface ImportMeta {
   dirname: string;
+  url: string;
 }
+
+declare function setTimeout(callback: () => void, milliseconds: number): unknown;
+declare function clearTimeout(timer: unknown): void;
 
 declare module "node:crypto" {
   export function randomUUID(): string;
   export function createHash(name: string): {
-    update(value: string): unknown;
+    update(value: string | Uint8Array): unknown;
     digest(encoding: "hex"): string;
   };
 }
@@ -42,8 +46,23 @@ declare module "node:child_process" {
   export function spawn(
     command: string,
     args?: readonly string[],
-    options?: { stdio?: "ignore" },
-  ): { pid?: number; unref(): void; kill(signal?: "SIGTERM"): boolean };
+    options?: {
+      cwd?: string;
+      env?: Record<string, string | undefined>;
+      stdio?: "ignore" | ["pipe", "pipe", "pipe"];
+    },
+  ): {
+    pid?: number;
+    stdin: { write(value: string): boolean; end(): void };
+    stdout: {
+      setEncoding(encoding: "utf8"): void;
+      on(event: "data" | "end", callback: (...args: any[]) => void): void;
+    };
+    stderr: { on(event: "data", callback: (...args: any[]) => void): void };
+    on(event: "exit" | "error", callback: (...args: any[]) => void): void;
+    unref(): void;
+    kill(signal?: "SIGTERM" | "SIGKILL"): boolean;
+  };
   export interface SpawnSyncReturns<T> {
     status: number | null;
     stdout: T;
@@ -65,6 +84,8 @@ declare module "node:child_process" {
 }
 
 declare module "node:fs" {
+  export const constants: { X_OK: number };
+  export function accessSync(path: string, mode?: number): void;
   export function chmodSync(path: string, mode: number): void;
   export function cpSync(source: string, destination: string, options?: { recursive?: boolean }): void;
   export function existsSync(path: string): boolean;
@@ -72,11 +93,13 @@ declare module "node:fs" {
   export function mkdirSync(path: string, options?: { recursive?: boolean; mode?: number }): string | undefined;
   export function mkdtempSync(prefix: string): string;
   export function readFileSync(path: string | number, encoding: "utf8"): string;
+  export function readFileSync(path: string | number): Uint8Array;
   export function readSync(fd: number, buffer: unknown, offset: number, length: number, position: number): number;
   export function readdirSync(path: string): string[];
   export function lstatSync(path: string): {
     mode: number;
     isDirectory(): boolean;
+    isFile(): boolean;
     isSymbolicLink(): boolean;
   };
   export function statSync(path: string): { size: number; mtimeMs: number };
@@ -98,6 +121,7 @@ declare module "node:fs" {
 }
 
 declare module "node:os" {
+  export function homedir(): string;
   export function tmpdir(): string;
 }
 
@@ -106,6 +130,7 @@ declare module "node:url" {
 }
 
 declare module "node:path" {
+  export const delimiter: string;
   export const sep: string;
   export function basename(path: string): string;
   export function dirname(path: string): string;

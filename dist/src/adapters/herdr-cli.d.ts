@@ -35,6 +35,11 @@ export declare class HerdrCli implements HerdrPort {
         handle: AgentHandle;
         argv: string[];
     }): Promise<void>;
+    runInPane(input: {
+        handle: AgentHandle;
+        command: string;
+        argv: string[];
+    }): Promise<void>;
     prompt(input: {
         handle: AgentHandle;
         dispatchId: string;

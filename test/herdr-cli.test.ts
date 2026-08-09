@@ -222,6 +222,27 @@ test("Herdr adapter starts Pi without a native-argument separator when argv is e
   ]);
 });
 
+test("Herdr adapter launches the RPC runner as the pane foreground command", async () => {
+  const calls: string[][] = [];
+  const runner: CommandRunner = {
+    run(_command, args) {
+      calls.push(args);
+      return ok({ result: { type: "ok" } });
+    },
+  };
+  const herdr = new HerdrCli({ runner, session: "test-session" });
+  await herdr.runInPane({
+    handle: { agentName: "worker-1", paneId: "w1:p2", tabId: "w1:t2", workspaceId: "w1" },
+    command: "/usr/bin/node",
+    argv: ["/runner.js", "--plan", "/state/plan.json"],
+  });
+
+  assert.deepEqual(calls, [[
+    "--session", "test-session", "pane", "run", "w1:p2", "exec", "/usr/bin/node",
+    "/runner.js", "--plan", "/state/plan.json",
+  ]]);
+});
+
 test("Herdr adapter injects the Reviewer snapshot cwd and descriptor environment", async () => {
   const runner = new RecordingRunner();
   const herdr = new HerdrCli({ runner, session: "test-session" });

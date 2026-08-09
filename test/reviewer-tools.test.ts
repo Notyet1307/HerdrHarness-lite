@@ -1,12 +1,17 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { chmodSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 type Tool = {
-  execute(id: string, params: Record<string, unknown>): Promise<{ content: Array<{ type: string; text: string }> }>;
+  execute(id: string, params: Record<string, unknown>): Promise<{
+    content: Array<{ type: string; text: string }>;
+    details?: unknown;
+    isError?: boolean;
+  }>;
 };
 
 type ToolCallEvent = { toolCallId: string; toolName: string; input: Record<string, unknown> };
@@ -23,12 +28,18 @@ const reviewTasks = [
   { agent: "herdr-harness-review-axis", task: "Axis: Spec\nReview the supplied specification." },
 ];
 
+function reviewWorkflowScript(tasks = reviewTasks): string {
+  const entries = tasks.map((task, index) => ({ key: index === 0 ? "standards" : "spec", ...task }));
+  return `return await runs.all(${JSON.stringify(entries)});`;
+}
+
 const reviewCall = {
   artifacts: false,
-  agentScope: "user",
+  agentScope: "project",
   context: "fresh",
   async: false,
-  tasks: reviewTasks,
+  chatProgress: "off",
+  workflowScript: reviewWorkflowScript(),
 };
 
 test("Reviewer tools isolate validation and write one identity-bound result", async () => {
@@ -41,12 +52,17 @@ test("Reviewer tools isolate validation and write one identity-bound result", as
   const descriptorPath = join(root, "descriptor.json");
   const previousDescriptor = process.env.HERDR_HARNESS_REVIEW_DESCRIPTOR;
   const previousSecret = process.env.HERDR_REVIEWER_TEST_SECRET;
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  const previousOriginalAgentDir = process.env.HERDR_HARNESS_REVIEW_ORIGINAL_PI_AGENT_DIR;
+  const previousSubagentPiBinary = process.env.PI_SUBAGENT_PI_BINARY;
+  const previousPiPackageRoot = process.env.PI_SUBAGENTS_PI_CODING_AGENT_PACKAGE_ROOT;
   try {
     for (const path of [source, validation, dockerConfig, join(scratch, "home"), join(scratch, "tmp"), join(scratch, "cache"), join(scratch, "pycache")]) {
       mkdirSync(path, { recursive: true });
     }
     writeFileSync(join(source, "product.txt"), "source\n");
     writeFileSync(join(validation, "product.txt"), "source\n");
+    const runtime = prepareReviewRuntime(root, source);
     writeFileSync(descriptorPath, JSON.stringify({
       version: 1,
       jobId: "job-1",
@@ -60,15 +76,35 @@ test("Reviewer tools isolate validation and write one identity-bound result", as
         "const fs=require('node:fs');fs.writeFileSync('validation-only.txt','ok');fs.writeFileSync('validation-env.json',JSON.stringify(process.env))",
       ],
       dockerHost: null,
+      ...runtime,
       validationPath: validation,
       scratchPath: scratch,
       resultPath,
     }));
     process.env.HERDR_HARNESS_REVIEW_DESCRIPTOR = descriptorPath;
+    const originalAgentDir = join(root, "original-agent");
+    mkdirSync(join(originalAgentDir, "extensions", "subagent"), { recursive: true });
+    writeFileSync(join(originalAgentDir, "extensions", "subagent", "config.json"), JSON.stringify({
+      forceTopLevelAsync: true,
+      intercomBridge: { mode: "always", instructionFile: "candidate-controlled.md" },
+    }));
+    process.env.PI_CODING_AGENT_DIR = originalAgentDir;
+    process.env.PI_SUBAGENTS_PI_CODING_AGENT_PACKAGE_ROOT = join(root, "malicious-pi-package");
+    const configExtension = await import(pathToFileURL(resolve("pi/extensions/reviewer-subagent-config.js")).href) as {
+      default(): void;
+    };
+    configExtension.default();
+    assert.equal(process.env.PI_CODING_AGENT_DIR, realpathSync(runtime.subagentConfigDir));
+    assert.equal(process.env.PI_SUBAGENT_PI_BINARY, realpathSync(runtime.piSubagentWrapperPath));
+    assert.equal(process.env.PI_SUBAGENTS_PI_CODING_AGENT_PACKAGE_ROOT, undefined);
 
     const tools = new Map<string, Tool>();
     let toolCallHook: ToolCallHook | undefined;
     let toolResultHook: ToolResultHook | undefined;
+    const subagentExtension = await import(pathToFileURL(resolve("test/fixtures/pi-subagents/index.js")).href) as {
+      default(pi: { registerTool(tool: Tool & { name: string }): void }): void;
+    };
+    subagentExtension.default({ registerTool(tool) { tools.set(tool.name, tool); } });
     const extension = await import(pathToFileURL(resolve("pi/extensions/reviewer-tools.js")).href) as {
       default(pi: {
         registerTool(tool: Tool & { name: string }): void;
@@ -83,12 +119,16 @@ test("Reviewer tools isolate validation and write one identity-bound result", as
         else toolResultHook = hook as ToolResultHook;
       },
     });
+    assert.equal(process.env.PI_CODING_AGENT_DIR, originalAgentDir);
+    assert.equal(process.env.PI_SUBAGENT_PI_BINARY, realpathSync(runtime.piSubagentWrapperPath));
     const preflight = tools.get("review_preflight");
     const validate = tools.get("review_validate");
     const submit = tools.get("review_submit");
+    const subagent = tools.get("subagent");
     assert.ok(preflight);
     assert.ok(validate);
     assert.ok(submit);
+    assert.ok(subagent);
     assert.ok(toolCallHook);
     assert.ok(toolResultHook);
     await assert.rejects(() => submit.execute("submit-before-axes", {
@@ -102,6 +142,16 @@ test("Reviewer tools isolate validation and write one identity-bound result", as
     assert.equal(preflightResult.ok, true);
     assert.equal((await toolCallHook({ toolCallId: "wrong", toolName: "subagent", input: { action: "create" } }))?.block, true);
     assert.equal((await toolCallHook({
+      toolCallId: "legacy-tasks",
+      toolName: "subagent",
+      input: { artifacts: false, agentScope: "project", context: "fresh", async: false, tasks: reviewTasks },
+    }))?.block, true);
+    assert.equal((await toolCallHook({
+      toolCallId: "arbitrary-script",
+      toolName: "subagent",
+      input: { ...reviewCall, workflowScript: `${reviewWorkflowScript()} console.log("unexpected")` },
+    }))?.block, true);
+    assert.equal((await toolCallHook({
       toolCallId: "unsafe-scope",
       toolName: "subagent",
       input: { ...reviewCall, agentScope: "both" },
@@ -111,27 +161,49 @@ test("Reviewer tools isolate validation and write one identity-bound result", as
       toolName: "subagent",
       input: {
         artifacts: false,
-        agentScope: "user",
+        agentScope: "project",
         context: "fresh",
         async: false,
-        tasks: [
+        chatProgress: "off",
+        workflowScript: reviewWorkflowScript([
           { agent: "worker", task: "write" },
           { agent: "herdr-harness-review-axis", task: "Axis: Spec\nReview" },
-        ],
+        ]),
       },
     }))?.block, true);
+    const boundAgent = readFileSync(runtime.reviewAxisAgentPath, "utf8");
+    chmodSync(runtime.reviewAxisAgentPath, 0o600);
+    writeFileSync(runtime.reviewAxisAgentPath, `${boundAgent}\ntampered\n`);
+    const drift = await toolCallHook({ toolCallId: "drift", toolName: "subagent", input: { ...reviewCall } });
+    assert.match(drift?.reason ?? "", /snapshot changed/);
+    writeFileSync(runtime.reviewAxisAgentPath, boundAgent);
+    chmodSync(runtime.reviewAxisAgentPath, 0o400);
+    const boundPi = readFileSync(runtime.piExecutable, "utf8");
+    chmodSync(runtime.piExecutable, 0o700);
+    writeFileSync(runtime.piExecutable, "#!/bin/sh\nprintf '0.85.0\\n'\n");
+    chmodSync(runtime.piExecutable, 0o500);
+    const runtimeDrift = await toolCallHook({ toolCallId: "runtime-drift", toolName: "subagent", input: { ...reviewCall } });
+    assert.match(runtimeDrift?.reason ?? "", /runtime version changed/);
+    chmodSync(runtime.piExecutable, 0o700);
+    writeFileSync(runtime.piExecutable, boundPi);
+    chmodSync(runtime.piExecutable, 0o500);
     const defaultedScopeReviewCall: Record<string, unknown> = {
       artifacts: false,
       context: "fresh",
       async: false,
-      tasks: reviewTasks,
+      chatProgress: "off",
+      workflowScript: reviewWorkflowScript(),
     };
     assert.equal((await toolCallHook({
       toolCallId: "axes",
       toolName: "subagent",
       input: defaultedScopeReviewCall,
     })), undefined);
-    assert.equal(defaultedScopeReviewCall.agentScope, "user");
+    assert.equal(defaultedScopeReviewCall.agentScope, "project");
+    assert.equal(defaultedScopeReviewCall.cwd, runtime.runtimePath);
+    assert.equal(defaultedScopeReviewCall.foregroundOnly, true);
+    const transformedTasks = workflowEntries(defaultedScopeReviewCall.workflowScript).map((entry) => entry.task);
+    assert.equal(transformedTasks.every((task) => task.includes(`Read-only candidate source root: ${source}`)), true);
     assert.equal((await toolCallHook({ toolCallId: "axes-again", toolName: "subagent", input: reviewCall }))?.block, true);
 
     await toolResultHook({
@@ -141,9 +213,10 @@ test("Reviewer tools isolate validation and write one identity-bound result", as
       content: [],
       isError: false,
       details: {
-        mode: "parallel",
-        results: reviewTasks.map((task, index) => ({
-          ...task,
+        mode: "workflow",
+        results: transformedTasks.map((task, index) => ({
+          agent: "herdr-harness-review-axis",
+          task,
           index,
           exitCode: index,
           finalOutput: index === 0 ? "Standards: no findings" : "Spec provider failed",
@@ -156,21 +229,14 @@ test("Reviewer tools isolate validation and write one identity-bound result", as
       findings: [],
     }), /completed Standards and Spec/);
 
+    const workflowResult = await subagent.execute("axes", defaultedScopeReviewCall);
     await toolResultHook({
       toolCallId: "axes",
       toolName: "subagent",
-      input: reviewCall,
-      content: [],
-      isError: false,
-      details: {
-        mode: "parallel",
-        results: reviewTasks.map((task, index) => ({
-          ...task,
-          index,
-          exitCode: 0,
-          finalOutput: index === 0 ? "Standards: no findings" : "Spec: no findings",
-        })),
-      },
+      input: defaultedScopeReviewCall,
+      content: workflowResult.content,
+      isError: workflowResult.isError === true,
+      details: workflowResult.details,
     });
 
     await assert.rejects(() => submit.execute("submit-before-validation", {
@@ -213,6 +279,10 @@ test("Reviewer tools isolate validation and write one identity-bound result", as
     else process.env.HERDR_HARNESS_REVIEW_DESCRIPTOR = previousDescriptor;
     if (previousSecret === undefined) delete process.env.HERDR_REVIEWER_TEST_SECRET;
     else process.env.HERDR_REVIEWER_TEST_SECRET = previousSecret;
+    restoreEnv("PI_CODING_AGENT_DIR", previousAgentDir);
+    restoreEnv("HERDR_HARNESS_REVIEW_ORIGINAL_PI_AGENT_DIR", previousOriginalAgentDir);
+    restoreEnv("PI_SUBAGENT_PI_BINARY", previousSubagentPiBinary);
+    restoreEnv("PI_SUBAGENTS_PI_CODING_AGENT_PACKAGE_ROOT", previousPiPackageRoot);
     rmSync(root, { recursive: true, force: true });
   }
 });
@@ -222,10 +292,15 @@ test("Reviewer environment preflight blocks review axes but still permits a dura
   const descriptorPath = join(root, "descriptor.json");
   const resultPath = join(root, "result.json");
   const previousDescriptor = process.env.HERDR_HARNESS_REVIEW_DESCRIPTOR;
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  const previousOriginalAgentDir = process.env.HERDR_HARNESS_REVIEW_ORIGINAL_PI_AGENT_DIR;
+  const previousSubagentPiBinary = process.env.PI_SUBAGENT_PI_BINARY;
+  const previousPiPackageRoot = process.env.PI_SUBAGENTS_PI_CODING_AGENT_PACKAGE_ROOT;
   try {
     for (const path of ["source", "validation", "scratch", "scratch/home", "scratch/tmp", "scratch/cache", "scratch/pycache"]) {
       mkdirSync(join(root, path), { recursive: true });
     }
+    const runtime = prepareReviewRuntime(root, join(root, "source"));
     writeFileSync(descriptorPath, JSON.stringify({
       version: 1,
       jobId: "job-2",
@@ -233,11 +308,19 @@ test("Reviewer environment preflight blocks review axes but still permits a dura
       reviewedHeadSha: "c".repeat(40),
       validationArgv: ["definitely-missing-review-command"],
       dockerHost: null,
+      ...runtime,
       validationPath: join(root, "validation"),
       scratchPath: join(root, "scratch"),
       resultPath,
     }));
     process.env.HERDR_HARNESS_REVIEW_DESCRIPTOR = descriptorPath;
+    const originalAgentDir = join(root, "original-agent");
+    mkdirSync(originalAgentDir);
+    process.env.PI_CODING_AGENT_DIR = originalAgentDir;
+    const configExtension = await import(pathToFileURL(resolve("pi/extensions/reviewer-subagent-config.js")).href) as {
+      default(): void;
+    };
+    configExtension.default();
 
     const tools = new Map<string, Tool>();
     let toolCallHook: ToolCallHook | undefined;
@@ -272,6 +355,88 @@ test("Reviewer environment preflight blocks review axes but still permits a dura
   } finally {
     if (previousDescriptor === undefined) delete process.env.HERDR_HARNESS_REVIEW_DESCRIPTOR;
     else process.env.HERDR_HARNESS_REVIEW_DESCRIPTOR = previousDescriptor;
+    restoreEnv("PI_CODING_AGENT_DIR", previousAgentDir);
+    restoreEnv("HERDR_HARNESS_REVIEW_ORIGINAL_PI_AGENT_DIR", previousOriginalAgentDir);
+    restoreEnv("PI_SUBAGENT_PI_BINARY", previousSubagentPiBinary);
+    restoreEnv("PI_SUBAGENTS_PI_CODING_AGENT_PACKAGE_ROOT", previousPiPackageRoot);
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+function workflowEntries(script: unknown): Array<{ key: string; agent: string; task: string }> {
+  if (typeof script !== "string") throw new Error("workflowScript must be a string");
+  const prefix = "return await runs.all(";
+  const suffix = ");";
+  assert.equal(script.startsWith(prefix), true);
+  assert.equal(script.endsWith(suffix), true);
+  return JSON.parse(script.slice(prefix.length, -suffix.length)) as Array<{ key: string; agent: string; task: string }>;
+}
+
+function prepareReviewRuntime(root: string, reviewPath: string): {
+  reviewPath: string;
+  runtimePath: string;
+  reviewAxisAgentPath: string;
+  reviewAxisAgentDigest: string;
+  subagentConfigDir: string;
+  subagentConfigPath: string;
+  subagentConfigDigest: string;
+  emptyAppendSystemPromptPath: string;
+  emptyAppendSystemPromptDigest: string;
+  piSubagentWrapperPath: string;
+  piSubagentWrapperDigest: string;
+  piExecutable: string;
+  piRuntimeVersion: string;
+} {
+  const runtimePath = join(root, "review-runtime");
+  const reviewAxisAgentPath = join(runtimePath, ".agents", "herdr-harness-review-axis.md");
+  const content = readFileSync(resolve("pi/agents/herdr-harness-review-axis.md"), "utf8");
+  const subagentConfigDir = join(root, "subagent-config");
+  const subagentConfigPath = join(subagentConfigDir, "extensions", "subagent", "config.json");
+  const emptyAppendSystemPromptPath = join(runtimePath, "empty-append-system.md");
+  const piSubagentWrapperPath = join(runtimePath, "pi-subagent");
+  const piExecutable = join(root, "fake-pi");
+  const piRuntimeVersion = "0.84.0";
+  const configContent = `${JSON.stringify({
+    asyncByDefault: false,
+    forceTopLevelAsync: false,
+    intercomBridge: { mode: "off" },
+  }, null, 2)}\n`;
+  mkdirSync(join(runtimePath, ".agents"), { recursive: true });
+  mkdirSync(join(subagentConfigDir, "extensions", "subagent"), { recursive: true });
+  writeFileSync(reviewAxisAgentPath, content, { mode: 0o400 });
+  writeFileSync(subagentConfigPath, configContent, { mode: 0o400 });
+  writeFileSync(emptyAppendSystemPromptPath, "", { mode: 0o400 });
+  writeFileSync(piExecutable, `#!/bin/sh\nprintf '${piRuntimeVersion}\\n'\n`, { mode: 0o500 });
+  const wrapperContent = `#!/bin/sh\nactual_version=$(${JSON.stringify(piExecutable)} --version) || exit $?\nif [ "$actual_version" != ${JSON.stringify(piRuntimeVersion)} ]; then exit 70; fi\nexec ${JSON.stringify(piExecutable)} --append-system-prompt ${JSON.stringify(emptyAppendSystemPromptPath)} "$@"\n`;
+  writeFileSync(piSubagentWrapperPath, wrapperContent, { mode: 0o500 });
+  chmodSync(reviewAxisAgentPath, 0o400);
+  chmodSync(subagentConfigPath, 0o400);
+  const hash = createHash("sha256");
+  hash.update(content);
+  const configHash = createHash("sha256");
+  configHash.update(configContent);
+  const wrapperHash = createHash("sha256");
+  wrapperHash.update(wrapperContent);
+  const emptyAppendHash = createHash("sha256");
+  emptyAppendHash.update("");
+  return {
+    reviewPath,
+    runtimePath,
+    reviewAxisAgentPath,
+    reviewAxisAgentDigest: hash.digest("hex"),
+    subagentConfigDir,
+    subagentConfigPath,
+    subagentConfigDigest: configHash.digest("hex"),
+    emptyAppendSystemPromptPath,
+    emptyAppendSystemPromptDigest: emptyAppendHash.digest("hex"),
+    piSubagentWrapperPath,
+    piSubagentWrapperDigest: wrapperHash.digest("hex"),
+    piExecutable,
+    piRuntimeVersion,
+  };
+}
+
+function restoreEnv(name: string, value: string | undefined): void {
+  if (value === undefined) delete process.env[name];
+  else process.env[name] = value;
+}

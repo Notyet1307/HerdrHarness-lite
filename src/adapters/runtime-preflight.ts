@@ -1,5 +1,9 @@
 import type { RuntimePreflightPort } from "../ports.js";
 import { type CommandRunner, SyncCommandRunner } from "./command.js";
+import { accessSync, constants, existsSync, realpathSync } from "node:fs";
+import { homedir } from "node:os";
+import { delimiter, isAbsolute, join, resolve } from "node:path";
+import { preparePiRpcAgentDirAt } from "../pi-rpc-spool.js";
 
 const PROVIDER_MARKER = "HERDR_HARNESS_PROVIDER_OK";
 const PROVIDER_TIMEOUT_MS = 120_000;
@@ -11,12 +15,33 @@ export class RuntimePreflightCli implements RuntimePreflightPort {
     private readonly environment: Record<string, string | undefined> = process.env,
   ) {}
 
+  async inspectPi(input: { cwd: string; piBin: string }): Promise<{ executable: string; version: string }> {
+    const executable = resolveExecutable(input.piBin, input.cwd, this.environment.PATH);
+    const result = this.runner.run(executable, ["--version"], { cwd: input.cwd, timeoutMs: DOCKER_TIMEOUT_MS });
+    if (!result.ok || !result.stdout.trim()) throw new Error(`Pi runtime inspection failed: ${diagnostic(result)}`);
+    return { executable, version: result.stdout.trim() };
+  }
+
+  async assertNoAmbientSystemPrompt(input: { cwd: string }): Promise<{ agentDir: string }> {
+    const configured = this.environment.PI_CODING_AGENT_DIR?.trim();
+    const unresolvedAgentDir = configured || join(homedir(), ".pi", "agent");
+    const agentDir = existsSync(unresolvedAgentDir) ? realpathSync(unresolvedAgentDir) : resolve(unresolvedAgentDir);
+    for (const path of [join(agentDir, "SYSTEM.md"), join(resolve(input.cwd), ".pi", "SYSTEM.md")]) {
+      if (existsSync(path)) throw new Error(`ambient Pi system prompt is not allowed: ${path}`);
+    }
+    return { agentDir };
+  }
+
   async probeProvider(input: {
     lane: "worker" | "reviewer";
     cwd: string;
     roleArgv: string[];
     piBin: string;
+    agentDir?: string;
   }): Promise<void> {
+    const agentDir = input.agentDir === undefined
+      ? undefined
+      : preparePiRpcAgentDirAt(input.agentDir);
     const result = this.runner.run(input.piBin, [
       "--no-session",
       "--no-approve",
@@ -29,13 +54,18 @@ export class RuntimePreflightCli implements RuntimePreflightPort {
       ...runtimeSelectors(input.roleArgv),
       "-p",
       `Reply with exactly ${PROVIDER_MARKER}`,
-    ], { cwd: input.cwd, timeoutMs: PROVIDER_TIMEOUT_MS });
+    ], {
+      cwd: input.cwd,
+      timeoutMs: PROVIDER_TIMEOUT_MS,
+      ...(agentDir ? { env: { ...this.environment, PI_CODING_AGENT_DIR: agentDir } } : {}),
+    });
     if (!result.ok) {
       throw new Error(`${input.lane} Provider probe failed: ${diagnostic(result)}`);
     }
     if (!result.stdout.split(/\r?\n/).some((line) => line.trim() === PROVIDER_MARKER)) {
       throw new Error(`${input.lane} Provider probe returned no success marker`);
     }
+    if (agentDir) preparePiRpcAgentDirAt(agentDir);
   }
 
   async probeDocker(input: { cwd: string }): Promise<{ host: string }> {
@@ -68,6 +98,21 @@ export class RuntimePreflightCli implements RuntimePreflightPort {
     }
     return { host };
   }
+}
+
+function resolveExecutable(piBin: string, cwd: string, pathValue: string | undefined): string {
+  const candidates = piBin.includes("/")
+    ? [isAbsolute(piBin) ? piBin : resolve(cwd, piBin)]
+    : (pathValue ?? "").split(delimiter).filter(Boolean).map((directory) => resolve(directory, piBin));
+  for (const candidate of candidates) {
+    try {
+      accessSync(candidate, constants.X_OK);
+      return realpathSync(candidate);
+    } catch {
+      // Try the next PATH entry.
+    }
+  }
+  throw new Error(`Pi executable not found or not executable: ${piBin}`);
 }
 
 function runtimeSelectors(argv: string[]): string[] {

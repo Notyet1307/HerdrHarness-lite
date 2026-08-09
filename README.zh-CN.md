@@ -4,7 +4,7 @@
 
 HerdrHarness Lite 是一个小型、失败关闭的 GitHub Issue 交付控制器。它用持久状态机协调 GitHub、Git、Herdr、Pi Worker、独立 Reviewer 和 Codex Analyst；agent 会话、终端输出、通知和聊天回复都不是交付事实。
 
-Herdr 仍是 agent 运行时。当前推荐的 Telegram 路径不再依赖 Hermes；Hermes 只保留为向后兼容的传输方式。
+Herdr 仍持有 worktree 与持久 pane。Reviewer 和默认 Worker 使用 Herdr interactive Pi；可选的 Worker-only RPC canary 在 Herdr pane 中以前台 runner 托管 Pi RPC。当前推荐的 Telegram 路径不再依赖 Hermes；Hermes 只保留为向后兼容的传输方式。
 
 ## 先读这里
 
@@ -20,7 +20,9 @@ Herdr 仍是 agent 运行时。当前推荐的 Telegram 路径不再依赖 Herme
 ```text
 控制面
 GitHub + Git <-> Controller <-> 持久 ledger
-                    |-> Herdr -> fresh Pi Worker / Reviewer
+                    |-> Herdr pane -> fresh interactive Pi Reviewer
+                    |-> Herdr pane -> interactive Pi Worker（默认）
+                    |                  或 durable runner -> Pi RPC Worker（canary）
                     `-> 需要补充证据时调用 task-bound Codex Analyst
 
 通知与操作面
@@ -35,7 +37,7 @@ Harness Core 是唯一的工作流权威。Controller 负责自动迁移；opera
 | 组件 | 职责 | 权限边界 |
 | --- | --- | --- |
 | Controller（`src/controller.ts`） | 每个 `tick` 至多一次持久迁移；执行 effect、验证、恢复、发布和 merge 观察 | 在状态目录排他 lease 下唯一自动写入状态迁移 |
-| Herdr + Pi | worktree/pane 运行时与 fresh Worker/Reviewer 执行 | 只提供运行与活性；durable result 加 Harness 验证才构成交付证据 |
+| Herdr + Pi | worktree/pane 宿主与 fresh Worker/Reviewer 执行；Worker 可选受监督 RPC runner | 只提供运行与活性；RPC terminal、Herdr 状态都不能替代 durable result 与 Harness Git 验证 |
 | Codex Analyst | 为 blocked job 做有界证据分析 | 只能建议 `hold` 或策略允许的 fresh retry；不能批准或写状态 |
 | Observer（`src/hermes-observer.ts`） | 读取 ledger、Controller JSONL 和 heartbeat，维护可重试通知 outbox | 没有工作流状态权限；只能创建传输 outbox/challenge 状态。文件名为兼容性保留，standalone 模式不需要 Hermes |
 | [Harness Telegram Bridge](https://github.com/Notyet1307/harness-telegram-bridge) | 发送卡片，轮询 `/harness` 与 callback，调用已有 status/approval CLI | 只负责传输；仅保存 Telegram offset，不直接编辑 ledger |
@@ -152,7 +154,7 @@ node dist/src/cli.js tick --config /ABSOLUTE/PATH/harness.config.json
 
 其他 `ok:false` 都先运行 `status` 并修复消息中的具体条件。重复同一命令不会自动授予恢复权限。
 
-Dispatch 阶段会调用 Herdr `agent prompt --wait`，因此可能在整个 Worker 或 Reviewer 运行期间不返回。命令没有输出不等于 prompt 丢失。
+Interactive dispatch 会调用 Herdr `agent prompt --wait`；RPC Worker 则先持久化唯一 `dispatch.json`，由 pane 内 runner 发送一次 prompt，并等待 terminal receipt。两者都可能长时间不返回；命令没有输出不等于 prompt 丢失，也不得并发重发。
 
 单步完成条件：账本只推进了一次，或明确停在等待外部条件/agent 的状态；没有并行 Controller。
 
@@ -165,7 +167,7 @@ node dist/src/cli.js status --config /ABSOLUTE/PATH/harness.config.json
 node dist/src/cli.js status --config /ABSOLUTE/PATH/harness.config.json --operator
 ```
 
-从 `activeJob.activeAttempt.handle.agentName` 取出 agent 名称，再读 Herdr：
+当 `activeJob.activeAttempt.executionSnapshot.adapter=herdr-pi-cli` 时，从 handle 取出 agent 名称，再读 Herdr：
 
 ```bash
 herdr --session SESSION_NAME agent get AGENT_NAME
@@ -174,6 +176,8 @@ herdr --session SESSION_NAME agent read AGENT_NAME \
 ```
 
 Pi 底部显示实际 `(provider) model • thinking`。配置文件只能表达意图；运行时 footer 和真实探测才证明实际选择。
+
+RPC Worker 没有 Herdr interactive agent 记录；读取账本中的 ExecutionSnapshot，以及对应 attempt `runtime/ready.json`、`accepted.json`、`terminal.json`、`terminated.json`。不要尝试连接或重建 runner 持有的 stdin/stdout。
 
 普通 `status` 返回完整账本；`status --operator` 返回稳定的操作投影：当前 mode/phase，以及只对精确 revision、incident、analysis、Attempt 和 HEAD 绑定有效的操作。
 
@@ -252,7 +256,7 @@ Option ID 是 compare-and-swap 绑定；任一事实变化后都会失效。显�
 | GitHub | Issue 状态、依赖、队列标签、PR、required checks 和 merge |
 | Harness ledger | active job、revision、attempt、incident、Analyst 建议、人工审批和 effect receipt |
 | Git | 固定 base、实现 HEAD、提交 provenance 和 clean-tree |
-| Herdr / Pi | worktree、pane 和 agent 运行时；只提供执行与可观察性 |
+| Herdr / Pi | worktree、持久 pane、interactive agent 或 Worker RPC runner；只提供执行与可观察性 |
 | Observer / Telegram Bridge | 不持有权威工作流事实；只保存通知 outbox 与 Telegram offset |
 
 任何一层都不能替代另一层。尤其是 Herdr `idle/done`、Pi 最终回复或终端截图只能说明运行状态，不能替代 durable result、Git 验证、Reviewer 结论或 GitHub merge。
@@ -265,7 +269,7 @@ GitHub ready issue
   -> durable selection and claim
   -> task-bound Codex Analyst session
   -> isolated Herdr worktree
-  -> fresh Pi Worker
+  -> fresh Pi Worker（interactive 或 Worker-only RPC canary）
   -> 针对当前任务 diff 的一次 focused self-check
   -> durable result + Git verification
   -> fresh independent Pi Reviewer
@@ -304,13 +308,21 @@ blocked incident
 
 Worker 与 Reviewer 是两个独立的顶层 Pi agent。Reviewer 不在旧 Worker 会话中继续运行。
 
+### Attempt 执行计划与上下文信任
+
+每个新 Attempt 在任何 agent 启动或 prompt 副作用前持久化 `ExecutionSnapshot + planDigest`，绑定探测到的 Pi executable/version、完整实际 argv、role resource 与 extension 本地模块闭包 digest、session/retry/compaction 模式、Docker host、result channel 和显式 context manifest。Controller 重启后只读该快照；配置、版本、资源、环境、bundle 或计划漂移都会 fail closed。旧 ledger 中已经 running 的无快照 Attempt 只能继续观察，不能重启或重发；旧的 pre-dispatch Attempt 不能产生新副作用。
+
+Pi 的 context/session/prompt-template/theme 自动发现均被关闭。Harness 只从 `job.baseSha` 的 Git object 按 Pi 根目录优先级选择一份 `AGENTS.override.md / AGENTS.md / AGENTS.MD / CLAUDE.md / CLAUDE.MD`，记录路径、Git mode、source SHA 与 digest，并通过只读 bundle 显式注入。可信 policy 对其他仓库文件的引用不会自动授予指令权威，除非 Harness 另行从 trust anchor 导出并列入 manifest；bundled Worker TDD adapter 同样只把 candidate `CONTEXT.md`、ADR 与规则文件当数据，不赋予 ambient 指令权威。Reviewer candidate Head 中的规则文件对顶层 Reviewer 和两条 fresh review-axis child 都只是审查数据。由于 Pi CLI 没有单独禁用 `SYSTEM.md` 且保留默认 system prompt 的开关，绑定的用户 agent dir 或候选根目录出现 `SYSTEM.md` 时会在启动前阻断；该 agent dir 会显式注入每个 Herdr pane。
+
+当 `workerRuntime=pi-rpc` 时，Controller 不持有 RPC pipes：Herdr pane 的前台 runner 独占 Pi stdin/stdout，Controller 只写 O_EXCL intent、读原子 receipt。Pi child 使用 Attempt 私有、可写的 `PI_CODING_AGENT_DIR`：既不挂载也不复制 ambient `auth.json` 或 `models.json`，retry/compaction 写入留在私有 settings。RPC Provider 预检也使用同一个私有目录，因此 canary 只支持 Pi 内建模型注册表以及环境变量提供的凭据；只有 ambient OAuth 认证或依赖自定义 `models.json` 时都会 fail closed。Runner 在 ready 前和 child 完整退出后再次确认没有持久化私有 auth/model 配置；在接受 prompt 前还会确认 fresh in-memory session，要求锁定版本 Pi 0.84.0 对 `set_auto_retry(false)` 返回成功，并从第二次 `get_state` 读回 auto-compaction 已关闭。Pi 版本变化会阻断，直至协议重新验收。`agent_settled` 只形成 runtime terminal，Worker 完成仍必须通过现有 durable result 与 Git provenance。Reviewer RPC 迁移明确延后，见 [`docs/plans/attempt-runtime-evolution.md`](./docs/plans/attempt-runtime-evolution.md)。
+
 ### Review、Rework 与 Reviewer 隔离
 
 Worker 不再加载 `code-review`，也没有 `subagent` 工具；bundled
 `focused-self-check` 只针对当前任务 diff 做一次有界检查。完整双轴审查仍
 只由 fresh 独立 Reviewer 执行。
 
-Reviewer 针对精确实现 HEAD 创建只读源码快照。它必须先调用 `review_preflight`，从真实 Reviewer 进程内证明源码/验证路径、固定命令和所需 Docker socket 可用；之后才能前台启动一次 `subagent`，且必须恰好包含一个 Standards 子代理和一个 Spec 子代理。两个子代理的工具上限都是 `read,grep,find,ls`。预检失败，或任一轴失败、缺失、没有实质输出，都不能得到 `pass` 或 `changes`。
+Reviewer 针对精确实现 HEAD 创建只读源码快照。它必须先调用 `review_preflight`，从真实 Reviewer 进程内证明源码/验证路径、固定 executable/version、固定命令和所需 Docker socket 可用；之后才能前台启动一次 `subagent`，且必须恰好包含一个 Standards 子代理和一个 Spec 子代理。两个子代理的工具上限都是 `read,grep,find,ls`。子代理定义与 subagent config 都是 Attempt 私有、只读且带摘要的快照，只从私有 project registry 解析，因此用户/candidate 同名覆盖、async 默认值和 intercom 注入都不能生效；只读 child-Pi wrapper 会在每个 child 前复核 Attempt 绑定版本，并显式注入空 append-system prompt，阻止子进程动态读取全局或 candidate `APPEND_SYSTEM.md`。预检失败，或任一轴失败、缺失、没有实质输出，都不能得到 `pass` 或 `changes`。
 
 `review_validate` 在独立可写副本中执行 attempt 已绑定的固定 argv，使用最小环境和私有 cache/home/temp。源码、验证、状态与结果路径按 canonical path 双向检查不得重叠，包括符号链接别名。`review_submit` 在产品 worktree 外原子发布唯一结果，已有结果不可覆盖。
 
@@ -332,6 +344,8 @@ Harness 能够：
 - 从一个 GitHub 仓库选择 `readyLabel` 队列中的严格前沿 Issue；
 - 持久 claim，并维护单一 active job；
 - 创建隔离 worktree 和 fresh Worker/Reviewer；
+- 为 Attempt 固定执行快照和可信 context provenance；
+- 用可选 Worker RPC runner 提供单 dispatch、结构化 terminal 与可确认终止；
 - 验证 durable result、Git provenance、精确 review HEAD 和 Reviewer 隔离结果；
 - 执行有界 rework 与经人工批准的 fresh recovery；
 - 发布 PR、请求 GitHub 原生 auto-merge、观察 merge，并在归档后领取下一个 Issue；
@@ -365,6 +379,7 @@ Harness 不会：
 | `preflight.dockerRequired` | 要求本地 Docker daemon 与 Compose V2，并只把解析出的本地 Unix socket 绑定给 Worker/Reviewer 验证环境 |
 | `reviewerValidationArgv` | Harness 直接执行、不经过 shell 拼接的固定验证 argv |
 | `autoMerge` | Reviewer pass 后是否请求 GitHub 原生 auto-merge |
+| `workerRuntime` | `herdr-pi-cli`（默认）或 Worker-only `pi-rpc` canary；RPC 要求显式的内建 `--provider`、精确内建 `--model`，并使用环境变量凭据而非 ambient OAuth 或 `models.json`；不影响 Reviewer |
 | `workerArgv` / `reviewerArgv` | 被 Controller 验证的 Pi 角色契约 |
 | `herdr.session` | 必填的命名 Herdr session |
 | `analyst` | task-bound Codex Analyst wrapper 命令与参数 |
@@ -373,11 +388,13 @@ Harness 不会：
 
 | 角色 | 必需内容 | 工具 | Thinking |
 | --- | --- | --- | --- |
-| Worker | `implement`、`tdd`、bundled `focused-self-check` 与 `worker-tools.js` | `read,bash,edit,write,grep,find,ls,worker_submit` | `high`、`xhigh` 或 `max` |
-| Reviewer | bundled `code-review`、显式 `pi-subagents` 与 `reviewer-tools.js` extensions | `read,grep,find,ls,subagent,review_preflight,review_validate,review_submit` | `max` |
-| Review-axis 子代理 | fresh context，不继承 skills/extensions | `read,grep,find,ls` | `max` |
+| Worker | `implement`、bundled `tdd`、bundled `focused-self-check` 与 `worker-tools.js` | `read,bash,edit,write,grep,find,ls,worker_submit` | `high`、`xhigh` 或 `max` |
+| Reviewer | bundled `code-review`、bundled config isolator、显式 `pi-subagents` 与 bundled `reviewer-tools.js` | `read,grep,find,ls,subagent,review_preflight,review_validate,review_submit` | `max` |
+| Review-axis 子代理 | fresh context，不继承 project context、skills 或 extensions | `read,grep,find,ls` | `max` |
 
-Worker 与 Reviewer 都必须包含 `--no-approve --no-skills --no-extensions`。Worker 只加载 bundled `worker-tools.js`；Reviewer 加载示例配置声明的两个 extension。Controller 会核对 skill/extension 身份、工具集合和 bundled 代码。可选运行时选择器仅限 `--provider`、`--model`、`--no-session`。
+Worker 与 Reviewer 都必须包含 `--no-approve --no-skills --no-session --no-extensions --no-context-files --no-prompt-templates --no-themes`。Worker 只加载 bundled `worker-tools.js`；Reviewer 必须按顺序加载 config isolator、`pi-subagents`、`reviewer-tools.js` 三个 extension。Controller 会核对 skill/extension 身份、工具集合和 bundled 代码。用户可选运行时选择器仅限 `--provider`、`--model`；RPC 所需 `--mode rpc` 与显式 context bundle 由 Controller 注入，不能写进 role argv。
+
+Reviewer adapter 只接受已验收的 `pi-subagents` `0.42.1`。双轴通过一次前台 `workflowScript` 启动；Harness 只接收固定的 `return await runs.all(<JSON>);` manifest，已删除的旧 `tasks` API 或任意脚本逻辑都会被拒绝。
 
 ### Provider/model 示例
 

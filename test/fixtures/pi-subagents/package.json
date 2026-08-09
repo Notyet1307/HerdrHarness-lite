@@ -1,6 +1,7 @@
 {
   "name": "pi-subagents",
-  "version": "0.0.0-test",
+  "version": "0.42.1",
+  "type": "module",
   "exports": {
     "./capability-ceiling": "./capability-ceiling.js"
   },

@@ -1,3 +1,4 @@
+import type { ExecutionContext, ExecutionResource } from "../model.js";
 import type { BaseSyncVerification, GitPort, ReviewerVerification, WorkerVerification } from "../ports.js";
 import { type CommandRunner } from "./command.js";
 export declare class GitCli implements GitPort {
@@ -41,6 +42,16 @@ export declare class GitCli implements GitPort {
     }): Promise<{
         descriptorPath: string;
     }>;
+    prepareTrustedContext(input: {
+        localPath: string;
+        rootPath: string;
+        trustAnchorSha: string;
+        jobId: string;
+        attemptId: string;
+        lane: "worker" | "reviewer";
+        agentDir: string;
+    }): Promise<ExecutionContext>;
+    verifyTrustedContext(context: ExecutionContext): Promise<void>;
     prepareReviewer(input: {
         worktree: {
             path: string;
@@ -55,6 +66,9 @@ export declare class GitCli implements GitPort {
         expectedHeadSha: string;
         validationArgv: string[];
         dockerHost: string | null;
+        reviewAxisAgent: ExecutionResource;
+        piExecutable: string;
+        piRuntimeVersion: string;
     }): Promise<{
         reviewPath: string;
         descriptorPath: string;

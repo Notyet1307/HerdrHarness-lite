@@ -1,9 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { GitCli } from "../src/adapters/git-cli.js";
+import { executionResourceDigest } from "../src/attempt-plan.js";
 import { requireSuccess, SyncCommandRunner } from "../src/adapters/command.js";
 const head = "b".repeat(40);
 const worktree = { path: "/repo", branch: "agent/issue-1", workspaceId: "w1" };
@@ -19,10 +21,114 @@ test("Reviewer Git verification rejects untracked files outside Harness results"
     if (!rejected.ok)
         assert.match(rejected.reason, /notes\.txt/);
 });
+test("trusted context is exported from the exact base SHA with Pi-compatible precedence", async () => {
+    const root = mkdtempSync(join(tmpdir(), "herdr-context-"));
+    const repo = join(root, "repo");
+    const attemptRoot = join(root, "state", "attempt-1");
+    const runner = new SyncCommandRunner();
+    const git = (...args) => requireSuccess(runner.run("git", ["-C", repo, ...args]), `git ${args[0]}`);
+    try {
+        mkdirSync(repo);
+        git("init", "--quiet");
+        git("config", "user.email", "context@example.test");
+        git("config", "user.name", "Context Test");
+        writeFileSync(join(repo, "AGENTS.override.md"), "trusted override\n");
+        writeFileSync(join(repo, "AGENTS.md"), "lower priority\n");
+        git("add", ".");
+        git("commit", "--quiet", "-m", "trusted base");
+        const baseSha = git("rev-parse", "HEAD").trim();
+        writeFileSync(join(repo, "AGENTS.override.md"), "candidate instruction\n");
+        git("add", ".");
+        git("commit", "--quiet", "-m", "candidate");
+        const cli = new GitCli(runner);
+        const input = {
+            localPath: repo,
+            rootPath: attemptRoot,
+            trustAnchorSha: baseSha,
+            jobId: "job-1",
+            attemptId: "reviewer-1",
+            lane: "reviewer",
+            agentDir: join(root, "agent-dir"),
+        };
+        const context = await cli.prepareTrustedContext(input);
+        assert.deepEqual(context.entries.map((entry) => entry.path), ["AGENTS.override.md"]);
+        assert.equal(context.entries[0]?.sourceSha, baseSha);
+        assert.match(readFileSync(context.bundlePath, "utf8"), /trusted override/);
+        assert.equal(readFileSync(context.bundlePath, "utf8").includes("candidate instruction"), false);
+        assert.match(readFileSync(context.bundlePath, "utf8"), /review subjects only/);
+        assert.match(readFileSync(context.bundlePath, "utf8"), /reference from trusted policy.*does not grant.*instruction authority/i);
+        assert.equal(lstatSync(context.bundlePath).mode & 0o222, 0);
+        assert.deepEqual(await cli.prepareTrustedContext(input), context);
+        chmodSync(context.bundlePath, 0o600);
+        writeFileSync(context.bundlePath, "tampered\n");
+        await assert.rejects(() => cli.verifyTrustedContext(context), /changed after preparation/);
+    }
+    finally {
+        rmSync(root, { recursive: true, force: true });
+    }
+});
+test("trusted context accepts an explicit empty manifest and rejects unsafe policy blobs", async () => {
+    const root = mkdtempSync(join(tmpdir(), "herdr-context-boundary-"));
+    const repo = join(root, "repo");
+    const runner = new SyncCommandRunner();
+    const git = (...args) => requireSuccess(runner.run("git", ["-C", repo, ...args]), `git ${args[0]}`);
+    try {
+        mkdirSync(repo);
+        git("init", "--quiet");
+        git("config", "user.email", "context@example.test");
+        git("config", "user.name", "Context Test");
+        writeFileSync(join(repo, "product.txt"), "base\n");
+        git("add", ".");
+        git("commit", "--quiet", "-m", "empty policy");
+        const cli = new GitCli(runner);
+        const emptySha = git("rev-parse", "HEAD").trim();
+        const empty = await cli.prepareTrustedContext({
+            localPath: repo,
+            rootPath: join(root, "state", "empty"),
+            trustAnchorSha: emptySha,
+            jobId: "job-1",
+            attemptId: "worker-empty",
+            lane: "worker",
+            agentDir: join(root, "agent-dir"),
+        });
+        assert.deepEqual(empty.entries, []);
+        assert.match(readFileSync(empty.bundlePath, "utf8"), /No trusted repository policy file/);
+        symlinkSync("product.txt", join(repo, "AGENTS.override.md"), "file");
+        git("add", ".");
+        git("commit", "--quiet", "-m", "symlink policy");
+        await assert.rejects(() => cli.prepareTrustedContext({
+            localPath: repo,
+            rootPath: join(root, "state", "symlink"),
+            trustAnchorSha: git("rev-parse", "HEAD").trim(),
+            jobId: "job-1",
+            attemptId: "worker-symlink",
+            lane: "worker",
+            agentDir: join(root, "agent-dir"),
+        }), /not a regular Git blob/);
+        rmSync(join(repo, "AGENTS.override.md"));
+        writeFileSync(join(repo, "AGENTS.override.md"), `unsafe\0${"x".repeat(128 * 1024)}`);
+        git("add", ".");
+        git("commit", "--quiet", "-m", "unsafe policy");
+        await assert.rejects(() => cli.prepareTrustedContext({
+            localPath: repo,
+            rootPath: join(root, "state", "unsafe"),
+            trustAnchorSha: git("rev-parse", "HEAD").trim(),
+            jobId: "job-1",
+            attemptId: "worker-unsafe",
+            lane: "worker",
+            agentDir: join(root, "agent-dir"),
+        }), /contains NUL/);
+    }
+    finally {
+        rmSync(root, { recursive: true, force: true });
+    }
+});
 test("Reviewer preparation exports a read-only exact-HEAD snapshot and writable validation copy", async () => {
     const root = mkdtempSync(join(tmpdir(), "herdr-review-workspace-"));
     const repo = join(root, "repo");
     const attemptRoot = join(root, "state", "attempt-1");
+    const reviewAxisAgentPath = join(root, "review-axis.md");
+    const fakePiPath = join(root, "fake-pi");
     const runner = new SyncCommandRunner();
     const git = (...args) => requireSuccess(runner.run("git", ["-C", repo, ...args]), `git ${args[0]}`);
     try {
@@ -38,6 +144,11 @@ test("Reviewer preparation exports a read-only exact-HEAD snapshot and writable 
         git("add", "product.txt");
         git("commit", "--quiet", "-m", "head");
         const expectedHeadSha = git("rev-parse", "HEAD").trim();
+        writeFileSync(reviewAxisAgentPath, "---\nname: herdr-harness-review-axis\ndescription: test\n---\nread only\n");
+        writeFileSync(fakePiPath, "#!/bin/sh\nif [ \"$1\" = --version ]; then printf '0.84.0\\n'; exit 0; fi\n: > \"$FAKE_PI_ARGS\"\nfor arg in \"$@\"; do printf '%s\\n' \"$arg\" >> \"$FAKE_PI_ARGS\"; done\n", { mode: 0o500 });
+        chmodSync(fakePiPath, 0o500);
+        mkdirSync(attemptRoot, { recursive: true });
+        writeFileSync(join(attemptRoot, "trusted-context.md"), "preserve me\n");
         const input = {
             worktree: { path: repo, branch: "agent/issue-1", workspaceId: "w1" },
             rootPath: attemptRoot,
@@ -48,14 +159,47 @@ test("Reviewer preparation exports a read-only exact-HEAD snapshot and writable 
             expectedHeadSha,
             validationArgv: ["npm", "run", "verify"],
             dockerHost: "unix:///tmp/docker.sock",
+            reviewAxisAgent: {
+                kind: "agent",
+                path: reviewAxisAgentPath,
+                digest: executionResourceDigest(reviewAxisAgentPath),
+            },
+            piExecutable: fakePiPath,
+            piRuntimeVersion: "0.84.0",
         };
         const workspace = await new GitCli(runner).prepareReviewer(input);
         assert.equal(readFileSync(join(workspace.reviewPath, "product.txt"), "utf8"), "head\n");
         assert.equal(lstatSync(join(workspace.reviewPath, "product.txt")).mode & 0o222, 0);
-        writeFileSync(join(attemptRoot, "validation", "product.txt"), "validation mutation\n");
+        writeFileSync(join(attemptRoot, "workspace", "validation", "product.txt"), "validation mutation\n");
         assert.match(readFileSync(workspace.evidencePath, "utf8"), new RegExp(`Head SHA: ${expectedHeadSha}`));
-        assert.equal(JSON.parse(readFileSync(join(attemptRoot, "descriptor.json"), "utf8")).dockerHost, "unix:///tmp/docker.sock");
+        const descriptor = JSON.parse(readFileSync(join(attemptRoot, "workspace", "descriptor.json"), "utf8"));
+        assert.equal(descriptor.dockerHost, "unix:///tmp/docker.sock");
+        assert.equal(descriptor.runtimePath, join(attemptRoot, "workspace", "review-runtime"));
+        assert.equal(descriptor.piRuntimeVersion, "0.84.0");
+        assert.equal(readFileSync(descriptor.emptyAppendSystemPromptPath, "utf8"), "");
+        assert.match(readFileSync(descriptor.piSubagentWrapperPath, "utf8"), /--append-system-prompt/);
+        assert.equal(lstatSync(descriptor.piSubagentWrapperPath).mode & 0o222, 0);
+        assert.equal(Boolean(lstatSync(descriptor.piSubagentWrapperPath).mode & 0o111), true);
+        const childArgsPath = join(root, "child-args.txt");
+        const wrapped = spawnSync(descriptor.piSubagentWrapperPath, ["--mode", "json"], {
+            env: { ...process.env, FAKE_PI_ARGS: childArgsPath },
+            encoding: "utf8",
+        });
+        assert.equal(wrapped.status, 0);
+        assert.deepEqual(readFileSync(childArgsPath, "utf8").trim().split("\n"), [
+            "--append-system-prompt",
+            descriptor.emptyAppendSystemPromptPath,
+            "--mode",
+            "json",
+        ]);
+        assert.equal(readFileSync(join(attemptRoot, "trusted-context.md"), "utf8"), "preserve me\n");
         assert.deepEqual(await new GitCli(runner).prepareReviewer(input), workspace);
+        chmodSync(fakePiPath, 0o700);
+        writeFileSync(fakePiPath, "#!/bin/sh\nif [ \"$1\" = --version ]; then printf '0.85.0\\n'; exit 0; fi\nexit 0\n", { mode: 0o500 });
+        chmodSync(fakePiPath, 0o500);
+        const drifted = spawnSync(descriptor.piSubagentWrapperPath, [], { encoding: "utf8" });
+        assert.equal(drifted.status, 70);
+        assert.match(drifted.stderr, /Pi runtime version changed/);
         await assert.rejects(() => new GitCli(runner).prepareReviewer({
             ...input,
             rootPath: join(repo, "review-state"),
@@ -77,8 +221,18 @@ test("Reviewer preparation exports a read-only exact-HEAD snapshot and writable 
         }), /outside the product worktree/);
     }
     finally {
-        const sourcePath = join(attemptRoot, "source");
+        const sourcePath = join(attemptRoot, "workspace", "source");
         const productPath = join(sourcePath, "product.txt");
+        for (const path of [
+            join(attemptRoot, "workspace", "review-runtime"),
+            join(attemptRoot, "workspace", "review-runtime", ".agents"),
+            join(attemptRoot, "workspace", "subagent-config"),
+            join(attemptRoot, "workspace", "subagent-config", "extensions"),
+            join(attemptRoot, "workspace", "subagent-config", "extensions", "subagent"),
+        ]) {
+            if (existsSync(path))
+                chmodSync(path, 0o700);
+        }
         if (existsSync(sourcePath))
             chmodSync(sourcePath, 0o700);
         if (existsSync(productPath))

@@ -39,6 +39,49 @@ export type AgentHandle = {
     tabId: string;
     workspaceId: string;
 };
+export type AttemptRuntimeAdapter = "herdr-pi-cli" | "pi-rpc";
+export type ExecutionResource = {
+    kind: "skill" | "extension" | "agent";
+    path: string;
+    digest: string;
+};
+export type ContextEntry = {
+    source: "trusted-repo-policy";
+    sourceSha: string;
+    path: string;
+    gitMode: "100644" | "100755";
+    digest: string;
+};
+export type ExecutionContext = {
+    version: 1;
+    mode: "explicit-v1";
+    lane: Lane;
+    trustAnchorSha: string;
+    entries: ContextEntry[];
+    bundlePath: string;
+    bundleDigest: string;
+    manifestPath: string;
+    manifestDigest: string;
+    agentDir: string;
+};
+export type ExecutionSnapshot = {
+    version: 1;
+    adapter: AttemptRuntimeAdapter;
+    executable: string;
+    runtimeVersion: string;
+    argv: string[];
+    provider: string | null;
+    model: string | null;
+    thinking: string;
+    tools: string[];
+    sessionMode: "ephemeral" | "fresh-persistent";
+    retryMode: "runtime-default" | "disabled";
+    compactionMode: "runtime-default" | "disabled";
+    dockerHost: string | null;
+    resources: ExecutionResource[];
+    /** Missing only on snapshots prepared before explicit context closure. */
+    context?: ExecutionContext;
+};
 export type WorkerResult = {
     version: 1;
     jobId: string;
@@ -77,6 +120,10 @@ export type Attempt = {
     resultPath: string;
     reviewerValidationArgv?: string[];
     promptDigest: string;
+    /** Optional only for ledgers written before execution plans were introduced. */
+    executionSnapshot?: ExecutionSnapshot;
+    /** Digest of the immutable Attempt identity and execution snapshot. */
+    planDigest?: string;
     handle: AgentHandle | null;
     result: AttemptResult | null;
     /** Optional for V1 ledgers written before bounded same-attempt reconciliation. */

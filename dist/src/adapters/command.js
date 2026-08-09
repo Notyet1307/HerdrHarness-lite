@@ -4,7 +4,7 @@ export class SyncCommandRunner {
         const spawnOptions = {
             encoding: "utf8",
             maxBuffer: 20 * 1024 * 1024,
-            env: process.env,
+            env: options.env ?? process.env,
         };
         if (options.cwd !== undefined)
             spawnOptions.cwd = options.cwd;
