@@ -2,12 +2,78 @@
 
 English | [简体中文](./README.zh-CN.md)
 
-HerdrHarness Lite is a small, fail-closed controller for delivering GitHub issues. A durable state machine coordinates GitHub, Git, Herdr, fresh Pi Workers, independent Reviewers, and a Codex Analyst. Agent sessions, terminal output, and chat replies are never delivery truth.
+HerdrHarness Lite is a small, fail-closed controller for delivering GitHub issues. A durable state machine coordinates GitHub, Git, Herdr, fresh Pi Workers, independent Reviewers, and a Codex Analyst. Agent sessions, terminal output, notifications, and chat replies are never delivery truth.
 
-This README has two reading paths:
+Herdr remains the agent runtime. Hermes is no longer required by the recommended Telegram path; it is retained only as a backward-compatible transport.
 
-- Agents installing, operating, inspecting, or recovering the Harness: start with **Agent operating procedure** and follow its steps and stop conditions.
-- Humans understanding the system: start with **How the system works**, then read **Capabilities and boundaries**.
+## Read this first
+
+- **Operate or recover:** follow **Agent operating procedure** in order and obey each stop condition.
+- **Deploy Telegram:** read **Current architecture**, then [`integrations/hermes-telegram/README.md`](./integrations/hermes-telegram/README.md).
+- **Change the controller:** read **How the system works**, **Capabilities and boundaries**, and the implementation entry points.
+- **Review design history:** read [ARCHITECTURE.zh-CN.md](./ARCHITECTURE.zh-CN.md); treat code, config, and tests as current truth when that analysis differs.
+
+## Current architecture
+
+The control plane and notification plane are deliberately independent:
+
+```text
+Control plane
+GitHub + Git <-> Controller <-> durable ledger
+                    |-> Herdr -> fresh Pi Worker / Reviewer
+                    `-> task-bound Codex Analyst when evidence is needed
+
+Notification and operator plane
+ledger + Controller JSONL + heartbeat
+                    -> Observer -> deliveryCommand -> standalone Telegram Bridge -> Bot
+Telegram /harness + callbacks
+                    -> Bridge -> status / approval CLI -> Harness policy + ledger CAS
+```
+
+Harness Core is the only workflow authority. The Controller performs automatic transitions; operator writes can enter only through the exact recovery gates and ledger CAS. The Observer may disappear, notifications may be delayed, and Telegram may be offline without changing task truth or granting recovery authority.
+
+| Component | Responsibility | Authority boundary |
+| --- | --- | --- |
+| Controller (`src/controller.ts`) | One durable transition per `tick`; effects, verification, recovery, publish, and merge observation | Sole automatic transition writer under the state-directory lease |
+| Herdr + Pi | Worktree/pane runtime and fresh Worker/Reviewer execution | Runtime and liveness only; durable result plus Harness verification establishes completion |
+| Codex Analyst | Bounded evidence analysis for blocked work | Recommends `hold` or a policy-allowed fresh retry; never approves or writes state |
+| Observer (`src/hermes-observer.ts`) | Reads ledger, Controller JSONL, and heartbeat; maintains a retrying notification outbox | No workflow-state authority; it may create only transport outbox/challenge state. The filename is retained for compatibility and standalone mode does not require Hermes |
+| [Harness Telegram Bridge](https://github.com/Notyet1307/harness-telegram-bridge) | Sends cards, polls `/harness` and callbacks, and invokes existing status/approval CLIs | Transport only; stores Telegram offset and never edits the ledger directly |
+| Telegram user | Reads status and accepts or declines an exact approval challenge | Human intent is still revalidated by the Harness policy and ledger CAS |
+
+### Notifications and Telegram operations
+
+The recommended deployment runs three independent long-lived processes: Controller, Observer, and the standalone Bridge. Notification failure does not stop the Controller; Controller failure is reported by Observer heartbeat monitoring.
+
+| Event | Proactive delivery |
+| --- | --- |
+| Observer startup, task start, task terminal state | One concise informational message |
+| Incident or new Analyst decision | Incident/hold card with bounded evidence |
+| Policy-allowed fresh retry | Ten-minute, single-use approval card bound to job, revision, incident, analysis, lane, and action |
+| Ledger, Controller log, preflight, or heartbeat failure/recovery | Health alert or recovery message |
+| Normal Worker/Reviewer/publish/merge-wait progress | No push; query it with `/harness` |
+
+Single-lane commands:
+
+```text
+/harness
+/harness status
+/harness incident
+/harness approve
+/harness approve CHALLENGE
+```
+
+For multiple lanes, use `/harness <lane> [status|incident|approve [challenge]]`. Inline approval buttons call the same exact-bound approval CLI. **Keep blocked** consumes that challenge without creating recovery approval.
+
+Transport choices:
+
+| Mode | Observer configuration | Telegram update consumer | Use |
+| --- | --- | --- | --- |
+| Standalone Bridge (recommended) | Set `deliveryCommand` to Bridge `send-card` | Bridge | Current architecture; no Hermes callback dependency |
+| Hermes compatibility | Omit `deliveryCommand`; configure `hermesBin`, `hermesProfile`, and `target` | Harness-specific Hermes Gateway | Existing installations only |
+| No notification plane | Do not run Observer or Bridge | None | Core delivery remains fully functional |
+
+One Bot Token can have only one `getUpdates` consumer. An existing dedicated Bot may be reused only after its previous consumer is stopped; a zero-interruption migration requires a second Bot. Keep the token in a mode `0600` file outside Git, never inline in JSON, a plist, or command arguments. The Bridge accepts exactly one allowlisted user in a private chat.
 
 ## Agent operating procedure
 
@@ -32,6 +98,8 @@ pi --list-models REVIEWER_PROVIDER
 /ABSOLUTE/PATH/codex --version
 node dist/src/cli.js status --config /ABSOLUTE/PATH/harness.config.json
 ```
+
+Telegram is optional and is installed after this core preflight. Do not put a Bot Token in `harness.config.json`; the standalone Bridge owns its separate restricted token file and config.
 
 If the configured named Herdr session is not running, start or attach it:
 
@@ -129,23 +197,7 @@ Configuration is loaded once when `run` starts. Restart the process after changi
 
 ### 5. Recover a blocked job
 
-Start every recovery from exact state:
-
-```bash
-node dist/src/cli.js status --config /ABSOLUTE/PATH/harness.config.json
-```
-
-Record:
-
-- `activeJob.revision`
-- `activeJob.state`
-- `activeJob.incident.id`, class, and lane
-- `activeJob.analysis.id`, action, and summary
-- `activeJob.activeAttempt.id`, lane, and phase
-- `activeJob.headSha`
-- `activeJob.ciFailure` and `activeJob.ciReworkCount`, when present
-
-Prefer the projected command surface instead of manually mapping those fields to a recovery command:
+Recovery starts from the live operator projection, not from a memorized mapping between incident classes and commands:
 
 ```bash
 node dist/src/cli.js status --config /ABSOLUTE/PATH/harness.config.json --operator
@@ -153,91 +205,29 @@ node dist/src/cli.js decide --config /ABSOLUTE/PATH/harness.config.json \
   --option DECISION_ID --actor OPERATOR --reason "Evidence checked; execute this exact option"
 ```
 
-An option ID is derived from the complete decision binding and becomes unavailable when any bound fact changes. `decide` delegates to the existing approval, reassessment, decision-resolution, or cancellation gate; those explicit commands remain available for compatible automation.
+If `state=blocked` and no Analyst decision exists, run exactly one `tick`, then read `status --operator` again. The projection exposes only actions allowed by the current job, revision, incident, analysis, Attempt, and Git fixed point.
 
-#### New block
+| Projected action | Human evidence required | Effect |
+| --- | --- | --- |
+| `approve_retry` | Explicit acceptance of the current Analyst fresh Worker/Reviewer recommendation | Records one bounded approval; Controller rechecks all bindings before creating a fresh attempt |
+| `reassess` | The affected runtime, validation environment, or missing evidence changed and a bounded probe passed | Creates a successor incident and asks the Analyst again; grants no retry authority |
+| `resolve_decision` | A concrete maintainer decision answering the projected final-round architecture question | Records `basis=human_decision` and prepares a fresh Worker brief with the decision and Reviewer findings |
+| `cancel` | Explicit intent to retire the exact held pre-PR job | Archives it as cancelled and returns the issue to the ready queue on the next `tick` |
 
-When `state=blocked` and `analysis=null`, run exactly one `tick`. The Analyst receives a bounded evidence pack and records advice.
+Operating sequence:
 
-- `action=hold`: stop. A hold cannot be approved.
-- `action=retry_fresh_worker` or `retry_fresh_reviewer`: present the evidence and advice to a human; run `approve` only after explicit human acceptance.
+1. Stop continuous `run` before changing runtime or validation configuration.
+2. Read `status --operator`; if it exposes no action you are authorized to take, stop.
+3. Verify the evidence named by that action and obtain explicit human intent.
+4. Run `decide` with the exact option ID and a concrete reason.
+5. Read `status --operator` again, then continue with one `tick` at a time or restart `run`.
+6. For a fresh attempt, verify the new agent identity and effective provider/model/thinking.
 
-```bash
-node dist/src/cli.js approve \
-  --config /ABSOLUTE/PATH/harness.config.json \
-  --revision REVISION \
-  --incident INCIDENT_ID \
-  --analysis ANALYSIS_ID \
-  --actor OPERATOR \
-  --reason "Evidence checked; approve one bounded fresh retry"
-```
+Option IDs are compare-and-swap bindings and become stale when any bound fact changes. Direct `approve`, `reassess`, `resolve-decision`, and `cancel` commands remain only for compatible integrations; interactive operators should use `decide`.
 
-Approval is compare-and-swap protected. Continue with standalone ticks through `recovery_applied` and fresh-attempt preparation/dispatch. The Harness closes the old pane and never resumes the old agent.
+Same-Attempt reconciliation is automatic. It never replays a prompt or grants retry authority. Recovery never resumes the old agent; a fresh Worker trusts committed work and durable results only. Integrity violations, stale identity, HEAD drift, forbidden actions, and unknown evidence remain blocked unless the live projection explicitly offers an action.
 
-Transient pane/start/wait failures and a missing result from a non-blocked agent receive one durable same-Attempt reconciliation before an Incident is created. Repeated absence still fails closed. A blocked `infrastructure_exhausted` Attempt is re-observed again immediately before an approved retry is consumed. If that exact Attempt produces a correctly bound durable result, the Controller runs the normal result and Git verification path instead of starting a fresh agent; an invalid or mismatched result remains fail-closed. Reconciliation never replays a prompt or grants recovery authority.
-
-#### Maintainer resolved an exhausted architecture decision
-
-`resolve-decision` is not a general override for Analyst `hold`. It is accepted only when the active, HEAD-bound Reviewer returned `changes` with a `major` or `critical` finding on the final allowed review round, and the Analyst held with unresolved questions. Record the concrete maintainer decision—not merely “retry”—in `--reason`:
-
-```bash
-node dist/src/cli.js resolve-decision \
-  --config /ABSOLUTE/PATH/harness.config.json \
-  --revision REVISION \
-  --incident INCIDENT_ID \
-  --analysis ANALYSIS_ID \
-  --actor OPERATOR \
-  --reason "Rerun-only supersedes ADR-0003; update the ADR and architecture, then validate the exact HEAD"
-```
-
-The ledger records `basis=human_decision` with the actor, decision, timestamp, revision, incident, and analysis bindings. The next `tick` consumes it into a fresh Worker brief containing both the decision and the blocking Reviewer findings. Any stale binding, non-final round, non-`changes` result, lower-severity-only finding, missing Analyst unknown, or HEAD mismatch fails closed.
-
-#### Provider, Reviewer validation environment, or Analyst runtime repaired
-
-Use `reassess` only when the incident is exactly one of these retryable cases:
-
-- Worker/Reviewer `infrastructure_exhausted` with no durable result; or
-- Reviewer `review_uncertain` with a durable `blocked` result bound to the current HEAD, after its external validation environment was repaired and probed; or
-- `reviewer_preflight_dirty` discovered before the Reviewer received a pane/agent, after the residue was preserved or cleaned by an operator; or
-- a pre-fix Worker `integrity_violation` where the completed result and observed worktree HEAD share the same seven-character prefix but differ only in the model-supplied suffix, after deploying and testing the Harness-owned HEAD resolver; or
-- the first `ci_failure` remains bound to the current PR HEAD, after a previously missing or truncated external diagnostic was retrieved; or
-- an Analyst execution failure recorded by the Controller itself.
-
-Sequence:
-
-1. stop continuous `run`;
-2. change the failed role's provider/model, repair the Reviewer validation environment, or correct the Analyst executable;
-3. pass one bounded probe under the affected isolation boundary;
-4. if the old failure is not yet recorded, run `tick` until it becomes a blocked incident;
-5. if the Analyst returned `hold` based on the old runtime, issue an exact `reassess`;
-6. run one `tick` for the new Analyst decision;
-7. if the new advice is a lane-matched fresh retry, obtain explicit human approval and run `approve`;
-8. continue ticks until the fresh attempt is dispatched, or restart `run`;
-9. verify the new agent's effective provider/model/thinking in the Herdr footer.
-
-```bash
-node dist/src/cli.js reassess \
-  --config /ABSOLUTE/PATH/harness.config.json \
-  --revision REVISION \
-  --incident HELD_INCIDENT_ID \
-  --analysis HELD_ANALYSIS_ID \
-  --actor OPERATOR \
-  --reason "Affected runtime changed and a bounded probe passed"
-```
-
-`reassess` requests new advice; it grants no retry authority. Stop if the new Analyst decision is still `hold`.
-
-A fresh Worker retains committed work: it uses the same task worktree and receives a bounded recovery/rework brief based on the ledger's base or reviewed HEAD. Uncommitted agent state without a durable result is not trusted.
-
-Integrity violations, stale task identity, HEAD drift, forbidden actions, and unknown evidence cannot become retryable through a config edit or repeated command. The sole compatibility migration is a legacy incident that misattributed pre-start residue to a Reviewer when the ledger proves no Reviewer handle was ever issued; exact `reassess` converts it to `reviewer_preflight_dirty`, still requiring fresh Analyst advice, human approval, and a clean-tree check before recovery.
-
-To retire an exact held job before any PR exists, use `cancel` with the current revision, incident, analysis, actor, and reason. The next `tick` closes its pane, moves the claim label back to `readyLabel`, archives the old job as `cancelled`, and permits a new job to claim the issue. This preserves the integrity incident instead of converting it into retry authority.
-
-```bash
-node dist/src/cli.js cancel --config /ABSOLUTE/PATH/harness.config.json \
-  --revision REVISION --incident INCIDENT_ID --analysis ANALYSIS_ID \
-  --actor OPERATOR --reason "Retire this fail-closed run after correcting the runtime"
-```
+Recovery is complete only when the ledger records the chosen effect and the next permitted state is visible. It does not mean the GitHub issue is complete.
 
 ### 6. Agent completion and handoff
 
@@ -263,6 +253,7 @@ A handoff must include job ID, revision/state, issue, attempt ID, HEAD, PR, vali
 | Harness ledger | Active job, revision, attempt, incident, Analyst advice, human approval, and effect receipts |
 | Git | Fixed base, implementation HEAD, commit provenance, and clean tree |
 | Herdr / Pi | Worktrees, panes, and agent runtime; execution and observability only |
+| Observer / Telegram Bridge | No authoritative workflow facts; notification outbox and Telegram offset only |
 
 No layer substitutes for another. Herdr `idle/done`, a Pi final reply, or a terminal screenshot is liveness evidence only; it cannot replace a durable result, Git verification, Reviewer decision, or GitHub merge.
 
@@ -505,9 +496,12 @@ src/recovery.ts    approval, reassessment, and cancellation gates
 src/prompts.ts     Worker/Reviewer contracts
 src/ports.ts       external boundaries
 src/cli.ts         tick/run/status/recovery operator commands
+src/hermes-observer.ts  ledger/log/heartbeat observation and retrying outbox
+src/hermes-status.ts    bounded read-only Telegram views
+src/hermes-approval.ts  exact, expiring Telegram approval challenge
 src/adapters/      GitHub, Git, Herdr, Analyst, evidence, and state
 ```
 
-For one Telegram bot routing status and exact approvals across independent repository lanes, see [`integrations/hermes-telegram/README.md`](./integrations/hermes-telegram/README.md).
+For standalone Telegram delivery, safe Bot cutover, legacy Hermes compatibility, and multi-repository lanes, see [`integrations/hermes-telegram/README.md`](./integrations/hermes-telegram/README.md).
 
 See [ARCHITECTURE.zh-CN.md](./ARCHITECTURE.zh-CN.md) for the complete state model and design analysis.

@@ -1,47 +1,119 @@
-# Hermes Telegram Harness Fleet
+# Harness Telegram integration
 
-Fleet mode keeps each Harness Controller, ledger, worktree, Herdr session, Observer, and approval challenge independent while exposing one Hermes Telegram command and callback entry point.
+The recommended transport is the standalone
+[`harness-telegram-bridge`](https://github.com/Notyet1307/harness-telegram-bridge).
+It removes the custom Hermes callback dependency while preserving the existing
+Harness status, incident, and exact-approval CLIs.
 
-## Configure lanes
+```text
+Harness ledger + Controller log + heartbeat
+  -> one Observer per lane
+  -> deliveryCommand
+  -> one standalone Bridge per Bot Token
+  -> Telegram
 
-Copy `bridge.config.example.json` once per repository. Each copy must have:
+Telegram /harness and callbacks
+  -> Bridge
+  -> lane status/approval commands
+  -> Harness policy and ledger CAS
+```
 
-- a unique `laneId` using 1-32 lowercase letters, digits, or hyphens;
-- its own `harnessConfig`, `approvalState`, `observerState`, and `controllerLog`;
-- a Controller heartbeat derived from `<stateDir>/controller-heartbeat.json`, independent of Controller log traffic;
-- the same `telegramAllowedUser` as every other lane;
-- a Harness config with a unique `stateDir`, `worktreeRoot`, and `herdr.session`.
+The Controller does not import this integration. Observer state, Bridge offset,
+Telegram messages, and callbacks are transport facts, never workflow truth.
 
-Copy `fleet.config.example.json` and map every lane ID to its absolute bridge config path. The map key and the bridge's `laneId` must match. Fleet and bridge files must not be symlinks or group/other writable; use mode `0600`.
+## Choose one transport
 
-Set `HERDR_HARNESS_FLEET_CONFIG` to the absolute fleet config path for both the Hermes Gateway and every Observer process that invokes the `harness-card` CLI. Fleet mode takes precedence over the legacy `HERDR_HARNESS_TELEGRAM_CONFIG`. Keep one Observer process per lane; all Observers may send through the same Hermes profile and Telegram bot.
+| Mode | Observer config | Bot update consumer | Status |
+| --- | --- | --- | --- |
+| Standalone Bridge | `bridge.standalone.config.example.json` with `deliveryCommand` | Bridge | Recommended |
+| Hermes compatibility | `bridge.config.example.json` without `deliveryCommand` | Harness-specific Hermes Gateway | Existing deployments only |
 
-## Telegram commands
+Never run both consumers with the same Bot Token. An existing dedicated Bot can
+be reused after the old consumer is stopped. Use a second Bot when the migration
+must have no polling interruption.
+
+## Standalone Bridge setup
+
+1. Copy `bridge.standalone.config.example.json` once per Harness lane.
+2. Give every lane a unique 1-32 character lowercase `laneId`, `harnessConfig`,
+   `approvalState`, `observerState`, and `controllerLog`.
+3. Point `deliveryCommand` to the standalone Bridge `send-card` command.
+4. Configure the Bridge with the same lane ID and the lane's `hermes-status.js`
+   and `hermes-approval.js` commands.
+5. Store the Bot Token in its own mode `0600` file. Keep real tokens and real
+   Telegram user IDs out of Git, plist arguments, logs, and documentation examples.
+6. Start the Bridge as the only update consumer, then start one Observer per lane.
+
+The Observer sends one card JSON object to `deliveryCommand` on stdin. Plain text
+messages carry `parseMode: "plain"`; approval and hold cards use validated HTML
+and bounded callback data.
+
+Configuration files must use absolute paths, must not be symlinks or
+group/other-writable, and should use mode `0600`. Every Harness lane must also
+have an independent `stateDir`, `worktreeRoot`, and `herdr.session`.
+
+Setup is complete only when:
+
+- the Bridge starts without a Telegram `409 Conflict`;
+- `/harness` returns the lane's live read-only status;
+- an outbound canary reaches the intended private chat;
+- an invalid or expired approval challenge changes no ledger state;
+- Observer restart does not replay historical normal progress;
+- Controller, Observer, and Bridge restart independently.
+
+## Commands and notification policy
+
+Single lane:
 
 ```text
 /harness
-/harness exposure
+/harness status
+/harness incident
+/harness approve
+/harness approve 0123456789ABCDEF
+```
+
+Multiple lanes:
+
+```text
+/harness
 /harness exposure status
 /harness exposure incident
 /harness exposure approve
-/harness exposure approve 0123456789ABCDEF
 ```
 
-`/harness` returns one compact line per lane. Approval cards carry the lane ID in callback data; the Router accepts only a registered lane and then invokes that lane's existing exact-binding approval command. It never edits a ledger directly.
+`/harness` returns one compact line per lane when more than one lane exists.
+Callbacks carry the lane ID; the Bridge rejects an unknown lane and never edits
+the ledger directly.
 
-The Observer pushes one concise start message and one terminal message on a normal run. Intermediate Worker, Reviewer, publish, and merge-wait transitions stay available through `/harness` instead of creating new notifications. Incidents, Controller health failures, and exact approval cards remain proactive. Approval cards and Analyst holds keep a Simplified-Chinese conclusion, impact, recommendation, and rationale visible; the timestamped timeline and technical evidence stay behind an expandable details block. Hold cards are informational and never include approval controls.
+Observer proactively sends only task start, terminal state, incidents, Analyst
+decisions, exact approval cards, and automation health changes. Normal
+Worker/Reviewer/publish/merge-wait progress remains available through
+`/harness`, avoiding notification noise.
 
-Without `HERDR_HARNESS_FLEET_CONFIG`, the existing single-instance commands and `hh:a:<token>` callbacks remain supported.
+Approval cards are ten-minute, single-use challenges bound to the exact job,
+revision, incident, analysis, lane, and retry action. The Bridge accepts one
+allowlisted user in a private chat. **Keep blocked** consumes the challenge
+without writing recovery approval; **Approve** still passes through the Harness
+approval gate and ledger verification.
 
-## Standalone transport
+## Multi-repository lanes
 
-To remove the custom Hermes callback dependency, run the separate
-[`harness-telegram-bridge`](https://github.com/Notyet1307/harness-telegram-bridge)
-with its own Telegram Bot Token. Copy `bridge.standalone.config.example.json`
-for each Observer and set `deliveryCommand` to the Bridge `send-card` command.
+The standalone Bridge owns its lane map in its own `config.json`; do not use
+`fleet.config.example.json` for standalone mode. Each lane maps to one Observer
+config and one pair of Harness status/approval commands.
 
-`deliveryCommand` is optional and backward compatible. When absent, the
-Observer keeps using `hermesBin`, `hermesProfile`, and `target` exactly as
-before. The command receives one card JSON object on stdin; ordinary text
-notifications include `parseMode: "plain"`. Do not run Hermes and the
-standalone Bridge as update consumers for the same Bot Token.
+`fleet.config.example.json` belongs only to the legacy Hermes plugin. In that
+mode, set `HERDR_HARNESS_FLEET_CONFIG` for the Hermes Gateway and every Observer.
+Fleet mode takes precedence over `HERDR_HARNESS_TELEGRAM_CONFIG`.
+
+## Hermes compatibility
+
+When `deliveryCommand` is absent, Observer uses `hermesBin`, `hermesProfile`, and
+`target` for text delivery and `harness-card` for cards. The plugin in this
+directory registers `/harness` and callback routing for that profile.
+
+Keep this mode only while an existing deployment still needs it. A standalone
+cutover is complete when the Bridge is healthy, Observer uses
+`deliveryCommand`, and the Harness-specific Hermes Gateway is stopped. Other
+Hermes profiles and gateways are outside that cutover.

@@ -2,12 +2,78 @@
 
 [English](./README.md) | 简体中文
 
-HerdrHarness Lite 是一个小型、失败关闭的 GitHub Issue 交付控制器。它用持久状态机协调 GitHub、Git、Herdr、Pi Worker、独立 Reviewer 和 Codex Analyst；agent 会话、终端输出和聊天回复都不是交付事实。
+HerdrHarness Lite 是一个小型、失败关闭的 GitHub Issue 交付控制器。它用持久状态机协调 GitHub、Git、Herdr、Pi Worker、独立 Reviewer 和 Codex Analyst；agent 会话、终端输出、通知和聊天回复都不是交付事实。
 
-这份 README 有两条阅读路径：
+Herdr 仍是 agent 运行时。当前推荐的 Telegram 路径不再依赖 Hermes；Hermes 只保留为向后兼容的传输方式。
 
-- Agent 要安装、运行、查看或恢复 Harness：从“Agent 操作手册”开始，并按步骤与停止条件执行。
-- 人类要理解系统：从“系统如何运行”开始，再看“能力与边界”。
+## 先读这里
+
+- **运行或恢复：**按顺序执行“Agent 操作手册”，遵守每一步的停止条件。
+- **部署 Telegram：**先读“当前架构”，再读 [`integrations/hermes-telegram/README.md`](./integrations/hermes-telegram/README.md)。
+- **修改 Controller：**先读“系统如何运行”“能力与边界”和实现入口。
+- **追溯设计：**阅读 [ARCHITECTURE.zh-CN.md](./ARCHITECTURE.zh-CN.md)；当分析文档与代码、配置或测试不一致时，以后三者为当前事实。
+
+## 当前架构
+
+控制面与通知面刻意保持独立：
+
+```text
+控制面
+GitHub + Git <-> Controller <-> 持久 ledger
+                    |-> Herdr -> fresh Pi Worker / Reviewer
+                    `-> 需要补充证据时调用 task-bound Codex Analyst
+
+通知与操作面
+ledger + Controller JSONL + heartbeat
+                    -> Observer -> deliveryCommand -> 独立 Telegram Bridge -> Bot
+Telegram /harness + callbacks
+                    -> Bridge -> status / approval CLI -> Harness policy + ledger CAS
+```
+
+Harness Core 是唯一的工作流权威。Controller 负责自动迁移；operator 写入只能经过精确 recovery gate 与 ledger CAS。Observer 消失、通知延迟或 Telegram 离线都不会改变任务事实，也不会授予恢复权限。
+
+| 组件 | 职责 | 权限边界 |
+| --- | --- | --- |
+| Controller（`src/controller.ts`） | 每个 `tick` 至多一次持久迁移；执行 effect、验证、恢复、发布和 merge 观察 | 在状态目录排他 lease 下唯一自动写入状态迁移 |
+| Herdr + Pi | worktree/pane 运行时与 fresh Worker/Reviewer 执行 | 只提供运行与活性；durable result 加 Harness 验证才构成交付证据 |
+| Codex Analyst | 为 blocked job 做有界证据分析 | 只能建议 `hold` 或策略允许的 fresh retry；不能批准或写状态 |
+| Observer（`src/hermes-observer.ts`） | 读取 ledger、Controller JSONL 和 heartbeat，维护可重试通知 outbox | 没有工作流状态权限；只能创建传输 outbox/challenge 状态。文件名为兼容性保留，standalone 模式不需要 Hermes |
+| [Harness Telegram Bridge](https://github.com/Notyet1307/harness-telegram-bridge) | 发送卡片，轮询 `/harness` 与 callback，调用已有 status/approval CLI | 只负责传输；仅保存 Telegram offset，不直接编辑 ledger |
+| Telegram 用户 | 查看状态，接受或拒绝精确审批 challenge | 人类意图仍由 Harness policy 与 ledger CAS 重新校验 |
+
+### 通知与 Telegram 操作
+
+推荐部署包含三个相互独立的常驻进程：Controller、Observer 和独立 Bridge。通知故障不会停止 Controller；Controller 故障则由 Observer 的 heartbeat 监测报告。
+
+| 事件 | 主动通知策略 |
+| --- | --- |
+| Observer 上线、任务开始、任务进入终态 | 一条简洁的信息通知 |
+| 新 Incident 或新 Analyst 结论 | 携带有界证据的 Incident/hold 卡片 |
+| 策略允许的 fresh retry | 十分钟、单次使用，并绑定 job、revision、incident、analysis、lane 和动作的审批卡 |
+| Ledger、Controller 日志、preflight 或 heartbeat 故障/恢复 | 健康告警或恢复通知 |
+| 正常 Worker/Reviewer/publish/merge-wait 进展 | 不主动推送；通过 `/harness` 查询 |
+
+单 lane 命令：
+
+```text
+/harness
+/harness status
+/harness incident
+/harness approve
+/harness approve CHALLENGE
+```
+
+多 lane 使用 `/harness <lane> [status|incident|approve [challenge]]`。审批按钮调用同一个精确绑定的 approval CLI；“保持阻塞”只消费本次 challenge，不会生成恢复批准。
+
+传输方式：
+
+| 模式 | Observer 配置 | Telegram update consumer | 用途 |
+| --- | --- | --- | --- |
+| 独立 Bridge（推荐） | 设置 `deliveryCommand` 指向 Bridge `send-card` | Bridge | 当前架构；不依赖 Hermes callback |
+| Hermes 兼容模式 | 不设置 `deliveryCommand`；配置 `hermesBin`、`hermesProfile` 和 `target` | Harness 专用 Hermes Gateway | 仅用于既有安装 |
+| 不启用通知面 | 不运行 Observer 和 Bridge | 无 | 核心交付仍可完整运行 |
+
+一个 Bot Token 只能有一个 `getUpdates` consumer。只有先停止旧 consumer，才能复用现有专用 Bot；零中断迁移需要第二个 Bot。Token 必须放在 Git 之外、mode `0600` 的独立文件中，不能内联进 JSON、plist 或命令参数。Bridge 只接受一个 allowlist 用户的私聊。
 
 ## Agent 操作手册
 
@@ -32,6 +98,8 @@ pi --list-models REVIEWER_PROVIDER
 /ABSOLUTE/PATH/codex --version
 node dist/src/cli.js status --config /ABSOLUTE/PATH/harness.config.json
 ```
+
+Telegram 是可选能力，应在核心预检通过后再安装。不要把 Bot Token 写入 `harness.config.json`；独立 Bridge 使用自己的受限 token 文件和配置。
 
 如果配置中的命名 Herdr session 未运行，先启动或连接：
 
@@ -129,23 +197,7 @@ node dist/src/cli.js run \
 
 ### 5. 恢复 blocked job
 
-所有恢复都从精确状态开始：
-
-```bash
-node dist/src/cli.js status --config /ABSOLUTE/PATH/harness.config.json
-```
-
-记录：
-
-- `activeJob.revision`
-- `activeJob.state`
-- `activeJob.incident.id`、class 和 lane
-- `activeJob.analysis.id`、action、summary
-- `activeJob.activeAttempt.id`、lane、phase
-- `activeJob.headSha`
-- `activeJob.ciFailure` 与 `activeJob.ciReworkCount`（存在时）
-
-默认使用投影后的命令面，不再手工把这些字段映射成某一种恢复命令：
+恢复从实时 operator projection 开始，不再让操作者记忆 incident class 到命令的映射：
 
 ```bash
 node dist/src/cli.js status --config /ABSOLUTE/PATH/harness.config.json --operator
@@ -153,90 +205,29 @@ node dist/src/cli.js decide --config /ABSOLUTE/PATH/harness.config.json \
   --option DECISION_ID --actor OPERATOR --reason "Evidence checked; execute this exact option"
 ```
 
-操作 ID 由完整决策绑定派生；任一绑定事实变化后，该 ID 就不可用。`decide` 仍委托给现有 approval、reassessment、decision-resolution 或 cancellation gate；显式旧命令继续保留，供兼容自动化使用。
+如果 `state=blocked` 且尚无 Analyst 结论，只执行一次 `tick`，然后重新读取 `status --operator`。投影只会暴露当前 job、revision、incident、analysis、Attempt 与 Git fixed point 允许的动作。
 
-#### 新 block
+| 投影动作 | 所需人工证据 | 效果 |
+| --- | --- | --- |
+| `approve_retry` | 明确接受当前 Analyst 的 fresh Worker/Reviewer 建议 | 记录一次有界批准；Controller 创建 fresh attempt 前重新校验全部绑定 |
+| `reassess` | 受影响运行时、验证环境或缺失证据已经变化，并通过有界探测 | 创建 successor incident 并重新询问 Analyst；不授予 retry 权限 |
+| `resolve_decision` | 对投影出的最终轮架构问题给出具体维护者决策 | 记录 `basis=human_decision`，把该决策和 Reviewer findings 交给 fresh Worker |
+| `cancel` | 明确废止这个精确、尚未创建 PR 的 held job | 下一次 `tick` 将其归档为 cancelled，并把 Issue 退回 ready 队列 |
 
-当 `state=blocked` 且 `analysis=null` 时，只执行一次 `tick`。Analyst 会收到有界证据包并记录建议。
+操作顺序：
 
-- `action=hold`：停止。不能批准 `hold`。
-- `action=retry_fresh_worker` 或 `retry_fresh_reviewer`：把证据和建议交给人类；只有人类明确同意后才能执行 `approve`。
+1. 修改运行时或验证配置前，先停止连续 `run`。
+2. 读取 `status --operator`；如果没有你获得授权执行的动作，停止。
+3. 核对该动作要求的证据，并取得明确人工意图。
+4. 用精确 option ID 和具体 reason 执行 `decide`。
+5. 再读一次 `status --operator`，然后逐次 `tick` 或重新启动 `run`。
+6. 若产生 fresh attempt，核对新 agent 身份和实际 provider/model/thinking。
 
-```bash
-node dist/src/cli.js approve \
-  --config /ABSOLUTE/PATH/harness.config.json \
-  --revision REVISION \
-  --incident INCIDENT_ID \
-  --analysis ANALYSIS_ID \
-  --actor OPERATOR \
-  --reason "Evidence checked; approve one bounded fresh retry"
-```
+Option ID 是 compare-and-swap 绑定；任一事实变化后都会失效。显式 `approve`、`reassess`、`resolve-decision` 和 `cancel` 只为兼容 integration 保留；交互式操作默认使用 `decide`。
 
-Approval 受 compare-and-swap 保护。随后继续单独 `tick`，直到 `recovery_applied`，再依次创建并派发 fresh attempt。Harness 会关闭旧 pane，绝不恢复旧 agent。
+同 Attempt reconciliation 由 Controller 自动完成，既不重放 prompt，也不授予 retry 权限。恢复绝不续用旧 agent；fresh Worker 只信任已提交改动和 durable result。完整性违规、身份过期、HEAD 漂移、禁止动作与未知证据会继续 blocked，除非实时投影明确提供动作。
 
-Pane/start/wait 的瞬时失败，以及非 blocked agent 暂时缺少 result，都会先获得一次持久化的同 Attempt 重观察，再创建 Incident；重复缺失仍会 fail closed。已 blocked 的 `infrastructure_exhausted` Attempt 还会在消费已批准 retry 前再观察一次。如果该精确 Attempt 产生了绑定正确的 durable result，Controller 会走正常 result 与 Git 校验路径，而不是启动 fresh agent；无效或错绑结果仍然 fail closed。Reconciliation 不重放 prompt，也不授予恢复权限。
-
-#### 维护者已解决耗尽轮次的架构决策
-
-`resolve-decision` 不是绕过 Analyst `hold` 的通用开关。只有同时满足以下条件才接受：当前 Reviewer attempt 与当前 HEAD 精确绑定、Reviewer 在最后允许轮次返回 `changes`、至少有一条 `major`/`critical` finding，并且 Analyst 因未决问题返回 `hold`。`--reason` 必须写具体维护者决策，不能只写“重试”：
-
-```bash
-node dist/src/cli.js resolve-decision \
-  --config /ABSOLUTE/PATH/harness.config.json \
-  --revision REVISION \
-  --incident INCIDENT_ID \
-  --analysis ANALYSIS_ID \
-  --actor OPERATOR \
-  --reason "Rerun-only supersedes ADR-0003；更新 ADR 和架构文档，再验证精确 HEAD"
-```
-
-账本会记录 `basis=human_decision`，并绑定 actor、决策内容、时间、revision、incident 和 analysis。下一次 `tick` 会把它消费为 fresh Worker brief，同时带上该决策和阻塞 Reviewer findings。绑定过期、尚未耗尽轮次、结果不是 `changes`、只有低严重度 finding、Analyst 没有未决问题或 HEAD 不一致，都会 fail closed。
-
-#### Provider、Reviewer 验证环境或 Analyst 运行时已修复
-
-仅当 incident 精确对应以下可重评情况时使用 `reassess`：
-
-- Worker/Reviewer `infrastructure_exhausted` 且没有 durable result；或
-- Reviewer `review_uncertain` 已产生与当前 HEAD 绑定的 durable `blocked` 结果，且其外部验证环境已经修复并通过有界探测；或
-- Reviewer 尚未获得 pane/agent 时，启动前检查发现并已人工保全或清理的 `reviewer_preflight_dirty`；或
-- 首次 `ci_failure` 仍与当前 PR HEAD 精确绑定，且此前缺失或截断的外部诊断已经取回；或
-- Controller 自己记录的 Analyst 执行失败。
-
-顺序：
-
-1. 停止连续 `run`；
-2. 修改故障角色的 provider/model、修复 Reviewer 验证环境，或修复 Analyst 可执行文件；
-3. 在受影响的隔离边界内完成一次有界探测；
-4. 如果旧故障尚未入账，执行 `tick` 使其成为 blocked incident；
-5. 如果 Analyst 已基于旧运行时返回 `hold`，执行精确 `reassess`；
-6. 再执行一次 `tick` 获取新 Analyst 判断；
-7. 若新建议是 lane 匹配的 fresh retry，获得人类明确批准后执行 `approve`；
-8. 继续 `tick` 到 fresh attempt 已派发，或重新启动 `run`；
-9. 用 Herdr footer 核对新 agent 的实际 provider/model/thinking。
-
-```bash
-node dist/src/cli.js reassess \
-  --config /ABSOLUTE/PATH/harness.config.json \
-  --revision REVISION \
-  --incident HELD_INCIDENT_ID \
-  --analysis HELD_ANALYSIS_ID \
-  --actor OPERATOR \
-  --reason "Affected runtime changed and a bounded probe passed"
-```
-
-`reassess` 只请求新判断，不授予 retry 权限。如果新 Analyst 仍返回 `hold`，停止。
-
-Fresh Worker 不会丢掉已提交改动：它继续使用同一任务 worktree，并从账本记录的 base/reviewed HEAD 接收有界恢复或 rework brief。未提交、未形成 durable result 的 agent 内部状态不被信任。
-
-完整性违规、任务身份过期、HEAD 漂移、禁止动作和未知证据不能靠改配置或重复命令转成 retry。唯一兼容迁移是旧版把“Reviewer 启动前残留”误记成完整性违规，且账本能证明 Reviewer 从未获得 handle；它会被精确 `reassess` 为 `reviewer_preflight_dirty`，仍需新 Analyst 判断、人类批准和恢复前 clean-tree 校验。
-
-如果要废止一个尚未创建 PR 的精确 held job，使用 `cancel` 并提供当前 revision、incident、analysis、actor 与 reason。下一次 `tick` 会关闭其 pane，把 claim 标签换回 `readyLabel`，以 `cancelled` 归档旧 job，再允许新 job 领取同一 Issue。该操作保留原完整性 incident，不把它转换成 retry 权限。
-
-```bash
-node dist/src/cli.js cancel --config /ABSOLUTE/PATH/harness.config.json \
-  --revision REVISION --incident INCIDENT_ID --analysis ANALYSIS_ID \
-  --actor OPERATOR --reason "修正运行时后，废止本次 fail-closed run"
-```
+只有 ledger 已记录所选 effect，且下一条允许状态清晰可见时，恢复才算完成；这不代表 GitHub Issue 已完成。
 
 ### 6. Agent 交付或交接
 
@@ -262,6 +253,7 @@ node dist/src/cli.js cancel --config /ABSOLUTE/PATH/harness.config.json \
 | Harness ledger | active job、revision、attempt、incident、Analyst 建议、人工审批和 effect receipt |
 | Git | 固定 base、实现 HEAD、提交 provenance 和 clean-tree |
 | Herdr / Pi | worktree、pane 和 agent 运行时；只提供执行与可观察性 |
+| Observer / Telegram Bridge | 不持有权威工作流事实；只保存通知 outbox 与 Telegram offset |
 
 任何一层都不能替代另一层。尤其是 Herdr `idle/done`、Pi 最终回复或终端截图只能说明运行状态，不能替代 durable result、Git 验证、Reviewer 结论或 GitHub merge。
 
@@ -501,9 +493,12 @@ src/recovery.ts    approval、reassessment 与 cancellation gates
 src/prompts.ts     Worker/Reviewer 契约
 src/ports.ts       外部边界
 src/cli.ts         tick/run/status/恢复操作命令
+src/hermes-observer.ts  ledger/log/heartbeat 观察与可重试 outbox
+src/hermes-status.ts    有界只读 Telegram 视图
+src/hermes-approval.ts  精确、限时的 Telegram 审批 challenge
 src/adapters/      GitHub、Git、Herdr、Analyst、证据与状态
 ```
 
-若要通过一个 Telegram Bot 查询多个独立仓库 lane 并路由精确审批，见 [`integrations/hermes-telegram/README.md`](./integrations/hermes-telegram/README.md)。
+独立 Telegram 投递、安全 Bot 切换、Hermes 兼容模式和多仓库 lane 的配置见 [`integrations/hermes-telegram/README.md`](./integrations/hermes-telegram/README.md)。
 
 完整状态机和设计分析见 [ARCHITECTURE.zh-CN.md](./ARCHITECTURE.zh-CN.md)。
