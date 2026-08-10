@@ -155,6 +155,33 @@ test("Hermes observer baselines old logs and retries text or approval-card deliv
     assert.ok(!(holdCard.message ?? "").includes("evidence-gathering turns were exhausted"));
     assert.ok((holdCard.message ?? "").length <= 3_900);
 
+    blocked.activeJob.revision += 1;
+    blocked.activeJob.incident.class = "infrastructure_exhausted";
+    blocked.activeJob.incident.lane = "reviewer";
+    blocked.activeJob.incident.summary = "Herdr reviewer wait failed: Pi RPC assistant ended with error";
+    blocked.activeJob.incident.allowedActions = ["retry_fresh_reviewer", "hold"];
+    blocked.activeJob.ciFailure = null;
+    blocked.activeJob.analysis = {
+      ...blocked.activeJob.analysis,
+      id: "analysis-failed",
+      action: "hold",
+      summary: "Analyst diagnosis failed closed: Codex Analyst wrapper failed: FAIL: Analyst advice is invalid",
+      resolutionBrief: "",
+      evidenceRefs: [],
+      unknowns: ["Codex Analyst wrapper failed: FAIL: Analyst advice is invalid"],
+      createdAt: "2026-08-07T00:04:00.000Z",
+    };
+    const failedAnalysisLedger = `${JSON.stringify(blocked)}\n`;
+    writeFileSync(ledgerPath, failedAnalysisLedger, { encoding: "utf8", mode: 0o600 });
+    assert.equal(runObserver().status, 0);
+    observer = readObserver(observerState);
+    const failedAnalysisCard = observer.outbox.find((entry) => entry.key === "analysis:analysis-failed");
+    assert.ok(failedAnalysisCard, JSON.stringify(observer.outbox));
+    assert.match(failedAnalysisCard.message ?? "", /Analyst 未形成有效建议/);
+    assert.match(failedAnalysisCard.message ?? "", /reviewer/);
+    assert.ok(!(failedAnalysisCard.message ?? "").includes("Analyst 已给出恢复建议"));
+    assert.ok(!(failedAnalysisCard.message ?? "").includes("未知 CI 原因"));
+
     appendFileSync(controllerLog, `${JSON.stringify({ ok: false, action: "preflight_failed", jobId: "job-001", message: "provider probe failed" })}\n`, { encoding: "utf8" });
     writeBridge("/usr/bin/false");
     assert.equal(runObserver().status, 0);
@@ -162,7 +189,7 @@ test("Hermes observer baselines old logs and retries text or approval-card deliv
     assert.ok(observer.outbox.some((entry) => (entry.message ?? "").includes("将自动重试") && (entry.message ?? "").includes("未启动新的 Agent")));
     assert.ok(observer.outbox.every((entry) => !(entry.message ?? "").includes("未执行自动恢复")));
     assert.equal(observer.controllerDown, false);
-    assert.equal(readFileSync(ledgerPath, "utf8"), heldLedger);
+    assert.equal(readFileSync(ledgerPath, "utf8"), failedAnalysisLedger);
 
     function writeBridge(hermesBin: string): void {
       writeFileSync(bridgeConfig, JSON.stringify({

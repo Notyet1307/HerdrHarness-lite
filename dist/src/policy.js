@@ -235,7 +235,7 @@ function isLegacyWorkerHeadMismatch(job) {
         && actualHead.slice(0, 7) === reportedHead.slice(0, 7)
         && reportedHead === result.headSha.toLowerCase();
 }
-function isControllerAnalystFailure(advice) {
+export function isControllerAnalystFailure(advice) {
     return advice.action === "hold"
         && advice.resolutionBrief === ""
         && advice.evidenceRefs.length === 0

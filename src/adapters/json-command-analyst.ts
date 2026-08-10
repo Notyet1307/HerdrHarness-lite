@@ -2,6 +2,8 @@ import { isBoundedText as boundedText, type AnalystSession, type AnalystTurn, ty
 import type { AnalystPort } from "../ports.js";
 import { type CommandRunner, requireSuccess, SyncCommandRunner } from "./command.js";
 
+export const MAX_ANALYST_UNKNOWNS = 4;
+
 /**
  * Adapter boundary for a persistent Codex wrapper.
  *
@@ -119,7 +121,7 @@ export function parseAnalystTurn(value: unknown): AnalystTurn {
     object.evidenceRefs.length === 0 || object.evidenceRefs.length > 8 ||
     !object.evidenceRefs.every((entry) => boundedText(entry, 128)) ||
     new Set(object.evidenceRefs).size !== object.evidenceRefs.length ||
-    !Array.isArray(object.unknowns) || object.unknowns.length > 4 ||
+    !Array.isArray(object.unknowns) || object.unknowns.length > MAX_ANALYST_UNKNOWNS ||
     !object.unknowns.every((entry) => boundedText(entry, 512))
   ) {
     throw new Error("Analyst advice is invalid");

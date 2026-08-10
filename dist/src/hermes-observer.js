@@ -4,7 +4,7 @@ import { Buffer } from "node:buffer";
 import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, renameSync, statSync, writeFileSync, } from "node:fs";
 import { dirname, isAbsolute, join } from "node:path";
 import { JsonStateStore } from "./adapters/json-store.js";
-import { operatorActionsFor } from "./policy.js";
+import { isControllerAnalystFailure, operatorActionsFor } from "./policy.js";
 import { controllerHeartbeatPath } from "./controller-heartbeat.js";
 const MAX_MESSAGE_LENGTH = 3_900;
 const MAX_OUTBOX = 512;
@@ -377,26 +377,36 @@ function analysisCard(job, heading) {
     const analysis = job.analysis;
     const exhausted = analysis.summary === "Analyst evidence-gathering turns were exhausted"
         || analysis.summary.startsWith("自动诊断未完成：在允许的证据轮数内仍缺少关键证据");
+    const analystFailed = isControllerAnalystFailure(analysis);
     const conclusion = exhausted
         ? "自动诊断未完成：在允许的证据轮数内仍缺少关键证据。"
-        : analysis.summary;
+        : analystFailed
+            ? "Analyst 执行结果未通过 Harness 校验，未形成可批准的恢复建议。"
+            : analysis.summary;
     const recommendation = exhausted && incident.class === "ci_failure"
         ? "保持暂停；补齐完整失败日志后重新诊断，不要直接批准或重跑。"
-        : "保持暂停；先处理未决信息，再按 Harness 策略重新诊断。";
+        : analystFailed
+            ? "保持暂停；恢复 Analyst 后重新诊断，不要直接批准或重跑。"
+            : "保持暂停；先处理未决信息，再按 Harness 策略重新诊断。";
+    const rationale = exhausted
+        ? "关键证据仍不足；继续 fail-closed 可避免在原因未明时启动恢复 agent。"
+        : analystFailed
+            ? "Analyst 输出未通过 Harness 校验；继续 fail-closed 可避免在没有有效诊断时启动恢复 agent。"
+            : "现有 analysis 为 hold；继续 fail-closed 可避免在未决信息处理前启动恢复 agent。";
     const unknowns = exhausted
         ? "• 所需证据超出 Harness 本轮允许的收集范围"
         : analysis.unknowns.length === 0
             ? "无"
             : analysis.unknowns.slice(0, 3).map((value) => `• ${html(clean(value, 220), 180)}`).join("\n");
     return [
-        `⚠️ <b>#${job.task.issueNumber} 已阻塞 · ${html(exhausted ? "自动诊断未完成" : heading, 100)}</b>`,
+        `⚠️ <b>#${job.task.issueNumber} 已阻塞 · ${html(exhausted ? "自动诊断未完成" : analystFailed ? "Analyst 未形成有效建议" : heading, 100)}</b>`,
         `<code>${html(clean(job.task.repo, 160), 140)}</code> · ${html(clean(job.task.title, 180), 150)}`,
         "",
         `<b>结论：</b>${html(clean(conclusion, 420), 340)}`,
         `<b>原因：</b>${html(clean(incident.summary, 540), 440)}`,
         "<b>影响：</b>自动流程保持暂停；Harness 未启动恢复 agent。",
         `<b>建议：</b>${html(recommendation, 300)}`,
-        "<b>建议原因：</b>现有 analysis 为 hold，不能批准；继续 fail-closed 可避免把未知 CI 原因带入后续 issue。",
+        `<b>建议原因：</b>${html(rationale, 300)}`,
         "",
         "<blockquote expandable><b>展开时间线与证据（Controller 本机时间）</b>",
         ...holdTimeline(job),

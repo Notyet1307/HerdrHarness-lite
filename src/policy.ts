@@ -293,7 +293,7 @@ function isLegacyWorkerHeadMismatch(job: Job): boolean {
     && reportedHead === result.headSha.toLowerCase();
 }
 
-function isControllerAnalystFailure(advice: AnalystAdvice): boolean {
+export function isControllerAnalystFailure(advice: AnalystAdvice): boolean {
   return advice.action === "hold"
     && advice.resolutionBrief === ""
     && advice.evidenceRefs.length === 0

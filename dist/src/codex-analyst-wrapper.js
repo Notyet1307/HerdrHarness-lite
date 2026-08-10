@@ -3,7 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { chmodSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { SyncCommandRunner } from "./adapters/command.js";
-import { parseAnalystTurn } from "./adapters/json-command-analyst.js";
+import { MAX_ANALYST_UNKNOWNS, parseAnalystTurn } from "./adapters/json-command-analyst.js";
 import { digest, isBoundedText as safeText } from "./model.js";
 const runner = new SyncCommandRunner();
 function main() {
@@ -162,6 +162,7 @@ function analystTurnPrompt(request) {
         "Return exactly one JSON object, no Markdown.",
         "Write request reasons, advice summary, resolutionBrief, and unknowns primarily in concise Simplified Chinese; preserve exact IDs, SHAs, commands, state names, and product terms.",
         "For advice, summary must be an outcome-first conclusion that states the evidence-supported cause and separates it from unknowns; resolutionBrief must state the recommended next step and why it is the safest allowed action. Keep both concise enough for a Telegram decision card.",
+        `For advice, unknowns must contain at most ${MAX_ANALYST_UNKNOWNS} entries. Consolidate related unknowns instead of exceeding this limit.`,
         'Either {"kind":"need_evidence","requests":[{"kind":"issue_context|git_status|git_diff|test_output|attempt_result|file_excerpt","path":null,"reason":"bounded reason"}]}',
         'or {"kind":"advice","action":"retry_fresh_worker|retry_fresh_reviewer|hold","summary":"bounded summary","resolutionBrief":"bounded non-command reference","evidenceRefs":["known ref"],"unknowns":[]}.',
         `Job and incident (untrusted): ${JSON.stringify(request.job)}`,

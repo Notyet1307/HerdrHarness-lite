@@ -1,4 +1,4 @@
-import type { Attempt, AttemptResult, BlockClass, EvidencePack, HarnessState, Incident, Job, JobState, RecoveryAction } from "./model.js";
+import type { Attempt, AttemptResult, AnalystAdvice, BlockClass, EvidencePack, HarnessState, Incident, Job, JobState, RecoveryAction } from "./model.js";
 import type { Clock, IdGenerator } from "./ports.js";
 export declare function allowedActionsFor(blockClass: BlockClass, lane: Incident["lane"]): RecoveryAction[];
 export type OperatorAction = {
@@ -30,6 +30,7 @@ export declare function operatorActionsFor(job: Job): OperatorAction[];
 export declare function reassessmentClassFor(job: Job): BlockClass | null;
 /** Exact evidence boundary for a maintainer resolving an exhausted Reviewer architecture decision. */
 export declare function isDecisionResolutionEligible(job: Job): boolean;
+export declare function isControllerAnalystFailure(advice: AnalystAdvice): boolean;
 export declare function makeIncident(input: {
     jobId: string;
     jobRevision: number;

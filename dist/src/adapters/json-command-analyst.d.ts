@@ -1,6 +1,7 @@
 import { type AnalystSession, type AnalystTurn, type TaskSnapshot } from "../model.js";
 import type { AnalystPort } from "../ports.js";
 import { type CommandRunner } from "./command.js";
+export declare const MAX_ANALYST_UNKNOWNS = 4;
 /**
  * Adapter boundary for a persistent Codex wrapper.
  *
