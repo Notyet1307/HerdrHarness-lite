@@ -154,7 +154,17 @@ test("failed required CI permits two exact human-approved Worker cycles before e
     }, { clock, ids });
     assert.equal((await controller.tick()).action, "recovery_applied");
     assert.equal(store.state.activeJob?.ciReworkCount, 1);
+    const firstHandoff = store.state.activeJob?.pendingHandoff;
+    assert.equal(firstHandoff?.kind, "ci_rework");
+    assert.equal(firstHandoff?.target.expectedRemoteHeadSha, oldHead);
+    assert.deepEqual(firstHandoff?.evidenceRefs, [
+        "task",
+        "ci-checks",
+        failedCheck.link,
+    ]);
+    assert.match(firstHandoff?.obligations.map((entry) => entry.summary).join("\n") ?? "", /assertion failed/);
     assert.equal((await controller.tick()).action, "attempt_prepared");
+    assert.deepEqual(store.state.activeJob?.activeAttempt?.contextEnvelope?.handoff?.value, firstHandoff);
     assert.equal(store.state.activeJob?.activeAttempt?.expectedRemoteHeadSha, oldHead);
     await driveUntil(controller, store, "awaiting_merge");
     assert.equal(store.state.activeJob?.pullRequest?.number, 42);

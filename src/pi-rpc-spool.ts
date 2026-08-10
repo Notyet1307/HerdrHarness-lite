@@ -3,8 +3,6 @@ import { chmodSync, closeSync, existsSync, fsyncSync, linkSync, lstatSync, mkdir
 import { dirname, join, resolve } from "node:path";
 import { digest, type AgentHandle, type ExecutionSnapshot } from "./model.js";
 
-export const SUPPORTED_PI_RPC_VERSION = "0.84.0";
-
 export type PiRpcPlan = {
   version: 1;
   attemptId: string;

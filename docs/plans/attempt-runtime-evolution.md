@@ -1,6 +1,6 @@
 # Attempt runtime 演进任务
 
-前三项是初始独立交付面；稳定后按用户决定追加 Task 4。每项只有一个主要结果和一个主要验收入口；后项不得削弱现有 ledger、result 与 Git fixed-point 真值。
+前三项是初始独立交付面；稳定后按用户决定追加 Task 4，再追加两个上下文交付面 Task 5/6。每项只有一个主要结果和一个主要验收入口；后项不得削弱现有 ledger、result 与 Git fixed-point 真值。Agent 首屏不在本轮范围内。
 
 ## Task 1 — 不可变 ExecutionSnapshot
 
@@ -46,7 +46,7 @@
 1. RPC 子进程不归短命 Controller 所有，由 Herdr 持久 pane 托管。
 2. Controller 与 runner 通过 Attempt 私有、原子落盘的 command/state spool 重连；SDK host 只共享 canonical subscription OAuth 的原生 pathname lock，settings/session 保持内存化，且不挂载或复制全局 auth/models。
 3. prompt 只有一个持久 dispatch intent；不确定结果只观察，不重放。
-4. runner 只接受已核验的 Pi 0.84.0，启动后立即关闭 auto-retry 与 auto-compaction，再接受 prompt。
+4. runner 只接受已核验的精确 Pi 版本集合（当前仅 `0.84.0`），每个 Attempt 钉住探测到的精确版本；启动后立即关闭 auto-retry 与 auto-compaction，再接受 prompt。
 5. Pi event 只用于运行观察；完成仍由 Harness result 与 Git 验证决定。
 6. Worker CLI 路径保留为第二个真实 adapter，并与 RPC 共用同一 ExecutionSnapshot 合约。
 7. SDK host 只把 canonical subscription OAuth 交给 `ModelRuntime`，继续用 Pi 原生 pathname lock 完成 refresh；settings/session 内存化，Attempt 私有目录禁止出现凭据或模型配置文件。
@@ -67,3 +67,19 @@
 5. `agent_settled`、child completed 或 validation completed 均不直接成为 workflow truth；durable Reviewer result、exact HEAD 和 clean-tree 验证保持不变。
 
 本任务不迁移 pi-subagents 内部的两条 child 到 SDK host；只有它们需要独立的 durable lifecycle/control 时再单独拆票。
+
+## Task 5 — TypedHandoff v1
+
+**主要结果：** Reviewer changes、获批 recovery 与 CI rework 统一生成带来源和目标绑定的结构化 handoff，并原子移入下一 Attempt；不再把自由文本 brief 当续跑上下文。
+
+**主要验收入口：** rework/recovery 定向测试证明 handoff 绑定来源 revision/digest、目标 lane/base/HEAD，旧 brief 或过期/错目标 handoff 会 fail closed。
+
+Handoff 只是有界的不可信任务数据，不能扩大工具、运行时或仓库 policy 权威。
+
+## Task 6 — AttemptContextEnvelope v1
+
+**主要结果：** 每个新 Attempt 持久化按角色裁剪的上下文投影，明确区分 identity、trusted authority、untrusted task/handoff/evidence、Git target、runtime view 与 writeback contract；最终 prompt 只从该 Envelope 渲染。
+
+**主要验收入口：** Controller 定向测试证明 Worker/Reviewer 获得各自所需字段，Envelope/prompt 漂移会在 pane 或 dispatch 副作用前 fail closed，凭据内容不进入 Envelope。
+
+Envelope 与 ExecutionSnapshot 一并进入 `planDigest`。它不取代可信 context manifest、durable result 或 Git fixed-point gate。

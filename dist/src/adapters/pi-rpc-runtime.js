@@ -2,7 +2,8 @@ import { existsSync, readFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { digest } from "../model.js";
 import { executionResourceDigest } from "../attempt-plan.js";
-import { ensurePrivateDirectory, readJsonIfExists, rpcGeneration, rpcRuntimeRoot, sameJson, spoolPath, SUPPORTED_PI_RPC_VERSION, writeExclusiveJson, } from "../pi-rpc-spool.js";
+import { ensurePrivateDirectory, readJsonIfExists, rpcGeneration, rpcRuntimeRoot, sameJson, spoolPath, writeExclusiveJson, } from "../pi-rpc-spool.js";
+import { assertQualifiedPiRpcVersion } from "../pi-rpc-compat.js";
 const READY_TIMEOUT_MS = 30_000;
 const ACCEPT_TIMEOUT_MS = 30_000;
 const TERMINATE_TIMEOUT_MS = 30_000;
@@ -147,9 +148,7 @@ export class PiRpcRuntime {
         if (snapshot?.adapter !== "pi-rpc" || !input.attempt.planDigest) {
             throw new Error("Pi RPC received an unbound Attempt");
         }
-        if (snapshot.runtimeVersion !== SUPPORTED_PI_RPC_VERSION) {
-            throw new Error(`Pi RPC requires the qualified Pi version ${SUPPORTED_PI_RPC_VERSION}, got ${snapshot.runtimeVersion}`);
-        }
+        assertQualifiedPiRpcVersion(snapshot.runtimeVersion);
         const runtimeRoot = rpcRuntimeRoot(snapshot);
         const persisted = readJsonIfExists(spoolPath(runtimeRoot, "plan.json"));
         if (!requireLaunchIdentity) {

@@ -127,6 +127,99 @@ export type ReviewerResult = {
 
 export type AttemptResult = WorkerResult | ReviewerResult;
 
+export type HandoffObligation = {
+  severity: ReviewerFinding["severity"] | null;
+  summary: string;
+  evidence: string | null;
+};
+
+export type TypedHandoff = {
+  version: 1;
+  id: string;
+  kind: "review_changes" | "approved_recovery" | "ci_rework";
+  source: {
+    jobRevision: number;
+    taskDigest: string;
+    attemptId: string | null;
+    resultDigest: string | null;
+    incidentId: string | null;
+    evidenceDigest: string | null;
+    analysisId: string | null;
+    approvalId: string | null;
+    headSha: string | null;
+  };
+  target: {
+    lane: Lane;
+    baseSha: string;
+    expectedHeadSha: string | null;
+    expectedRemoteHeadSha: string | null;
+  };
+  summary: string;
+  obligations: HandoffObligation[];
+  evidenceRefs: string[];
+  unknowns: string[];
+  createdAt: string;
+};
+
+export type AttemptContextEnvelope = {
+  version: 1;
+  identity: {
+    jobId: string;
+    sourceJobRevision: number;
+    attemptId: string;
+    lane: Lane;
+    round: number;
+    taskDigest: string;
+    preparedAt: string;
+  };
+  authority: {
+    roleResources: Array<{
+      kind: Extract<ExecutionResource["kind"], "skill" | "extension" | "agent">;
+      digest: string;
+    }>;
+    repositoryPolicy: {
+      trustAnchorSha: string;
+      entries: ContextEntry[];
+      bundleDigest: string;
+      manifestDigest: string;
+    };
+  };
+  task: TaskSnapshot & { trust: "untrusted-task-data" };
+  target: {
+    branch: string;
+    baseSha: string;
+    expectedHeadSha: string | null;
+    expectedRemoteHeadSha: string | null;
+  };
+  handoff: {
+    trust: "untrusted-task-data";
+    digest: string;
+    value: TypedHandoff;
+  } | null;
+  evidence: {
+    trust: "untrusted-evidence";
+    refs: string[];
+    reviewEvidencePath: string | null;
+    validationArgv: string[] | null;
+  };
+  runtime: {
+    snapshotDigest: string;
+    adapter: AttemptRuntimeAdapter;
+    runtimeVersion: string;
+    provider: string | null;
+    model: string | null;
+    thinking: string;
+    tools: string[];
+    sessionMode: ExecutionSnapshot["sessionMode"];
+    retryMode: ExecutionSnapshot["retryMode"];
+    compactionMode: ExecutionSnapshot["compactionMode"];
+    credentialMode: ExecutionSnapshot["credentialMode"];
+  };
+  writeback:
+    | { tool: "worker_submit"; statuses: WorkerResult["status"][] }
+    | { tool: "review_submit"; statuses: ReviewerResult["status"][] };
+};
+
 export type Attempt = {
   id: string;
   lane: Lane;
@@ -143,6 +236,9 @@ export type Attempt = {
   executionSnapshot?: ExecutionSnapshot;
   /** Digest of the immutable Attempt identity and execution snapshot. */
   planDigest?: string;
+  /** Missing only on Attempts prepared before the role-scoped context projection. */
+  contextEnvelope?: AttemptContextEnvelope;
+  contextEnvelopeDigest?: string;
   handle: AgentHandle | null;
   result: AttemptResult | null;
   /** Optional for V1 ledgers written before bounded same-attempt reconciliation. */
@@ -346,7 +442,9 @@ export type Job = {
   attempts: Attempt[];
   reviewRound: number;
   maxReviewRounds: number;
-  pendingBrief: string | null;
+  pendingHandoff?: TypedHandoff | null;
+  /** Read-only compatibility field; new state never writes a free-form brief. */
+  pendingBrief?: string | null;
   incident: Incident | null;
   analysis: AnalystAdvice | null;
   approval: Approval | null;
@@ -432,6 +530,20 @@ export function assertJobInvariant(job: Job): void {
     throw new Error("recovery_approved job requires an approval");
   }
   if (job.state === "cancelled" && !job.cancellation) throw new Error("cancelled job requires a cancellation record");
+  if (job.pendingBrief?.trim()) throw new Error("legacy pendingBrief requires a quiescent migration");
+  if (job.pendingHandoff) {
+    assertTypedHandoff(job.pendingHandoff);
+    const lane = job.pendingHandoff.target.lane;
+    if (
+      job.activeAttempt
+      || job.state !== `${lane}_ready`
+      || job.pendingHandoff.source.jobRevision + 1 !== job.revision
+      || job.pendingHandoff.source.taskDigest !== job.task.digest
+      || job.pendingHandoff.target.baseSha !== (lane === "worker" ? (job.headSha ?? job.baseSha) : job.baseSha)
+      || job.pendingHandoff.target.expectedHeadSha !== (lane === "reviewer" ? job.headSha : null)
+      || job.pendingHandoff.target.expectedRemoteHeadSha !== (lane === "worker" ? (job.pullRequest?.headSha ?? null) : null)
+    ) throw new Error("pending handoff is not bound to the next ready Attempt");
+  }
   if (job.cancellation && (
     !Number.isInteger(job.cancellation.jobRevision)
     || job.cancellation.jobRevision < 0
@@ -537,6 +649,17 @@ export function assertJobInvariant(job: Job): void {
   if (job.activeAttempt?.executionSnapshot !== undefined && job.activeAttempt.planDigest === undefined) {
     throw new Error("attempt execution snapshot requires a plan digest");
   }
+  const handoff = job.activeAttempt?.contextEnvelope?.handoff?.value;
+  if (handoff && job.activeAttempt) {
+    assertTypedHandoff(handoff);
+    if (
+      handoff.source.taskDigest !== job.task.digest
+      || handoff.target.lane !== job.activeAttempt.lane
+      || handoff.target.baseSha !== job.activeAttempt.baseSha
+      || handoff.target.expectedHeadSha !== job.activeAttempt.expectedHeadSha
+      || handoff.target.expectedRemoteHeadSha !== (job.activeAttempt.expectedRemoteHeadSha ?? null)
+    ) throw new Error("attempt handoff targets different work");
+  }
   const reconciliationAttempts = job.activeAttempt?.reconciliationAttempts ?? 0;
   if (
     !Number.isInteger(reconciliationAttempts)
@@ -551,6 +674,57 @@ export function assertJobInvariant(job: Job): void {
   if (job.analyst && job.analyst.taskDigest !== job.task.digest) {
     throw new Error("analyst is bound to a different task digest");
   }
+}
+
+export function assertTypedHandoff(handoff: TypedHandoff): void {
+  if (
+    !handoff
+    || typeof handoff !== "object"
+    || !handoff.source
+    || typeof handoff.source !== "object"
+    || !handoff.target
+    || typeof handoff.target !== "object"
+    || !Array.isArray(handoff.obligations)
+    || !Array.isArray(handoff.evidenceRefs)
+    || !Array.isArray(handoff.unknowns)
+  ) throw new Error("job has an invalid typed handoff");
+  const { id, ...body } = handoff;
+  const nullableText = (value: unknown, max = 512): boolean => value === null || isBoundedText(value, max);
+  const nullableDigest = (value: unknown): boolean => value === null || (typeof value === "string" && /^[0-9a-f]{64}$/i.test(value));
+  const nullableSha = (value: unknown): boolean => value === null || (typeof value === "string" && /^[0-9a-f]{40}$/i.test(value));
+  if (
+    handoff.version !== 1
+    || id !== `handoff-${digest(body).slice(0, 32)}`
+    || !["review_changes", "approved_recovery", "ci_rework"].includes(handoff.kind)
+    || !Number.isInteger(handoff.source.jobRevision)
+    || handoff.source.jobRevision < 0
+    || !/^[0-9a-f]{64}$/i.test(handoff.source.taskDigest)
+    || !nullableText(handoff.source.attemptId)
+    || !nullableDigest(handoff.source.resultDigest)
+    || !nullableText(handoff.source.incidentId)
+    || !nullableDigest(handoff.source.evidenceDigest)
+    || !nullableText(handoff.source.analysisId)
+    || !nullableText(handoff.source.approvalId)
+    || !nullableSha(handoff.source.headSha)
+    || (handoff.target.lane !== "worker" && handoff.target.lane !== "reviewer")
+    || !/^[0-9a-f]{40}$/i.test(handoff.target.baseSha)
+    || !nullableSha(handoff.target.expectedHeadSha)
+    || !nullableSha(handoff.target.expectedRemoteHeadSha)
+    || !isBoundedText(handoff.summary, 10_000)
+    || handoff.obligations.length > 100
+    || handoff.obligations.some((item) => (
+      !item
+      || typeof item !== "object"
+      || (item.severity !== null && !["critical", "major", "minor"].includes(item.severity))
+      || !isBoundedText(item.summary, 10_000)
+      || !nullableText(item.evidence, 10_000)
+    ))
+    || handoff.evidenceRefs.length > 100
+    || handoff.evidenceRefs.some((entry) => !isBoundedText(entry, 2_000))
+    || handoff.unknowns.length > 100
+    || handoff.unknowns.some((entry) => !isBoundedText(entry, 2_000))
+    || !Number.isFinite(Date.parse(handoff.createdAt))
+  ) throw new Error("job has an invalid typed handoff");
 }
 
 export function isBoundedText(value: unknown, max: number): value is string {

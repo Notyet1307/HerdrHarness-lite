@@ -10,11 +10,11 @@ import {
   readJson,
   preparePiRpcAgentDir,
   spoolPath,
-  SUPPORTED_PI_RPC_VERSION,
   type PiRpcPlan,
   writeAtomicJson,
   writeExclusiveJson,
 } from "./pi-rpc-spool.js";
+import { isQualifiedPiRpcVersion } from "./pi-rpc-compat.js";
 
 const MAX_RPC_LINE_BYTES = 1024 * 1024;
 const MAX_EVENT_LOG_BYTES = 512 * 1024;
@@ -390,7 +390,7 @@ function validatePlan(plan: PiRpcPlan): void {
     || !/^[0-9a-f]{64}$/i.test(plan.planDigest)
     || !/^[0-9a-f]{64}$/i.test(plan.promptDigest)
     || plan.snapshot.adapter !== "pi-rpc"
-    || plan.snapshot.runtimeVersion !== SUPPORTED_PI_RPC_VERSION
+    || !isQualifiedPiRpcVersion(plan.snapshot.runtimeVersion)
     || plan.snapshot.retryMode !== "disabled"
     || plan.snapshot.compactionMode !== "disabled"
     || (lane !== "worker" && lane !== "reviewer")

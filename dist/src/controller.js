@@ -2,10 +2,12 @@ import { existsSync, readFileSync } from "node:fs";
 import { Buffer } from "node:buffer";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { attemptPlanDigest, buildExecutionSnapshot, executionPlanMatches, executionResource } from "./attempt-plan.js";
+import { buildAttemptContextEnvelope } from "./attempt-context.js";
 import { selectNextTask } from "./eligibility.js";
+import { approvedRecoveryHandoff, bindPendingHandoff, reviewChangesHandoff } from "./handoff.js";
 import { assertJobInvariant, digest, evolveJob, isRetryAction, MAX_ATTEMPT_RECONCILIATIONS, MAX_CI_REWORKS, taskFromSelection, } from "./model.js";
 import { allowedActionsFor, buildEvidencePack, isDecisionResolutionEligible, makeIncident, validateAttemptResult } from "./policy.js";
-import { reviewerPrompt, workerPrompt } from "./prompts.js";
+import { renderAttemptPrompt } from "./prompts.js";
 import { pathIsWithin, pathsOverlap } from "./path-safety.js";
 import { piRpcAgentDir } from "./pi-rpc-spool.js";
 const BUNDLED_CODE_REVIEW_SKILL = resolve(import.meta.dirname, "../../pi/skills/code-review");
@@ -106,7 +108,7 @@ export class HarnessController {
             attempts: [],
             reviewRound: 0,
             maxReviewRounds: this.deps.config.maxReviewRounds,
-            pendingBrief: null,
+            pendingHandoff: null,
             incident: null,
             analysis: null,
             approval: null,
@@ -273,6 +275,7 @@ export class HarnessController {
             startedAt: now,
             completedAt: null,
         };
+        const handoff = bindPendingHandoff(job, attempt);
         let executionSnapshot;
         try {
             const ambient = await this.deps.preflight.assertNoAmbientSystemPrompt({ cwd: job.worktree.path });
@@ -324,12 +327,15 @@ export class HarnessController {
             return result(false, "preflight_failed", job.id, message(error));
         }
         attempt = { ...attempt, executionSnapshot };
-        const prompt = lane === "worker" ? workerPrompt(job, attempt) : reviewerPrompt(job, attempt);
+        const contextEnvelope = buildAttemptContextEnvelope({ job, attempt, executionSnapshot, handoff });
+        attempt = { ...attempt, contextEnvelope, contextEnvelopeDigest: digest(contextEnvelope) };
+        const prompt = renderAttemptPrompt(attempt);
         attempt = { ...attempt, promptDigest: digest(prompt) };
         attempt = { ...attempt, planDigest: attemptPlanDigest(attempt) };
         const next = evolveJob(job, now, {
             state: lane === "worker" ? "worker_running" : "reviewer_running",
             activeAttempt: attempt,
+            pendingHandoff: null,
             lastError: null,
         });
         await this.saveJob(state, job, next);
@@ -363,11 +369,11 @@ export class HarnessController {
                 attemptResult: null,
             });
         }
-        else if (!attempt.executionSnapshot.context && attempt.phase !== "running") {
+        else if ((!attempt.executionSnapshot.context || !attempt.contextEnvelope || !attempt.contextEnvelopeDigest) && attempt.phase !== "running") {
             return this.block(state, job, {
                 class: "integrity_violation",
                 lane,
-                summary: "attempt has no explicit trusted context and cannot produce new runtime side effects",
+                summary: "attempt has no explicit trusted context envelope and cannot produce new runtime side effects",
                 attemptResult: null,
             });
         }
@@ -476,7 +482,7 @@ export class HarnessController {
             return result(true, "attempt_agent_ready", job.id, `${lane} attempt ${attempt.id} has a durable fresh Pi agent`);
         }
         if (attempt.phase === "agent_ready" && attempt.handle) {
-            const prompt = lane === "worker" ? workerPrompt(job, attempt) : reviewerPrompt(job, attempt);
+            const prompt = renderAttemptPrompt(attempt);
             if (digest(prompt) !== attempt.promptDigest) {
                 return this.block(state, job, {
                     class: "integrity_violation",
@@ -619,6 +625,7 @@ export class HarnessController {
                     cwd: this.deps.config.localPath,
                     roleArgv: executionSnapshot?.argv ?? (lane === "worker" ? this.deps.config.workerArgv : this.deps.config.reviewerArgv),
                     piBin: executionSnapshot?.executable ?? preclaimRuntime?.executable ?? this.deps.config.preflight?.piBin ?? "pi",
+                    ...(useRpc ? { piVersion: executionSnapshot?.runtimeVersion ?? preclaimRuntime.version } : {}),
                     ...(useRpc ? { agentDir: executionSnapshot ? piRpcAgentDir(executionSnapshot) : resolve(this.deps.config.stateDir, "preflight", `pi-rpc-${lane}-agent`) } : {}),
                     ...(credentialAgentDir ? { credentialAgentDir } : {}),
                     ...(credentialMode ? { credentialMode } : {}),
@@ -806,7 +813,7 @@ export class HarnessController {
             headSha: verification.headSha,
             activeAttempt: null,
             attempts: [...job.attempts, settled],
-            pendingBrief: null,
+            pendingHandoff: null,
             lastError: null,
         });
         await this.saveJob(state, job, next);
@@ -863,15 +870,18 @@ export class HarnessController {
         const cleanup = await this.closeCompletedAttempt(job, attempt);
         if (cleanup)
             return cleanup;
-        const brief = review.findings
-            .map((finding, index) => `${index + 1}. [${finding.severity}] ${finding.summary} — ${finding.evidence}`)
-            .join("\n");
+        const pendingHandoff = reviewChangesHandoff({
+            job,
+            attempt,
+            result: review,
+            createdAt: this.deps.clock.now(),
+        });
         const next = evolveJob(job, this.deps.clock.now(), {
             state: "worker_ready",
             activeAttempt: null,
             attempts: [...job.attempts, settled],
             reviewRound: attempt.round,
-            pendingBrief: `Independent reviewer requested changes:\n${brief}`,
+            pendingHandoff,
             lastError: review.summary,
         });
         await this.saveJob(state, job, next);
@@ -1340,20 +1350,18 @@ export class HarnessController {
             ? [...job.attempts, settleAttempt(job.activeAttempt, job.activeAttempt.result, now)]
             : job.attempts;
         const consumed = { ...approval, consumedAt: now };
-        const decisionFindings = job.activeAttempt?.result?.lane === "reviewer"
-            ? job.activeAttempt.result.findings
-                .map((finding, index) => `${index + 1}. [${finding.severity}] ${finding.summary} — ${finding.evidence}`)
-                .join("\n")
-            : "";
+        const pendingHandoff = approvedRecoveryHandoff({
+            job,
+            incident,
+            analysis,
+            approval,
+            createdAt: now,
+        });
         const next = evolveJob(job, now, {
             state: approval.action === "retry_fresh_reviewer" ? "reviewer_ready" : "worker_ready",
             activeAttempt: null,
             attempts,
-            pendingBrief: approval.action === "retry_fresh_worker"
-                ? humanDecision
-                    ? `Human-resolved decision:\n${approval.reason}\n\nBlocking Reviewer findings:\n${decisionFindings}`
-                    : analysis.resolutionBrief
-                : null,
+            pendingHandoff,
             incident: null,
             analysis: null,
             approval: consumed,

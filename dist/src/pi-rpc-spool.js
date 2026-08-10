@@ -2,7 +2,6 @@ import { randomUUID } from "node:crypto";
 import { chmodSync, closeSync, existsSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { digest } from "./model.js";
-export const SUPPORTED_PI_RPC_VERSION = "0.84.0";
 export function rpcRuntimeRoot(snapshot) {
     if (!snapshot.context)
         throw new Error("Pi RPC requires an explicit context bundle");

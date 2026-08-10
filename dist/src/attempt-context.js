@@ -1,0 +1,77 @@
+import { dirname, resolve } from "node:path";
+import { digest } from "./model.js";
+export function buildAttemptContextEnvelope(input) {
+    const context = input.executionSnapshot.context;
+    if (!context)
+        throw new Error("Attempt context envelope requires trusted repository context");
+    const handoff = input.handoff
+        ? {
+            trust: "untrusted-task-data",
+            digest: digest(input.handoff),
+            value: {
+                ...input.handoff,
+                source: { ...input.handoff.source },
+                target: { ...input.handoff.target },
+                obligations: input.handoff.obligations.map((item) => ({ ...item })),
+                evidenceRefs: [...input.handoff.evidenceRefs],
+                unknowns: [...input.handoff.unknowns],
+            },
+        }
+        : null;
+    return {
+        version: 1,
+        identity: {
+            jobId: input.job.id,
+            sourceJobRevision: input.job.revision,
+            attemptId: input.attempt.id,
+            lane: input.attempt.lane,
+            round: input.attempt.round,
+            taskDigest: input.job.task.digest,
+            preparedAt: input.attempt.startedAt,
+        },
+        authority: {
+            roleResources: input.executionSnapshot.resources.flatMap((resource) => (resource.kind === "skill" || resource.kind === "extension" || resource.kind === "agent"
+                ? [{ kind: resource.kind, digest: resource.digest }]
+                : [])),
+            repositoryPolicy: {
+                trustAnchorSha: context.trustAnchorSha,
+                entries: context.entries.map((entry) => ({ ...entry })),
+                bundleDigest: context.bundleDigest,
+                manifestDigest: context.manifestDigest,
+            },
+        },
+        task: { ...input.job.task, labels: [...input.job.task.labels], trust: "untrusted-task-data" },
+        target: {
+            branch: input.job.branch,
+            baseSha: input.attempt.baseSha,
+            expectedHeadSha: input.attempt.expectedHeadSha,
+            expectedRemoteHeadSha: input.attempt.expectedRemoteHeadSha ?? null,
+        },
+        handoff,
+        evidence: {
+            trust: "untrusted-evidence",
+            refs: [...(input.handoff?.evidenceRefs ?? [])],
+            reviewEvidencePath: input.attempt.lane === "reviewer"
+                ? resolve(dirname(input.attempt.resultPath), "workspace", "review-evidence.txt")
+                : null,
+            validationArgv: input.attempt.reviewerValidationArgv ? [...input.attempt.reviewerValidationArgv] : null,
+        },
+        runtime: {
+            snapshotDigest: digest(input.executionSnapshot),
+            adapter: input.executionSnapshot.adapter,
+            runtimeVersion: input.executionSnapshot.runtimeVersion,
+            provider: input.executionSnapshot.provider,
+            model: input.executionSnapshot.model,
+            thinking: input.executionSnapshot.thinking,
+            tools: [...input.executionSnapshot.tools],
+            sessionMode: input.executionSnapshot.sessionMode,
+            retryMode: input.executionSnapshot.retryMode,
+            compactionMode: input.executionSnapshot.compactionMode,
+            credentialMode: input.executionSnapshot.credentialMode,
+        },
+        writeback: input.attempt.lane === "worker"
+            ? { tool: "worker_submit", statuses: ["completed", "blocked", "failed"] }
+            : { tool: "review_submit", statuses: ["pass", "changes", "blocked", "failed"] },
+    };
+}
+//# sourceMappingURL=attempt-context.js.map

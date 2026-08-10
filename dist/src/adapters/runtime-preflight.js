@@ -2,7 +2,8 @@ import { SyncCommandRunner } from "./command.js";
 import { accessSync, constants, existsSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, delimiter, dirname, isAbsolute, join, resolve } from "node:path";
-import { preparePiRpcAgentDirAt, SUPPORTED_PI_RPC_VERSION } from "../pi-rpc-spool.js";
+import { preparePiRpcAgentDirAt } from "../pi-rpc-spool.js";
+import { assertQualifiedPiRpcVersion } from "../pi-rpc-compat.js";
 import { executionResourceDigest } from "../attempt-plan.js";
 const PROVIDER_MARKER = "HERDR_HARNESS_PROVIDER_OK";
 const PROVIDER_TIMEOUT_MS = 120_000;
@@ -38,6 +39,11 @@ export class RuntimePreflightCli {
         return { agentDir };
     }
     async probeProvider(input) {
+        if (input.agentDir !== undefined) {
+            if (!input.piVersion)
+                throw new Error("RPC Provider probe requires an inspected Pi version");
+            assertQualifiedPiRpcVersion(input.piVersion);
+        }
         const agentDir = input.agentDir === undefined
             ? undefined
             : preparePiRpcAgentDirAt(input.agentDir);
@@ -69,7 +75,7 @@ export class RuntimePreflightCli {
         const result = this.runner.run(agentDir ? process.execPath : input.piBin, agentDir ? [
             input.rpcHost.path,
             "--pi-executable", input.piBin,
-            "--expected-version", SUPPORTED_PI_RPC_VERSION,
+            "--expected-version", input.piVersion,
             "--credential-mode", input.credentialMode,
             "--credential-agent-dir", input.credentialAgentDir,
             ...(input.modelConfig ? ["--model-config-path", input.modelConfig.path, "--model-config-digest", input.modelConfig.digest] : []),

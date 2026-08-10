@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { HarnessController } from "../src/controller.js";
+import { assertJobInvariant, digest } from "../src/model.js";
 import { FakeAnalyst, FakeClock, FakeEvidence, FakeGit, FakeGitHub, FakeHerdr, FakeRuntimePreflight, MemoryStore, SequenceIds, issue, validReviewerArgv, validWorkerArgv, } from "./fakes.js";
 const config = {
     repo: "owner/repo",
@@ -42,13 +43,37 @@ test("actionable review findings create a fresh worker and a fresh reviewer", as
         ids: new SequenceIds(),
         preflight: new FakeRuntimePreflight(),
     });
-    for (let index = 0; index < 23; index += 1)
+    for (let index = 0; index < 13; index += 1)
+        await controller.tick();
+    const handoff = store.state.activeJob?.pendingHandoff;
+    assert.equal(handoff?.kind, "review_changes");
+    assert.equal(handoff?.source.attemptId, store.state.activeJob?.attempts.at(-1)?.id);
+    assert.equal(handoff?.source.headSha, "b".repeat(40));
+    assert.equal(handoff?.target.lane, "worker");
+    assert.equal(handoff?.target.baseSha, "b".repeat(40));
+    assert.deepEqual(handoff?.obligations, [{
+            severity: "major",
+            summary: "handle empty input",
+            evidence: "src/core.ts:12",
+        }]);
+    const { id: ignored, ...body } = handoff;
+    const wrongBody = { ...body, target: { ...body.target, baseSha: "a".repeat(40) } };
+    assert.throws(() => assertJobInvariant({
+        ...store.state.activeJob,
+        pendingHandoff: { ...wrongBody, id: `handoff-${digest(wrongBody).slice(0, 32)}` },
+    }), /pending handoff is not bound/);
+    assert.throws(() => assertJobInvariant({ ...store.state.activeJob, pendingBrief: "legacy free-form brief" }), /legacy pendingBrief/);
+    await controller.tick();
+    assert.equal(store.state.activeJob?.pendingHandoff, null);
+    assert.deepEqual(store.state.activeJob?.activeAttempt?.contextEnvelope?.handoff?.value, handoff);
+    for (let index = 0; index < 9; index += 1)
         await controller.tick();
     assert.equal(store.state.activeJob?.state, "publish_ready");
     assert.equal(herdr.prepared.filter((entry) => entry.lane === "worker").length, 2);
     assert.equal(herdr.prepared.filter((entry) => entry.lane === "reviewer").length, 2);
     const workerPrompts = herdr.prompts.filter((prompt) => prompt.text.includes("Pi implementation worker"));
     assert.equal(workerPrompts.length, 2);
+    assert.match(workerPrompts[1]?.text ?? "", /Typed handoff: review_changes/);
     assert.match(workerPrompts[1]?.text ?? "", /handle empty input/);
     assert.match(workerPrompts[1]?.text ?? "", /src\/core\.ts:12/);
 });

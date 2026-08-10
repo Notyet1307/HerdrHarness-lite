@@ -1,5 +1,4 @@
 import { type AgentHandle, type ExecutionSnapshot } from "./model.js";
-export declare const SUPPORTED_PI_RPC_VERSION = "0.84.0";
 export type PiRpcPlan = {
     version: 1;
     attemptId: string;

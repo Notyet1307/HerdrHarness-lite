@@ -31,6 +31,7 @@ export declare class FakeRuntimePreflight implements RuntimePreflightPort {
         cwd: string;
         roleArgv: string[];
         piBin: string;
+        piVersion?: string;
         agentDir?: string;
         credentialAgentDir?: string;
         credentialMode?: "canonical-oauth" | "canonical-model-config";
@@ -60,6 +61,7 @@ export declare class FakeRuntimePreflight implements RuntimePreflightPort {
         cwd: string;
         roleArgv: string[];
         piBin: string;
+        piVersion?: string;
         agentDir?: string;
         credentialAgentDir?: string;
         credentialMode?: "canonical-oauth" | "canonical-model-config";

@@ -22,6 +22,7 @@ export declare class RuntimePreflightCli implements RuntimePreflightPort {
         cwd: string;
         roleArgv: string[];
         piBin: string;
+        piVersion?: string;
         agentDir?: string;
         credentialAgentDir?: string;
         credentialMode?: "canonical-oauth" | "canonical-model-config";

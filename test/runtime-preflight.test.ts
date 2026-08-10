@@ -84,6 +84,7 @@ test("RPC Provider preflight uses canonical OAuth with an Attempt-private settin
       agentDir: isolatedAgentDir,
       credentialAgentDir: sourceAgentDir,
       credentialMode: "canonical-oauth",
+      piVersion: "0.84.0",
       rpcHost,
       roleArgv: [
         "--no-approve",
@@ -150,6 +151,7 @@ test("RPC Reviewer preflight passes one bound canonical models.json to the SDK h
       agentDir: isolatedAgentDir,
       credentialAgentDir,
       credentialMode: "canonical-model-config",
+      piVersion: "0.84.0",
       modelConfig,
       rpcHost,
       roleArgv: ["--provider", "custom", "--model", "review-model", "--thinking", "max"],
@@ -165,6 +167,31 @@ test("RPC Reviewer preflight passes one bound canonical models.json to the SDK h
       "--private-agent-dir", isolatedAgentDir,
     ]);
     assert.equal(existsSync(join(isolatedAgentDir, "models.json")), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("RPC Provider preflight rejects an unqualified exact Pi version before SDK launch", async () => {
+  const root = mkdtempSync(join(tmpdir(), "harness-pi-rpc-version-"));
+  const isolatedAgentDir = join(root, "isolated-agent");
+  const credentialAgentDir = join(root, "credential-agent");
+  mkdirSync(credentialAgentDir);
+  writeFileSync(join(credentialAgentDir, "auth.json"), "{}\n", { mode: 0o600 });
+  const runner = new RecordingRunner([]);
+  try {
+    await assert.rejects(() => new RuntimePreflightCli(runner, {}).probeProvider({
+      lane: "worker",
+      cwd: "/repo",
+      piBin: "/opt/pi",
+      piVersion: "0.85.0",
+      agentDir: isolatedAgentDir,
+      credentialAgentDir,
+      credentialMode: "canonical-oauth",
+      rpcHost: executionResource("runtime", resolve("dist/src/pi-rpc-sdk-entry.js")),
+      roleArgv: ["--provider", "provider-a", "--model", "model-a", "--thinking", "max"],
+    }), /Pi RPC version 0\.85\.0 is not qualified/);
+    assert.equal(runner.calls.length, 0);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -186,6 +213,7 @@ test("RPC Provider preflight rejects credentials persisted into private auth", a
       lane: "worker",
       cwd: "/repo",
       piBin: "/opt/pi",
+      piVersion: "0.84.0",
       agentDir: isolatedAgentDir,
       credentialAgentDir: sourceAgentDir,
       credentialMode: "canonical-oauth",

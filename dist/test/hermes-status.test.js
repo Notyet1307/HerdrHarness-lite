@@ -74,7 +74,7 @@ test("Hermes status stays read-only and renders bounded ledger facts", () => {
                 attempts: [attempt],
                 reviewRound: 1,
                 maxReviewRounds: 3,
-                pendingBrief: null,
+                pendingHandoff: null,
                 incident,
                 analysis: {
                     id: "analysis-001",

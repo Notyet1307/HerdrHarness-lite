@@ -117,7 +117,7 @@ test("Pi RPC adapter rejects an unqualified Pi protocol version", async () => {
             attempt: fixture.attempt,
             cwd: fixture.root,
             argv: fixture.snapshot.argv,
-        }), /requires the qualified Pi version 0\.84\.0/);
+        }), /Pi RPC version 0\.85\.0 is not qualified/);
     }
     finally {
         rmSync(fixture.root, { recursive: true, force: true });

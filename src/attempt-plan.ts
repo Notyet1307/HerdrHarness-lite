@@ -49,6 +49,8 @@ export function attemptPlanDigest(attempt: Attempt): string {
     expectedRemoteHeadSha: attempt.expectedRemoteHeadSha ?? null,
     resultPath: attempt.resultPath,
     reviewerValidationArgv: attempt.reviewerValidationArgv,
+    contextEnvelope: attempt.contextEnvelope,
+    contextEnvelopeDigest: attempt.contextEnvelopeDigest,
     promptDigest: attempt.promptDigest,
     executionSnapshot: attempt.executionSnapshot,
   });

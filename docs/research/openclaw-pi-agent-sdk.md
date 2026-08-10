@@ -92,7 +92,7 @@ child 完成后，OpenClaw 构造 `task_completion` 事件并注入 requester se
 | sandbox | OpenClaw 自己实现；Pi 不提供 | worktree、Reviewer 只读 snapshot、验证副本和工具 ceiling；不是 OS sandbox | 两者都必须由宿主补强恶意代码隔离 |
 | 回写 | reply payload / `task_completion` 注入 parent | Harness-owned 原子 result，绑定 job/attempt/lane/SHA，再做 Git 验真 | Harness 边界更适合交付控制器 |
 
-HerdrHarness-lite 的业务角色 context 已由 [`src/prompts.ts`](../../src/prompts.ts) 和 [`README.zh-CN.md`](../../README.zh-CN.md) 明确：Worker 获得 Issue snapshot、task digest、base/branch 和可选 bounded brief；Reviewer 获得固定 base/head、Harness Git evidence 和固定验证命令，不继承 Worker 结论；Analyst 获得 task snapshot、incident 与白名单 evidence pack。Controller 在 prompt 前持久化 `running`，失败后只观察同一 Attempt，不重放 prompt（[`src/controller.ts`](../../src/controller.ts)）。
+HerdrHarness-lite 的业务角色 context 已由 [`src/prompts.ts`](../../src/prompts.ts) 和 [`README.zh-CN.md`](../../README.zh-CN.md) 明确：Worker 获得 role-scoped Attempt Context Envelope，其中包含 Issue snapshot、task digest、base/branch 和可选 TypedHandoff；Reviewer 获得固定 base/head、Harness Git evidence 和固定验证命令，不继承 Worker 结论；Analyst 获得 task snapshot、incident 与白名单 evidence pack。Controller 在 prompt 前持久化 `running`，失败后只观察同一 Attempt，不重放 prompt（[`src/controller.ts`](../../src/controller.ts)）。
 
 但“业务 prompt 显式”不等于“LLM 最终 context 显式”。真实 Worker/Reviewer argv 只关闭 skills/extensions discovery，没有关闭 context files、prompt templates、themes，也没有强制 `--no-session`（[`harness.config.example.json`](../../harness.config.example.json)）；参数校验器当前甚至不允许 `--no-context-files`（[`src/controller.ts`](../../src/controller.ts)）。相反，Provider preflight 已经使用 `--no-context-files --no-prompt-templates --no-themes`（[`runtime-preflight.ts`](../../src/adapters/runtime-preflight.ts)）。所以现在是“预检无菌、真实角色运行非无菌”。本机又确实存在 `~/.pi/agent/AGENTS.md`，会进入真实角色上下文。
 
@@ -114,7 +114,7 @@ HerdrHarness-lite 的业务角色 context 已由 [`src/prompts.ts`](../../src/pr
 3. 不用 Pi JSONL/SQLite session 代替 Harness ledger，不用 agent event、`done` 或 completion message 代替 result + Git 验证。
 4. 不引入通用 `sessions_spawn` 或任意深度 agent tree；当前只有 Reviewer 双轴并行具有明确验收入口。
 5. 不把 Pi 自动 compaction/provider retry 映射成 workflow retry；审批后的恢复仍创建 fresh Attempt。
-6. 不把 child completion 直接注入旧 Worker 并继续修改；Reviewer findings 应继续成为 bounded brief，交给 fresh Worker。
+6. 不把 child completion 直接注入旧 Worker 并继续修改；Reviewer findings 应进入绑定来源与目标的 TypedHandoff，交给 fresh Worker。
 
 ## 触发条件
 

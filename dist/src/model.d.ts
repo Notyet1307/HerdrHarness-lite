@@ -109,6 +109,102 @@ export type ReviewerResult = {
     findings: ReviewerFinding[];
 };
 export type AttemptResult = WorkerResult | ReviewerResult;
+export type HandoffObligation = {
+    severity: ReviewerFinding["severity"] | null;
+    summary: string;
+    evidence: string | null;
+};
+export type TypedHandoff = {
+    version: 1;
+    id: string;
+    kind: "review_changes" | "approved_recovery" | "ci_rework";
+    source: {
+        jobRevision: number;
+        taskDigest: string;
+        attemptId: string | null;
+        resultDigest: string | null;
+        incidentId: string | null;
+        evidenceDigest: string | null;
+        analysisId: string | null;
+        approvalId: string | null;
+        headSha: string | null;
+    };
+    target: {
+        lane: Lane;
+        baseSha: string;
+        expectedHeadSha: string | null;
+        expectedRemoteHeadSha: string | null;
+    };
+    summary: string;
+    obligations: HandoffObligation[];
+    evidenceRefs: string[];
+    unknowns: string[];
+    createdAt: string;
+};
+export type AttemptContextEnvelope = {
+    version: 1;
+    identity: {
+        jobId: string;
+        sourceJobRevision: number;
+        attemptId: string;
+        lane: Lane;
+        round: number;
+        taskDigest: string;
+        preparedAt: string;
+    };
+    authority: {
+        roleResources: Array<{
+            kind: Extract<ExecutionResource["kind"], "skill" | "extension" | "agent">;
+            digest: string;
+        }>;
+        repositoryPolicy: {
+            trustAnchorSha: string;
+            entries: ContextEntry[];
+            bundleDigest: string;
+            manifestDigest: string;
+        };
+    };
+    task: TaskSnapshot & {
+        trust: "untrusted-task-data";
+    };
+    target: {
+        branch: string;
+        baseSha: string;
+        expectedHeadSha: string | null;
+        expectedRemoteHeadSha: string | null;
+    };
+    handoff: {
+        trust: "untrusted-task-data";
+        digest: string;
+        value: TypedHandoff;
+    } | null;
+    evidence: {
+        trust: "untrusted-evidence";
+        refs: string[];
+        reviewEvidencePath: string | null;
+        validationArgv: string[] | null;
+    };
+    runtime: {
+        snapshotDigest: string;
+        adapter: AttemptRuntimeAdapter;
+        runtimeVersion: string;
+        provider: string | null;
+        model: string | null;
+        thinking: string;
+        tools: string[];
+        sessionMode: ExecutionSnapshot["sessionMode"];
+        retryMode: ExecutionSnapshot["retryMode"];
+        compactionMode: ExecutionSnapshot["compactionMode"];
+        credentialMode: ExecutionSnapshot["credentialMode"];
+    };
+    writeback: {
+        tool: "worker_submit";
+        statuses: WorkerResult["status"][];
+    } | {
+        tool: "review_submit";
+        statuses: ReviewerResult["status"][];
+    };
+};
 export type Attempt = {
     id: string;
     lane: Lane;
@@ -125,6 +221,9 @@ export type Attempt = {
     executionSnapshot?: ExecutionSnapshot;
     /** Digest of the immutable Attempt identity and execution snapshot. */
     planDigest?: string;
+    /** Missing only on Attempts prepared before the role-scoped context projection. */
+    contextEnvelope?: AttemptContextEnvelope;
+    contextEnvelopeDigest?: string;
     handle: AgentHandle | null;
     result: AttemptResult | null;
     /** Optional for V1 ledgers written before bounded same-attempt reconciliation. */
@@ -275,7 +374,9 @@ export type Job = {
     attempts: Attempt[];
     reviewRound: number;
     maxReviewRounds: number;
-    pendingBrief: string | null;
+    pendingHandoff?: TypedHandoff | null;
+    /** Read-only compatibility field; new state never writes a free-form brief. */
+    pendingBrief?: string | null;
     incident: Incident | null;
     analysis: AnalystAdvice | null;
     approval: Approval | null;
@@ -309,4 +410,5 @@ export declare function digest(value: unknown): string;
 export declare function stableStringify(value: unknown): string;
 export declare function evolveJob(job: Job, now: string, patch: Partial<Omit<Job, "id" | "revision" | "createdAt">>): Job;
 export declare function assertJobInvariant(job: Job): void;
+export declare function assertTypedHandoff(handoff: TypedHandoff): void;
 export declare function isBoundedText(value: unknown, max: number): value is string;

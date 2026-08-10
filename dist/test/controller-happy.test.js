@@ -5,6 +5,7 @@ import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } f
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { HarnessController } from "../src/controller.js";
+import { digest } from "../src/model.js";
 import { FakeAnalyst, FakeClock, FakeEvidence, FakeGit, FakeGitHub, FakeHerdr, FakeRuntimePreflight, MemoryStore, SequenceIds, issue, substituteCodeReviewSkillPath, substituteTddSkillPath, untrustedImplementSkillPath, validCodeReviewSkillPath, validImplementSkillPath, validPiSubagentsExtensionPath, validReviewerArgv, validWorkerArgv, } from "./fakes.js";
 const config = {
     repo: "owner/repo",
@@ -250,19 +251,33 @@ test("Attempt binds one immutable execution snapshot and ignores later config dr
         "--append-system-prompt",
         attempt?.executionSnapshot?.context?.bundlePath,
     ]);
+    assert.equal(attempt?.contextEnvelope?.identity.jobId, store.state.activeJob?.id);
+    assert.equal(attempt?.contextEnvelope?.identity.attemptId, attempt?.id);
+    assert.equal(attempt?.contextEnvelope?.task.trust, "untrusted-task-data");
+    assert.equal(attempt?.contextEnvelope?.task.issueNumber, 31);
+    assert.equal(attempt?.contextEnvelope?.authority.repositoryPolicy.manifestDigest, attempt?.executionSnapshot?.context?.manifestDigest);
+    assert.equal(attempt?.contextEnvelope?.runtime.snapshotDigest, digest(attempt?.executionSnapshot));
+    assert.equal(attempt?.contextEnvelope?.handoff, null);
+    assert.equal(attempt?.contextEnvelope?.writeback.tool, "worker_submit");
+    assert.equal(attempt?.contextEnvelopeDigest, digest(attempt?.contextEnvelope));
+    assert.equal(JSON.stringify(attempt?.contextEnvelope).includes("auth.json"), false);
     assert.match(attempt?.planDigest ?? "", /^[0-9a-f]{64}$/);
     runtimeConfig.workerArgv = validWorkerArgv.map((value) => value === "high" ? "max" : value);
     runtimeConfig.preflight = { dockerRequired: true };
     await controller.tick();
     await controller.tick();
+    await controller.tick();
     assert.deepEqual(herdr.startedArgv, [attempt.executionSnapshot.argv]);
     assert.deepEqual(preflight.providerCalls.at(-1)?.roleArgv, attempt.executionSnapshot.argv);
     assert.equal(herdr.prepared[0]?.env.DOCKER_HOST, "");
+    assert.match(herdr.prompts[0]?.text ?? "", /Attempt context envelope v1/);
+    assert.match(herdr.prompts[0]?.text ?? "", /Immutable execution plan/);
 });
 test("Attempt fails closed when its plan or inspected runtime drifts", async () => {
     for (const mutate of [
         (store, preflight) => { preflight.version = "0.85.0"; },
         (store) => { store.state.activeJob.activeAttempt.executionSnapshot.argv.push("--no-session"); },
+        (store) => { store.state.activeJob.activeAttempt.contextEnvelope.task.objective = "tampered"; },
     ]) {
         const store = new MemoryStore();
         const preflight = new FakeRuntimePreflight();
@@ -365,7 +380,14 @@ test("Worker and Reviewer contexts both trust the job base, never candidate Head
         await controller.tick();
     assert.deepEqual(git.trustedContexts.map((context) => context.trustAnchorSha), [git.baseSha, git.baseSha]);
     assert.deepEqual(git.trustedContexts.map((context) => context.lane), ["worker", "reviewer"]);
-    assert.equal(store.state.activeJob?.activeAttempt?.executionSnapshot?.resources.some((resource) => resource.kind === "agent"), true);
+    const reviewer = store.state.activeJob?.activeAttempt;
+    assert.equal(reviewer?.executionSnapshot?.resources.some((resource) => resource.kind === "agent"), true);
+    assert.equal(reviewer?.contextEnvelope?.identity.lane, "reviewer");
+    assert.equal(reviewer?.contextEnvelope?.target.expectedHeadSha, "b".repeat(40));
+    assert.equal(reviewer?.contextEnvelope?.authority.repositoryPolicy.trustAnchorSha, git.baseSha);
+    assert.equal(reviewer?.contextEnvelope?.writeback.tool, "review_submit");
+    assert.match(reviewer?.contextEnvelope?.evidence.reviewEvidencePath ?? "", /review-evidence\.txt$/);
+    assert.equal(reviewer?.contextEnvelope?.handoff, null);
 });
 test("Pi RPC canary preflights and routes only Worker through its isolated runtime", async () => {
     const store = new MemoryStore();

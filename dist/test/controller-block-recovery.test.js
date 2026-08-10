@@ -130,15 +130,25 @@ test("blocked work cannot resume before exact human approval and recovery always
     assert.equal(applied.action, "recovery_applied");
     assert.equal(store.state.activeJob?.state, "worker_ready");
     assert.equal(herdr.closed.length, 1);
+    const handoff = store.state.activeJob?.pendingHandoff;
+    assert.equal(handoff?.kind, "approved_recovery");
+    assert.equal(handoff?.source.incidentId, blocked.incident?.id);
+    assert.equal(handoff?.source.approvalId, store.state.activeJob?.approval?.id);
+    assert.equal(handoff?.target.lane, "worker");
+    assert.deepEqual(handoff?.evidenceRefs, ["task", "git_diff-0"]);
+    assert.match(handoff?.obligations[0]?.summary ?? "", /Keep the public interface unchanged/);
     await controller.tick();
+    assert.equal(store.state.activeJob?.pendingHandoff, null);
+    assert.deepEqual(store.state.activeJob?.activeAttempt?.contextEnvelope?.handoff?.value, handoff);
     const freshAttemptId = store.state.activeJob?.activeAttempt?.id;
     assert.ok(freshAttemptId);
     assert.ok(freshAttemptId !== blockedAttemptId);
     for (let index = 0; index < 3; index += 1)
         await controller.tick();
     const recoveryPrompt = herdr.prompts.at(-1)?.text ?? "";
+    assert.match(recoveryPrompt, /Typed handoff: approved_recovery/);
     assert.match(recoveryPrompt, /Keep the public interface unchanged/);
-    assert.equal(recoveryPrompt.includes(freshAttemptId), false);
+    assert.equal(recoveryPrompt.includes(freshAttemptId), true);
 });
 test("a transiently late Worker result is accepted on one same-attempt reconciliation", async () => {
     const headSha = "b".repeat(40);

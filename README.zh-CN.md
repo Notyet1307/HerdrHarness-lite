@@ -300,7 +300,7 @@ blocked incident
 
 | 角色 | 什么时候运行 | 拥有什么信息 | 权限与完成条件 |
 | --- | --- | --- | --- |
-| Worker | 首次实现、Reviewer actionable findings 后的 rework、获批的 Worker 恢复 | 不可变 Issue snapshot、task digest、base/branch、可选的有界 rework/recovery brief | 可修改任务 worktree、测试、执行一次 focused self-check、提交并调用 `worker_submit`；不能提供结果身份、启动 review subagent、push 或建 PR。只有 Harness 绑定的 durable result 与 Git 验证同时通过才完成 |
+| Worker | 首次实现、Reviewer actionable findings 后的 rework、获批的 Worker 恢复 | 不可变 Issue snapshot、task digest、base/branch、可选的结构化 rework/recovery handoff | 可修改任务 worktree、测试、执行一次 focused self-check、提交并调用 `worker_submit`；不能提供结果身份、启动 review subagent、push 或建 PR。只有 Harness 绑定的 durable result 与 Git 验证同时通过才完成 |
 | Reviewer | 每次 Worker HEAD 被接受后 | Issue 目标、固定 base、精确 HEAD、Harness 生成的 Git evidence、固定验证 argv | 顶层无通用 shell/edit/write；先预检实际验证环境，再独立检查 Standards 和 Spec，在验证副本运行命令，通过 `review_submit` 返回 `pass/changes/blocked` |
 | Analyst | claim 后建立任务绑定 session；正常主链不介入，只有 blocked 时执行判断 turn | 任务 snapshot、incident、账本/Git/最近 review 等有界证据；最多请求 `maxAnalystTurns` 轮白名单只读证据 | 只能建议 `hold` 或 policy 允许的 fresh retry；不能写状态、改 Git、操作 Herdr 或批准自己 |
 | 人类 | provider/运行时变更、风险接受和恢复授权时 | 精确 revision、incident、analysis 与证据 | 唯一可签发 retry approval；审批后 Controller 仍会重新检查 policy、身份和 Git |
@@ -309,11 +309,13 @@ Worker 与 Reviewer 是两个独立的顶层 Pi agent。Reviewer 不在旧 Worke
 
 ### Attempt 执行计划与上下文信任
 
-每个新 Attempt 在任何 agent 启动或 prompt 副作用前持久化 `ExecutionSnapshot + planDigest`，绑定探测到的 Pi executable/version、完整实际 argv、role resource 与 extension 本地模块闭包 digest、session/retry/compaction 模式、Docker host、result channel 和显式 context manifest。Controller 重启后只读该快照；配置、版本、资源、环境、bundle 或计划漂移都会 fail closed。旧 ledger 中已经 running 的无快照 Attempt 只能继续观察，不能重启或重发；旧的 pre-dispatch Attempt 不能产生新副作用。
+每个新 Attempt 在任何 agent 启动或 prompt 副作用前持久化 `ExecutionSnapshot + AttemptContextEnvelope + planDigest`。ExecutionSnapshot 绑定探测到的 Pi executable/精确版本、实际 argv、role resource 与 extension 本地模块闭包 digest、session/retry/compaction 模式、Docker host、result channel 和显式 context manifest；按角色裁剪的 Envelope 只把身份、可信 authority digest、不可信任务数据、精确 Git 目标、有界证据、runtime selector 与允许的 writeback contract 投影进最终 prompt。Controller 重启后只读这些绑定值；配置、版本、资源、环境、Envelope、prompt、bundle 或计划漂移都会 fail closed。旧 ledger 中已经 running 的无快照 Attempt 只能继续观察，不能重启或重发；旧的 pre-dispatch Attempt 不能产生新副作用。
+
+Reviewer findings 与获批的 recovery/CI 决策通过带版本的 `TypedHandoff` 传递，不再拼接自由文本续跑 prompt。它绑定来源 revision/digest 和下一条 lane/base/HEAD，再从 `Job.pendingHandoff` 原子移动到下一 Attempt Envelope。Handoff、Issue 与 evidence 始终是不可信任务数据：可以增加 obligation、reference 和 unknown，不能扩大 tools、runtime 或 repository-policy authority。
 
 Pi 的 context/session/prompt-template/theme 自动发现均被关闭。Harness 只从 `job.baseSha` 的 Git object 按 Pi 根目录优先级选择一份 `AGENTS.override.md / AGENTS.md / AGENTS.MD / CLAUDE.md / CLAUDE.MD`，记录路径、Git mode、source SHA 与 digest，并通过只读 bundle 显式注入。可信 policy 对其他仓库文件的引用不会自动授予指令权威，除非 Harness 另行从 trust anchor 导出并列入 manifest；bundled Worker TDD adapter 同样只把 candidate `CONTEXT.md`、ADR 与规则文件当数据，不赋予 ambient 指令权威。Reviewer candidate Head 中的规则文件对顶层 Reviewer 和两条 fresh review-axis child 都只是审查数据。由于 Pi CLI 没有单独禁用 `SYSTEM.md` 且保留默认 system prompt 的开关，绑定的用户 agent dir 或候选根目录出现 `SYSTEM.md` 时会在启动前阻断；该 agent dir 会显式注入每个 Herdr pane。
 
-当 `workerRuntime=pi-rpc` 或 `reviewerRuntime=pi-rpc` 时，Controller 不持有 RPC pipes：Herdr pane 的前台 runner 独占 Pi stdin/stdout，Controller 只写 O_EXCL intent、读原子 receipt。锁定版本的 SDK host 将 settings/session 保持在内存，并把 resource/context 绑定到 Attempt。Worker 使用 canonical `auth.json` 的原始路径，使订阅 OAuth refresh 与普通 Pi 共享同一把 pathname lock；Reviewer 则捕获 canonical `models.json` 的严格 JSON 绑定字节并核对执行计划摘要，在内存将一个受支持的独立 custom provider 规范化为完整公开 `ProviderConfigInput`，补齐与 Pi 一致的模型默认值、折叠 modelOverrides，并只接受当前部署需要的 compat 子集（`supportsStore`、`supportsDeveloperRole`、`requiresReasoningContentOnAssistantMessages` 和 Pi 0.84 的 `thinkingFormat` 枚举），最后通过公开 `ModelRuntime.registerProvider` 与空的非持久 credential store 注册。built-in provider overlay、OAuth provider、注释和未知字段一律 fail closed。源文件必须是权限私有的普通单链接文件。两类凭据都不会形成第二份磁盘文件或链接、进入 receipt，或回传 Controller。选单前和启动前 Provider probe 使用相同凭据 seam；runner 在接受 prompt 前证明 fresh session、关闭 auto-retry/auto-compaction，并在 child 完整退出后再次拒绝凭据或资源漂移。Pi 版本变化会阻断，直至协议重新验收。`agent_settled` 仍只形成 runtime terminal，完成必须继续通过 durable result 与 Git provenance。Reviewer RPC 只迁移顶层 Reviewer；两条固定 review-axis child 继续使用现有不可变 wrapper 与 capability ceiling。
+当 `workerRuntime=pi-rpc` 或 `reviewerRuntime=pi-rpc` 时，Controller 不持有 RPC pipes：Herdr pane 的前台 runner 独占 Pi stdin/stdout，Controller 只写 O_EXCL intent、读原子 receipt。精确版本绑定的 SDK host 将 settings/session 保持在内存，并把 resource/context 绑定到 Attempt。Worker 使用 canonical `auth.json` 的原始路径，使订阅 OAuth refresh 与普通 Pi 共享同一把 pathname lock；Reviewer 则捕获 canonical `models.json` 的严格 JSON 绑定字节并核对执行计划摘要，在内存将一个受支持的独立 custom provider 规范化为完整公开 `ProviderConfigInput`，补齐与 Pi 一致的模型默认值、折叠 modelOverrides，并只接受当前部署需要的 compat 子集（`supportsStore`、`supportsDeveloperRole`、`requiresReasoningContentOnAssistantMessages` 和 Pi 0.84 的 `thinkingFormat` 枚举），最后通过公开 `ModelRuntime.registerProvider` 与空的非持久 credential store 注册。built-in provider overlay、OAuth provider、注释和未知字段一律 fail closed。源文件必须是权限私有的普通单链接文件。两类凭据都不会形成第二份磁盘文件或链接、进入 receipt，或回传 Controller。选单前和启动前 Provider probe 使用相同凭据 seam；runner 在接受 prompt 前证明 fresh session、关闭 auto-retry/auto-compaction，并在 child 完整退出后再次拒绝凭据或资源漂移。Runner 接受的是一组已完整验收的精确 Pi 版本，而不是散落在各处的单个硬编码常量；当前已验收集合仍只有 `0.84.0`，每个 Attempt 继续钉住实际探测到的精确版本。新版本必须先完成协议与 SDK 行为测试并加入集合，否则 fail closed。`agent_settled` 仍只形成 runtime terminal，完成必须继续通过 durable result 与 Git provenance。Reviewer RPC 只迁移顶层 Reviewer；两条固定 review-axis child 继续使用现有不可变 wrapper 与 capability ceiling。
 
 ### Review、Rework 与 Reviewer 隔离
 
@@ -334,7 +336,7 @@ DOCKER_CONFIG=/absolute/path` 显式包装验证命令，预检只复用这个�
 
 这是 Pi 工具级写权限边界，不是恶意测试代码的 OS 沙箱。验证命令本身不可信时，应使用容器或独立 OS 账户。
 
-Reviewer `changes` 必须包含可执行 findings。Harness 将 findings 作为有界 brief 交给 fresh Worker，再启动 fresh Reviewer。超过 `maxReviewRounds`、findings 缺失或证据不完整时 fail closed。
+Reviewer `changes` 必须包含可执行 findings。Harness 将 findings 绑定成结构化 handoff 交给 fresh Worker，再启动 fresh Reviewer。超过 `maxReviewRounds`、findings 缺失或证据不完整时 fail closed。
 
 ## 能力与边界
 

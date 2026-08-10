@@ -11,10 +11,10 @@ import {
   rpcRuntimeRoot,
   sameJson,
   spoolPath,
-  SUPPORTED_PI_RPC_VERSION,
   type PiRpcPlan,
   writeExclusiveJson,
 } from "../pi-rpc-spool.js";
+import { assertQualifiedPiRpcVersion } from "../pi-rpc-compat.js";
 
 const READY_TIMEOUT_MS = 30_000;
 const ACCEPT_TIMEOUT_MS = 30_000;
@@ -187,9 +187,7 @@ export class PiRpcRuntime implements AttemptRuntimePort {
     if (snapshot?.adapter !== "pi-rpc" || !input.attempt.planDigest) {
       throw new Error("Pi RPC received an unbound Attempt");
     }
-    if (snapshot.runtimeVersion !== SUPPORTED_PI_RPC_VERSION) {
-      throw new Error(`Pi RPC requires the qualified Pi version ${SUPPORTED_PI_RPC_VERSION}, got ${snapshot.runtimeVersion}`);
-    }
+    assertQualifiedPiRpcVersion(snapshot.runtimeVersion);
     const runtimeRoot = rpcRuntimeRoot(snapshot);
     const persisted = readJsonIfExists<PiRpcPlan>(spoolPath(runtimeRoot, "plan.json"));
     if (!requireLaunchIdentity) {
