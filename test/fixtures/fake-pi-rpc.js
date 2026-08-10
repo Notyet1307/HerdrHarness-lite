@@ -84,6 +84,20 @@ function respond(command) {
   emit({ type: "agent_start" });
   emit({ type: "turn_start" });
   if (process.env.FAKE_PI_WAIT_FOR_ABORT === "1") return;
+  if (["error", "aborted"].includes(process.env.FAKE_PI_ASSISTANT_STOP_REASON)) {
+    const failureMessage = {
+      role: "assistant",
+      content: [{ type: "text", text: "" }],
+      stopReason: process.env.FAKE_PI_ASSISTANT_STOP_REASON,
+      errorMessage: process.env.FAKE_PI_ASSISTANT_ERROR ?? "Provider request failed",
+    };
+    emit({ type: "message_start", message: failureMessage });
+    emit({ type: "message_end", message: failureMessage });
+    emit({ type: "turn_end", message: failureMessage, toolResults: [] });
+    emit({ type: "agent_end", messages: [failureMessage], willRetry: false });
+    emit({ type: "agent_settled" });
+    return;
+  }
   const lane = process.env.FAKE_PI_LANE ?? "worker";
   writeFileSync(process.env.FAKE_PI_RESULT_PATH, `${JSON.stringify(lane === "reviewer" ? {
     version: 1,

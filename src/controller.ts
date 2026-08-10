@@ -1191,6 +1191,16 @@ export class HarnessController {
       try {
         await this.deps.github.suspendAutoMerge(job.task.repo, job.pullRequest);
       } catch (error) {
+        try {
+          const observation = await this.deps.github.observePullRequest(job.task.repo, job.pullRequest);
+          if (observation.status === "merged") {
+            const next = evolveJob(job, this.deps.clock.now(), { state: "done", lastError: null });
+            await this.saveJob(state, job, next);
+            return result(true, "merged", job.id, `PR #${job.pullRequest.number} merged`);
+          }
+        } catch {
+          // Preserve the suspension failure below when merged state cannot be proved.
+        }
         return result(false, retryAction, job.id, `base moved but auto-merge suspension is not confirmed: ${message(error)}`);
       }
     }

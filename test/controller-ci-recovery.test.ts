@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { HarnessController } from "../src/controller.js";
 import { approveRecovery, reassessIncident } from "../src/recovery.js";
+import type { PullRequestObservation, PullRequestRef } from "../src/model.js";
 import type { HarnessConfig } from "../src/ports.js";
 import {
   FakeAnalyst,
@@ -339,6 +340,54 @@ test("CI evidence-turn exhaustion records an actionable Simplified-Chinese hold"
   assert.equal(analysis?.action, "hold");
   assert.equal(analysis?.summary, "自动诊断未完成：在允许的证据轮数内仍缺少关键证据。");
   assert.deepEqual(analysis?.unknowns, ["所需证据超出 Harness 本轮允许的收集范围"]);
+});
+
+test("a PR merged during auto-merge suspension completes without a false alert", async () => {
+  class ConcurrentMergeGitHub extends FakeGitHub {
+    observations = 0;
+
+    override async observePullRequest(repo: string, pullRequest: PullRequestRef): Promise<PullRequestObservation> {
+      this.observations += 1;
+      return super.observePullRequest(repo, pullRequest);
+    }
+
+    override async suspendAutoMerge(): Promise<void> {
+      this.mergeStatus = "merged";
+      throw new Error("GraphQL: Can't disable auto-merge for this pull request");
+    }
+  }
+
+  const store = new MemoryStore();
+  const github = new ConcurrentMergeGitHub([issue({ number: 40, title: "Concurrent merge" })]);
+  const git = new FakeGit();
+  const controller = new HarnessController({
+    config,
+    store,
+    github,
+    git,
+    herdr: new FakeHerdr([
+      { lane: "worker", status: "completed", headSha: oldHead },
+      { lane: "reviewer", status: "pass", reviewedHeadSha: oldHead },
+    ]),
+    analyst: new FakeAnalyst(),
+    evidence: new FakeEvidence(),
+    clock: new FakeClock(),
+    ids: new SequenceIds(),
+    preflight: new FakeRuntimePreflight(),
+  });
+
+  await driveUntil(controller, store, "awaiting_merge");
+  github.autoMergeEnabled = true;
+  github.requiredChecks = [passedCheck];
+  git.baseSha = "e".repeat(40);
+
+  const merged = await controller.tick();
+
+  assert.equal(merged.ok, true);
+  assert.equal(merged.action, "merged");
+  assert.equal(store.state.activeJob?.state, "done");
+  assert.equal(github.observations, 2);
+  assert.deepEqual(git.baseSyncs, []);
 });
 
 test("a newer base suspends auto-merge and requires a fresh review of the merged HEAD", async () => {

@@ -180,6 +180,7 @@ async function main(argv: string[]): Promise<void> {
   let client: RpcClient | null = null;
   let settled = false;
   let policyViolation: string | null = null;
+  let assistantFailure: string | null = null;
   let agentStarts = 0;
   let eventBytes = 0;
   let logTruncated = false;
@@ -189,6 +190,12 @@ async function main(argv: string[]): Promise<void> {
     const type = KNOWN_EVENT_TYPES.has(reportedType) ? reportedType : "unknown";
     if (["message_update", "tool_execution_update", "bash_execution_update"].includes(type)) return;
     const summary: JsonObject = { type, digest: digest(event) };
+    const message = type === "message_end" ? object(event.message) : {};
+    if (message.role === "assistant" && (message.stopReason === "error" || message.stopReason === "aborted")) {
+      summary.role = "assistant";
+      summary.stopReason = message.stopReason;
+      assistantFailure = `Pi RPC assistant ended with ${message.stopReason}`;
+    }
     if (type === "agent_end") summary.willRetry = event.willRetry === true;
     if (type === "tool_execution_start" || type === "tool_execution_end") {
       summary.isError = event.isError === true;
@@ -296,14 +303,15 @@ async function main(argv: string[]): Promise<void> {
     if (client.failure) throw client.failure;
     credentialHostArgs(plan);
     preparePiRpcAgentDir(plan.snapshot);
-    const ok = policyViolation === null && !terminationRequested && settled;
+    const terminalError = policyViolation ?? assistantFailure;
+    const ok = terminalError === null && !terminationRequested && settled;
     if (ok && (childExit.code !== 0 || childExit.signal !== null)) {
       throw new Error(`Pi RPC exited unsuccessfully after settlement: ${JSON.stringify(childExit)}`);
     }
     writeAtomicJson(spoolPath(plan.runtimeRoot, "terminal.json"), {
       ...identity,
       ok,
-      ...(!ok ? { error: policyViolation ?? "runtime terminated by Controller" } : {}),
+      ...(!ok ? { error: terminalError ?? "runtime terminated by Controller" } : {}),
       agentSettled: settled,
     });
     writeAtomicJson(spoolPath(plan.runtimeRoot, "terminated.json"), { ...identity, ok: true, reason: "settled and child exited" });

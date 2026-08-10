@@ -299,6 +299,47 @@ test("CI evidence-turn exhaustion records an actionable Simplified-Chinese hold"
     assert.equal(analysis?.summary, "自动诊断未完成：在允许的证据轮数内仍缺少关键证据。");
     assert.deepEqual(analysis?.unknowns, ["所需证据超出 Harness 本轮允许的收集范围"]);
 });
+test("a PR merged during auto-merge suspension completes without a false alert", async () => {
+    class ConcurrentMergeGitHub extends FakeGitHub {
+        observations = 0;
+        async observePullRequest(repo, pullRequest) {
+            this.observations += 1;
+            return super.observePullRequest(repo, pullRequest);
+        }
+        async suspendAutoMerge() {
+            this.mergeStatus = "merged";
+            throw new Error("GraphQL: Can't disable auto-merge for this pull request");
+        }
+    }
+    const store = new MemoryStore();
+    const github = new ConcurrentMergeGitHub([issue({ number: 40, title: "Concurrent merge" })]);
+    const git = new FakeGit();
+    const controller = new HarnessController({
+        config,
+        store,
+        github,
+        git,
+        herdr: new FakeHerdr([
+            { lane: "worker", status: "completed", headSha: oldHead },
+            { lane: "reviewer", status: "pass", reviewedHeadSha: oldHead },
+        ]),
+        analyst: new FakeAnalyst(),
+        evidence: new FakeEvidence(),
+        clock: new FakeClock(),
+        ids: new SequenceIds(),
+        preflight: new FakeRuntimePreflight(),
+    });
+    await driveUntil(controller, store, "awaiting_merge");
+    github.autoMergeEnabled = true;
+    github.requiredChecks = [passedCheck];
+    git.baseSha = "e".repeat(40);
+    const merged = await controller.tick();
+    assert.equal(merged.ok, true);
+    assert.equal(merged.action, "merged");
+    assert.equal(store.state.activeJob?.state, "done");
+    assert.equal(github.observations, 2);
+    assert.deepEqual(git.baseSyncs, []);
+});
 test("a newer base suspends auto-merge and requires a fresh review of the merged HEAD", async () => {
     const store = new MemoryStore();
     const github = new FakeGitHub([issue({ number: 40, title: "Refresh base" })]);

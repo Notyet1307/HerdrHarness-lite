@@ -175,6 +175,7 @@ async function main(argv) {
     let client = null;
     let settled = false;
     let policyViolation = null;
+    let assistantFailure = null;
     let agentStarts = 0;
     let eventBytes = 0;
     let logTruncated = false;
@@ -184,6 +185,12 @@ async function main(argv) {
         if (["message_update", "tool_execution_update", "bash_execution_update"].includes(type))
             return;
         const summary = { type, digest: digest(event) };
+        const message = type === "message_end" ? object(event.message) : {};
+        if (message.role === "assistant" && (message.stopReason === "error" || message.stopReason === "aborted")) {
+            summary.role = "assistant";
+            summary.stopReason = message.stopReason;
+            assistantFailure = `Pi RPC assistant ended with ${message.stopReason}`;
+        }
         if (type === "agent_end")
             summary.willRetry = event.willRetry === true;
         if (type === "tool_execution_start" || type === "tool_execution_end") {
@@ -298,14 +305,15 @@ async function main(argv) {
             throw client.failure;
         credentialHostArgs(plan);
         preparePiRpcAgentDir(plan.snapshot);
-        const ok = policyViolation === null && !terminationRequested && settled;
+        const terminalError = policyViolation ?? assistantFailure;
+        const ok = terminalError === null && !terminationRequested && settled;
         if (ok && (childExit.code !== 0 || childExit.signal !== null)) {
             throw new Error(`Pi RPC exited unsuccessfully after settlement: ${JSON.stringify(childExit)}`);
         }
         writeAtomicJson(spoolPath(plan.runtimeRoot, "terminal.json"), {
             ...identity,
             ok,
-            ...(!ok ? { error: policyViolation ?? "runtime terminated by Controller" } : {}),
+            ...(!ok ? { error: terminalError ?? "runtime terminated by Controller" } : {}),
             agentSettled: settled,
         });
         writeAtomicJson(spoolPath(plan.runtimeRoot, "terminated.json"), { ...identity, ok: true, reason: "settled and child exited" });

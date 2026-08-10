@@ -475,6 +475,64 @@ test("durable runner never persists child Provider diagnostics", () => {
   }
 });
 
+test("durable runner rejects a settled assistant failure without persisting Provider diagnostics", () => {
+  for (const stopReason of ["error", "aborted"] as const) {
+    const fixture = rpcFixture();
+    const sentinel = `access_token_${stopReason}_SENTINEL`;
+    try {
+      const plan = fixture.plan({
+        executable: process.execPath,
+        argv: [
+          resolve("test/fixtures/fake-pi-rpc.js"),
+          "--no-session", "--no-context-files", "--no-prompt-templates", "--no-themes",
+          "--provider", "test", "--model", "model", "--mode", "rpc",
+        ],
+      });
+      writeExclusiveJson(join(plan.runtimeRoot, "plan.json"), plan);
+      writeExclusiveJson(join(plan.runtimeRoot, "dispatch.json"), {
+        version: 1,
+        attemptId: plan.attemptId,
+        generation: plan.generation,
+        planDigest: plan.planDigest,
+        dispatchId: plan.attemptId,
+        promptDigest: fixture.attempt.promptDigest,
+        message: "/skill:implement [harness-dispatch:worker-1]\nimplement",
+      });
+
+      const execution = new SyncCommandRunner().run(process.execPath, [
+        resolve("dist/src/pi-rpc-runner.js"),
+        "--sdk-entry", resolve("test/fixtures/pi-rpc-sdk-entry.js"),
+        "--plan", join(plan.runtimeRoot, "plan.json"),
+      ], {
+        cwd: fixture.root,
+        timeoutMs: 10_000,
+        env: {
+          ...process.env,
+          FAKE_PI_ASSISTANT_STOP_REASON: stopReason,
+          FAKE_PI_ASSISTANT_ERROR: sentinel,
+        },
+      });
+
+      assert.equal(execution.ok, true, execution.stderr);
+      assert.deepEqual(
+        readJson<{ ok: boolean; error?: string }>(join(plan.runtimeRoot, "terminal.json")),
+        {
+          ...receiptIdentity(plan),
+          ok: false,
+          error: `Pi RPC assistant ended with ${stopReason}`,
+          agentSettled: true,
+        },
+      );
+      const events = readFileSync(join(plan.runtimeRoot, "runtime-events.jsonl"), "utf8");
+      assert.match(events, new RegExp(`"type":"message_end".*"role":"assistant".*"stopReason":"${stopReason}"`));
+      assert.equal(existsSync(fixture.attempt.resultPath), false);
+      for (const path of filesUnder(plan.runtimeRoot)) assert.equal(readFileSync(path, "utf8").includes(sentinel), false, path);
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true });
+    }
+  }
+});
+
 test("durable runner redacts malformed Provider output before ready or after settlement", () => {
   const sentinel = "access_token_SENTINEL";
   for (const phase of ["before-ready", "after-settled"] as const) {
