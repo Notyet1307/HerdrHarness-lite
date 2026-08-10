@@ -305,6 +305,12 @@ export type BlockClass =
   | "analyst_unavailable";
 
 export type RecoveryAction = "retry_fresh_worker" | "retry_fresh_reviewer" | "hold";
+export type AutomaticRecoveryRule = "worker_pre_dispatch_infrastructure" | "reviewer_same_head_infrastructure";
+
+export type AutomaticRecoveryCandidate = {
+  rule: AutomaticRecoveryRule;
+  fingerprint: string;
+};
 
 export function isRecoveryAction(value: unknown): value is RecoveryAction {
   return value === "retry_fresh_worker" || value === "retry_fresh_reviewer" || value === "hold";
@@ -322,6 +328,7 @@ export type Incident = {
   summary: string;
   evidenceDigest: string;
   allowedActions: RecoveryAction[];
+  automaticRecovery?: AutomaticRecoveryCandidate;
   createdAt: string;
 };
 
@@ -355,11 +362,20 @@ export type Approval = {
   analysisId: string;
   action: Exclude<RecoveryAction, "hold">;
   /** Optional because V1 ledgers created before decision resolution have no basis field. */
-  basis?: "analyst_advice" | "human_decision";
+  basis?: "analyst_advice" | "human_decision" | "policy_rule";
+  policyRule?: AutomaticRecoveryRule;
+  fingerprint?: string;
   actor: string;
   reason: string;
   createdAt: string;
   consumedAt: string | null;
+};
+
+export type AutomaticRecovery = Approval & {
+  basis: "policy_rule";
+  policyRule: AutomaticRecoveryRule;
+  fingerprint: string;
+  attemptId: string;
 };
 
 export type Reassessment = {
@@ -448,6 +464,7 @@ export type Job = {
   incident: Incident | null;
   analysis: AnalystAdvice | null;
   approval: Approval | null;
+  automaticRecoveries?: AutomaticRecovery[];
   cancellation?: Cancellation | null;
   reassessments?: Reassessment[];
   pullRequest: PullRequestRef | null;
@@ -581,6 +598,10 @@ export function assertJobInvariant(job: Job): void {
   ) {
     throw new Error("incident has an invalid recovery action");
   }
+  if (job.incident?.automaticRecovery && (
+    !["worker_pre_dispatch_infrastructure", "reviewer_same_head_infrastructure"].includes(job.incident.automaticRecovery.rule)
+    || !/^[0-9a-f]{64}$/i.test(job.incident.automaticRecovery.fingerprint)
+  )) throw new Error("incident has an invalid automatic recovery candidate");
   if (job.analysis && !isRecoveryAction(job.analysis.action)) {
     throw new Error("analysis has an invalid recovery action");
   }
@@ -590,7 +611,8 @@ export function assertJobInvariant(job: Job): void {
   if (
     job.approval?.basis !== undefined &&
     job.approval.basis !== "analyst_advice" &&
-    job.approval.basis !== "human_decision"
+    job.approval.basis !== "human_decision" &&
+    job.approval.basis !== "policy_rule"
   ) {
     throw new Error("approval has an invalid basis");
   }
@@ -602,6 +624,34 @@ export function assertJobInvariant(job: Job): void {
   ) {
     throw new Error("human decision approval is not auditable");
   }
+  const automaticRecoveries = job.automaticRecoveries ?? [];
+  if (
+    automaticRecoveries.length > 32
+    || new Set(automaticRecoveries.map((entry) => entry.id)).size !== automaticRecoveries.length
+    || new Set(automaticRecoveries.map((entry) => entry.fingerprint)).size !== automaticRecoveries.length
+    || automaticRecoveries.some((entry) => (
+      entry.basis !== "policy_rule"
+      || !isRetryAction(entry.action)
+      || !["worker_pre_dispatch_infrastructure", "reviewer_same_head_infrastructure"].includes(entry.policyRule)
+      || (entry.policyRule === "worker_pre_dispatch_infrastructure") !== (entry.action === "retry_fresh_worker")
+      || !/^[0-9a-f]{64}$/i.test(entry.fingerprint)
+      || !isBoundedText(entry.id, 512)
+      || !isBoundedText(entry.incidentId, 512)
+      || !isBoundedText(entry.analysisId, 512)
+      || !isBoundedText(entry.attemptId, 512)
+      || !isBoundedText(entry.actor, 512)
+      || !isBoundedText(entry.reason, 2_000)
+      || !Number.isInteger(entry.jobRevision)
+      || entry.jobRevision < 0
+      || !Number.isFinite(Date.parse(entry.createdAt))
+      || (entry.consumedAt !== null && !Number.isFinite(Date.parse(entry.consumedAt)))
+    ))
+  ) throw new Error("job has invalid automatic recovery history");
+  if (job.approval?.basis === "policy_rule" && !automaticRecoveries.some((entry) => (
+    entry.id === job.approval!.id
+    && entry.policyRule === job.approval!.policyRule
+    && entry.fingerprint === job.approval!.fingerprint
+  ))) throw new Error("policy approval has no automatic recovery history");
   if (
     job.reassessments !== undefined &&
     (!Array.isArray(job.reassessments) || job.reassessments.some((entry) => (

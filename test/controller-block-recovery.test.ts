@@ -275,7 +275,7 @@ test("an approved retry rechecks and accepts a late exact Worker result before s
   });
 });
 
-test("Reviewer infrastructure failure resumes with a fresh Reviewer on the same HEAD", async () => {
+test("Reviewer infrastructure failure automatically retries once on the same HEAD", async () => {
   const store = new MemoryStore();
   const clock = new FakeClock();
   const ids = new SequenceIds();
@@ -319,23 +319,16 @@ test("Reviewer infrastructure failure resumes with a fresh Reviewer on the same 
   assert.deepEqual(store.state.activeJob?.incident?.allowedActions, ["retry_fresh_reviewer", "hold"]);
   assert.match(store.state.activeJob?.incident?.summary ?? "", /provider sessions are full/);
 
-  await controller.tick();
-  const blocked = store.state.activeJob!;
-  assert.equal(blocked.analysis?.action, "retry_fresh_reviewer");
-  assert.ok(operatorActionsFor(blocked).some((action) => action.kind === "approve_retry"));
-  await approveRecovery(
-    store,
-    {
-      expectedRevision: blocked.revision,
-      incidentId: blocked.incident!.id,
-      analysisId: blocked.analysis!.id,
-      actor: "human@example.test",
-      reason: "Provider failure is isolated from the unchanged reviewed HEAD",
-    },
-    { clock, ids },
-  );
-
+  const authorization = await controller.tick();
+  assert.equal(authorization.action, "auto_recovery_authorized");
   const approved = store.state.activeJob!;
+  assert.equal(approved.state, "recovery_approved");
+  assert.equal(approved.analysis?.action, "retry_fresh_reviewer");
+  assert.equal(approved.approval?.basis, "policy_rule");
+  assert.equal(approved.approval?.action, "retry_fresh_reviewer");
+  assert.equal(approved.automaticRecoveries?.length, 1);
+  assert.equal(approved.automaticRecoveries?.[0]?.policyRule, "reviewer_same_head_infrastructure");
+  assert.deepEqual(operatorActionsFor(approved), []);
   assert.throws(
     () => assertJobInvariant({
       ...approved,
@@ -350,6 +343,13 @@ test("Reviewer infrastructure failure resumes with a fresh Reviewer on the same 
     }),
     /recovery action/,
   );
+  assert.throws(
+    () => assertJobInvariant({
+      ...approved,
+      automaticRecoveries: [{ ...approved.automaticRecoveries![0]!, action: "retry_fresh_worker" }],
+    }),
+    /automatic recovery history/,
+  );
 
   const recovery = await controller.tick();
   assert.match(recovery.message, /fresh Reviewer/);
@@ -363,6 +363,68 @@ test("Reviewer infrastructure failure resumes with a fresh Reviewer on the same 
   assert.equal(herdr.prepared.filter((entry) => entry.lane === "worker").length, 1);
   assert.equal(herdr.prepared.filter((entry) => entry.lane === "reviewer").length, 2);
   assert.ok(herdr.prepared.at(-1)?.attemptId !== failedReviewerId);
+});
+
+test("Worker pre-dispatch infrastructure failure automatically retries once per base", async () => {
+  const store = new MemoryStore();
+  const clock = new FakeClock();
+  const ids = new SequenceIds();
+  const herdr = new FakeHerdr([]);
+  const advice = {
+    kind: "advice" as const,
+    action: "retry_fresh_worker" as const,
+    summary: "The Worker runtime failed before prompt dispatch",
+    resolutionBrief: "Start one fresh Worker against the unchanged base.",
+    evidenceRefs: ["task"],
+    unknowns: [],
+  };
+  const controller = new HarnessController({
+    config,
+    store,
+    github: new FakeGitHub([issue({ number: 36, title: "Retry pre-dispatch Worker infrastructure" })]),
+    git: new FakeGit(),
+    herdr,
+    analyst: new FakeAnalyst([advice, advice]),
+    evidence: new FakeEvidence(),
+    clock,
+    ids,
+    preflight: new FakeRuntimePreflight(),
+  });
+
+  for (let tick = 0; tick < 12 && store.state.activeJob?.activeAttempt?.phase !== "pane_ready"; tick += 1) {
+    await controller.tick();
+  }
+  assert.equal(store.state.activeJob?.activeAttempt?.phase, "pane_ready");
+  herdr.startFailure = new Error("Worker provider startup failed");
+  assert.equal((await controller.tick()).action, "attempt_reconciling");
+  herdr.startFailure = new Error("Worker provider startup failed");
+  assert.equal((await controller.tick()).action, "blocked");
+  assert.equal(store.state.activeJob?.incident?.automaticRecovery?.rule, "worker_pre_dispatch_infrastructure");
+
+  assert.equal((await controller.tick()).action, "auto_recovery_authorized");
+  const first = store.state.activeJob!;
+  assert.equal(first.approval?.basis, "policy_rule");
+  assert.equal(first.automaticRecoveries?.length, 1);
+  const fingerprint = first.automaticRecoveries?.[0]?.fingerprint;
+  assert.ok(fingerprint);
+  assert.equal((await controller.tick()).action, "recovery_applied");
+
+  for (let tick = 0; tick < 4 && store.state.activeJob?.activeAttempt?.phase !== "pane_ready"; tick += 1) {
+    await controller.tick();
+  }
+  assert.equal(store.state.activeJob?.activeAttempt?.phase, "pane_ready");
+  herdr.startFailure = new Error("Worker provider startup failed");
+  assert.equal((await controller.tick()).action, "attempt_reconciling");
+  herdr.startFailure = new Error("Worker provider startup failed");
+  assert.equal((await controller.tick()).action, "blocked");
+  assert.equal(store.state.activeJob?.incident?.automaticRecovery?.fingerprint, fingerprint);
+
+  assert.equal((await controller.tick()).action, "analysis_recorded");
+  const repeated = store.state.activeJob!;
+  assert.equal(repeated.state, "blocked");
+  assert.equal(repeated.approval, null);
+  assert.equal(repeated.automaticRecoveries?.length, 1);
+  assert.ok(operatorActionsFor(repeated).some((action) => action.kind === "approve_retry"));
 });
 
 test("held Reviewer infrastructure incident can be reassessed without granting retry authority", async () => {

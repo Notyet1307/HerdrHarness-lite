@@ -244,6 +244,7 @@ export class FakeHerdr {
     started = [];
     startedCwds = [];
     startedArgv = [];
+    startFailure = null;
     paneCommands = [];
     prompts = [];
     closed = [];
@@ -272,6 +273,10 @@ export class FakeHerdr {
         this.started.push(input.handle.agentName);
         this.startedCwds.push(input.cwd);
         this.startedArgv.push([...input.argv]);
+        const failure = this.startFailure;
+        this.startFailure = null;
+        if (failure)
+            throw failure;
     }
     async runInPane(input) {
         this.paneCommands.push({ command: input.command, argv: [...input.argv] });

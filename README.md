@@ -31,7 +31,7 @@ Telegram /harness + callbacks
                     -> Bridge -> status / approval CLI -> Harness policy + ledger CAS
 ```
 
-Harness Core is the only workflow authority. The Controller performs automatic transitions; operator writes can enter only through the exact recovery gates and ledger CAS. The Observer may disappear, notifications may be delayed, and Telegram may be offline without changing task truth or granting recovery authority.
+Harness Core is the only workflow authority. The Controller performs automatic transitions; recovery authority can enter only through the exact deterministic policy gates and ledger CAS. The Observer may disappear, notifications may be delayed, and Telegram may be offline without changing task truth or granting recovery authority.
 
 | Component | Responsibility | Authority boundary |
 | --- | --- | --- |
@@ -87,7 +87,8 @@ The recommended deployment runs three independent long-lived processes: Controll
 | --- | --- |
 | Observer startup, task start, task terminal state | One concise informational message |
 | Incident or new Analyst decision | Incident/hold card with bounded evidence |
-| Policy-allowed fresh retry | Ten-minute, single-use approval card bound to job, revision, incident, analysis, lane, and action |
+| One policy-authorized low-risk infrastructure retry | Informational notice only; no approval challenge |
+| Any other policy-allowed fresh retry | Ten-minute, single-use approval card bound to job, revision, incident, analysis, lane, and action |
 | Ledger, Controller log, preflight, or heartbeat failure/recovery | Health alert or recovery message |
 | Normal Worker/Reviewer/publish/merge-wait progress | No push; query it with `/harness` |
 
@@ -232,7 +233,7 @@ node dist/src/cli.js run \
 
 Use `--max-cycles N` for a bounded trial. Without it, `run` is a foreground long-running process; this repository does not install a daemon. Closing the terminal that owns the process stops the Controller, so unattended deployments must use a service manager such as launchd or systemd. A durable Herdr pane does not replace the Controller service.
 
-`run` and `tick` use the same Controller. A later cycle claims another eligible issue only after GitHub reports the PR merged and the job is archived. A blocked job holds the single active slot; `run` cannot bypass an Analyst hold or human approval.
+`run` and `tick` use the same Controller. A later cycle claims another eligible issue only after GitHub reports the PR merged and the job is archived. A blocked job holds the single active slot; `run` cannot bypass an Analyst hold or any required human approval.
 
 Configuration is loaded once when `run` starts. Restart the process after changing a provider, model, thinking level, path, or validation command.
 
@@ -247,6 +248,8 @@ node dist/src/cli.js decide --config /ABSOLUTE/PATH/harness.config.json \
 ```
 
 If `state=blocked` and no Analyst decision exists, run exactly one `tick`, then read `status --operator` again. The projection exposes only actions allowed by the current job, revision, incident, analysis, Attempt, and Git fixed point.
+
+Two narrow infrastructure failures may receive one automatic fresh retry after the Analyst recommends that exact action with no unknowns: a Worker failure before prompt dispatch/acceptance, bound to the same base fingerprint; or a Reviewer failure with no result, bound to the same exact HEAD fingerprint. The Controller records the policy rule and consumed fingerprint in the ledger before acting. A repeated fingerprint, any Worker failure after dispatch, CI rework, integrity/drift failure, unknown evidence, or content decision remains blocked for human action.
 
 | Projected action | Human evidence required | Effect |
 | --- | --- | --- |
@@ -266,7 +269,7 @@ Operating sequence:
 
 Option IDs are compare-and-swap bindings and become stale when any bound fact changes. Direct `approve`, `reassess`, `resolve-decision`, and `cancel` commands remain only for compatible integrations; interactive operators should use `decide`.
 
-Same-Attempt reconciliation is automatic. It never replays a prompt or grants retry authority. Recovery never resumes the old agent; a fresh Worker trusts committed work and durable results only. Integrity violations, stale identity, HEAD drift, forbidden actions, and unknown evidence remain blocked unless the live projection explicitly offers an action.
+Same-Attempt reconciliation is automatic. It never replays a prompt or consumes the one-fresh-attempt policy budget. Recovery never resumes the old agent; a fresh Worker trusts committed work and durable results only. Integrity violations, stale identity, HEAD drift, forbidden actions, and unknown evidence remain blocked unless the live projection explicitly offers an action.
 
 Recovery is complete only when the ledger records the chosen effect and the next permitted state is visible. It does not mean the GitHub issue is complete.
 
@@ -291,7 +294,7 @@ A handoff must include job ID, revision/state, issue, attempt ID, HEAD, PR, vali
 | System | Authoritative facts |
 | --- | --- |
 | GitHub | Issue state, dependencies, queue labels, pull requests, required checks, and merge |
-| Harness ledger | Active job, revision, attempt, incident, Analyst advice, human approval, and effect receipts |
+| Harness ledger | Active job, revision, attempt, incident, Analyst advice, policy/human recovery authorization, and effect receipts |
 | Git | Fixed base, implementation HEAD, commit provenance, and clean tree |
 | Herdr / Pi | Worktrees, durable panes, and either interactive agents or the Worker/Reviewer RPC runner; execution and observability only |
 | Observer / Telegram Bridge | No authoritative workflow facts; notification outbox and Telegram offset only |
@@ -325,7 +328,9 @@ blocked incident
   -> Analyst advice
       -> hold: stop
       -> fresh retry recommendation
-  -> exact human approval
+  -> deterministic Controller policy
+      -> exact low-risk rule + unused fingerprint: record one automatic authorization
+      -> otherwise: require exact human approval
   -> close old pane
   -> fresh Worker or Reviewer attempt
 ```
@@ -341,7 +346,7 @@ Each `tick` performs at most one durable transition. A restarted process continu
 | Worker | Initial implementation, rework after actionable Reviewer findings, or approved Worker recovery | Immutable issue snapshot, task digest, base/branch, and an optional typed rework/recovery handoff | May modify the task worktree, validate, run one focused self-check, commit, and call `worker_submit`; cannot supply result identity, launch review subagents, push, or open a PR. Completion requires the Harness-bound durable result plus Git verification |
 | Reviewer | After each Worker HEAD is accepted | Issue objective, fixed base, exact HEAD, Harness-generated Git evidence, and fixed validation argv | Has no generic shell/edit/write at the top level; preflights its real validation environment, independently reviews Standards and Spec, validates in a disposable copy, and returns `pass/changes/blocked` through `review_submit` |
 | Analyst | A task-bound session starts after claim; it does not join the normal path and receives a decision turn only when blocked | Task snapshot, incident, and bounded ledger/Git/last-review evidence; may request at most `maxAnalystTurns` of whitelisted read-only evidence | May recommend `hold` or a policy-allowed fresh retry; cannot write state, mutate Git, operate Herdr, or approve itself |
-| Human | Runtime/provider changes, risk acceptance, and recovery authorization | Exact revision, incident, analysis, and evidence | Sole authority for retry approval; the Controller still rechecks policy, identity, and Git after approval |
+| Human | Runtime/provider changes, risk acceptance, and recovery outside the narrow automatic allowlist | Exact revision, incident, analysis, and evidence | Sole authority for non-allowlisted retry approval; the Controller still rechecks policy, identity, and Git after approval |
 
 Worker and Reviewer are separate top-level Pi agents. Review never continues inside the old Worker session.
 
@@ -386,7 +391,7 @@ The Harness can:
 - bind each Attempt to an immutable execution snapshot and trusted context provenance;
 - optionally run either top-level lane through the shared RPC adapter with one dispatch, structured terminal, and confirmed termination;
 - verify durable results, Git provenance, exact review HEAD, and isolated Reviewer output;
-- perform bounded rework and human-approved fresh recovery;
+- perform bounded rework plus one policy-authorized low-risk infrastructure recovery or a human-approved fresh recovery;
 - publish a PR, request GitHub native auto-merge, observe merge, and claim another issue after archive;
 - select provider/model/thinking independently for Worker and Reviewer.
 
@@ -525,7 +530,7 @@ The Controller does not auto-rerun CI or auto-rebase. If an operator reruns CI w
 - the single active-job snapshot and terminal-job summaries;
 - compare-and-swap revisions and append-only save events;
 - the exclusive Controller lease and liveness heartbeat;
-- incidents, Analyst effect receipts, session identity, approvals, and reassessments;
+- incidents, Analyst effect receipts, session identity, policy/human recovery authorizations, and reassessments;
 - required-check failure evidence and the bounded CI rework count;
 - per-attempt Reviewer source snapshots, validation copies, fixed-point evidence, descriptors, and external results.
 

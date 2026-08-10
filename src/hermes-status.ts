@@ -88,6 +88,16 @@ function renderStatus(state: HarnessState, config: HarnessStatusConfig): string 
 function renderNotification(state: HarnessState): string {
   const job = state.activeJob;
   if (!job) return "当前没有需要处理的 Harness 任务。";
+  if (job.state === "recovery_approved" && job.approval?.basis === "policy_rule") {
+    const lane = job.approval.action === "retry_fresh_reviewer" ? "Reviewer" : "Worker";
+    return [
+      "♻️ 自动恢复已授权 · 无需处理",
+      `任务：${clean(job.task.repo, 160)}#${job.task.issueNumber} ${clean(job.task.title, 240)}`,
+      `动作：启动全新 ${lane}`,
+      `规则：${job.approval.policyRule} · fingerprint ${job.approval.fingerprint?.slice(0, 12)}`,
+      "限制：该故障指纹的自动额度已用尽；再次发生将转为人工批准。",
+    ].join("\n");
+  }
   const incident = job.incident;
   if (!incident) return `⚙️ 运行中 · 无需处理\n${clean(job.task.repo, 160)}#${job.task.issueNumber} · ${clean(job.task.title, 240)}`;
 
@@ -153,7 +163,9 @@ function renderIncident(state: HarnessState, laneId?: string): string {
   if (analysis.unknowns.length > 0) {
     lines.push(`未决信息：${analysis.unknowns.slice(0, 3).map((value) => clean(value, 240)).join("；")}`);
   }
-  if (actions.some((action) => action.kind === "approve_retry")) {
+  if (job.state === "recovery_approved" && job.approval?.basis === "policy_rule") {
+    lines.push("下一步：低风险恢复已由精确策略授权；Controller 将重新校验后启动 fresh retry，无需人工批准。");
+  } else if (actions.some((action) => action.kind === "approve_retry")) {
     lines.push(`下一步：使用当前 Telegram 决策卡批准 fresh retry，或发送 ${approvalCommand(laneId)} 获取新的 10 分钟挑战。`);
   } else if (actions.length > 0) {
     lines.push("下一步：选择上面的精确操作 ID；Harness 会在执行时重新校验全部绑定。");
@@ -188,7 +200,9 @@ function nextStep(job: Job, projection: OperatorProjection): string {
     case "blocked": return projection.actions.length > 0
       ? `查看 /harness incident；当前有 ${projection.actions.length} 个精确绑定的可执行操作。`
       : "查看 /harness incident；当前没有可执行恢复操作。";
-    case "recovery_approved": return "Controller 将重新校验并消费已批准恢复。";
+    case "recovery_approved": return job.approval?.basis === "policy_rule"
+      ? "Controller 将重新校验并消费一次精确策略自动恢复。"
+      : "Controller 将重新校验并消费已批准恢复。";
     case "done": return "任务已完成。";
     case "cancelled": return "任务已取消。";
   }

@@ -31,7 +31,7 @@ Telegram /harness + callbacks
                     -> Bridge -> status / approval CLI -> Harness policy + ledger CAS
 ```
 
-Harness Core 是唯一的工作流权威。Controller 负责自动迁移；operator 写入只能经过精确 recovery gate 与 ledger CAS。Observer 消失、通知延迟或 Telegram 离线都不会改变任务事实，也不会授予恢复权限。
+Harness Core 是唯一的工作流权威。Controller 负责自动迁移；恢复权限只能经过确定性的精确 policy gate 与 ledger CAS。Observer 消失、通知延迟或 Telegram 离线都不会改变任务事实，也不会授予恢复权限。
 
 | 组件 | 职责 | 权限边界 |
 | --- | --- | --- |
@@ -87,7 +87,8 @@ Pi `agent_settled`、runner terminal、pane `done` 和 child completed 都只是
 | --- | --- |
 | Observer 上线、任务开始、任务进入终态 | 一条简洁的信息通知 |
 | 新 Incident 或新 Analyst 结论 | 携带有界证据的 Incident/hold 卡片 |
-| 策略允许的 fresh retry | 十分钟、单次使用，并绑定 job、revision、incident、analysis、lane 和动作的审批卡 |
+| 策略自动授权的一次低风险基础设施重试 | 仅发送信息通知，不创建审批 challenge |
+| 其他策略允许的 fresh retry | 十分钟、单次使用，并绑定 job、revision、incident、analysis、lane 和动作的审批卡 |
 | Ledger、Controller 日志、preflight 或 heartbeat 故障/恢复 | 健康告警或恢复通知 |
 | 正常 Worker/Reviewer/publish/merge-wait 进展 | 不主动推送；通过 `/harness` 查询 |
 
@@ -231,7 +232,7 @@ node dist/src/cli.js run \
 
 可用 `--max-cycles N` 做有界试跑。不设置时它是前台常驻进程；仓库不会自行安装 daemon。关闭承载该进程的终端会停止 Controller，无人值守部署必须由 launchd/systemd 等 service manager 管理；Herdr pane 持久化不会替代 Controller service。
 
-`run` 与 `tick` 使用同一个状态机。PR merge 被 GitHub 确认并归档后，下一轮才会领取下一个符合条件的 Issue。Blocked job 会占住唯一 active slot，`run` 不能跳过 Analyst hold 或人工审批。
+`run` 与 `tick` 使用同一个状态机。PR merge 被 GitHub 确认并归档后，下一轮才会领取下一个符合条件的 Issue。Blocked job 会占住唯一 active slot，`run` 不能跳过 Analyst hold 或任何必需的人工审批。
 
 配置在 `run` 启动时只读取一次。修改 provider、model、thinking、路径或验证命令后，停止旧 `run` 并重新启动。
 
@@ -246,6 +247,8 @@ node dist/src/cli.js decide --config /ABSOLUTE/PATH/harness.config.json \
 ```
 
 如果 `state=blocked` 且尚无 Analyst 结论，只执行一次 `tick`，然后重新读取 `status --operator`。投影只会暴露当前 job、revision、incident、analysis、Attempt 与 Git fixed point 允许的动作。
+
+只有两类低风险基础设施故障可以在 Analyst 给出精确 retry 建议且 `unknowns` 为空后，自动获得一次 fresh retry：Worker 在 prompt dispatch/acceptance 之前失败，并绑定同一 base fingerprint；或 Reviewer 无结果失败，并绑定同一精确 HEAD fingerprint。Controller 在执行前把 policy rule 与已消费 fingerprint 写入 ledger。重复 fingerprint、Worker dispatch 之后的失败、CI 回修、完整性/漂移故障、未知证据和内容决策都继续阻塞，等待人工操作。
 
 | 投影动作 | 所需人工证据 | 效果 |
 | --- | --- | --- |
@@ -265,7 +268,7 @@ node dist/src/cli.js decide --config /ABSOLUTE/PATH/harness.config.json \
 
 Option ID 是 compare-and-swap 绑定；任一事实变化后都会失效。显式 `approve`、`reassess`、`resolve-decision` 和 `cancel` 只为兼容 integration 保留；交互式操作默认使用 `decide`。
 
-同 Attempt reconciliation 由 Controller 自动完成，既不重放 prompt，也不授予 retry 权限。恢复绝不续用旧 agent；fresh Worker 只信任已提交改动和 durable result。完整性违规、身份过期、HEAD 漂移、禁止动作与未知证据会继续 blocked，除非实时投影明确提供动作。
+同 Attempt reconciliation 由 Controller 自动完成，既不重放 prompt，也不消耗一次 fresh-attempt policy 预算。恢复绝不续用旧 agent；fresh Worker 只信任已提交改动和 durable result。完整性违规、身份过期、HEAD 漂移、禁止动作与未知证据会继续 blocked，除非实时投影明确提供动作。
 
 只有 ledger 已记录所选 effect，且下一条允许状态清晰可见时，恢复才算完成；这不代表 GitHub Issue 已完成。
 
@@ -290,7 +293,7 @@ Option ID 是 compare-and-swap 绑定；任一事实变化后都会失效。显�
 | 系统 | 负责的事实 |
 | --- | --- |
 | GitHub | Issue 状态、依赖、队列标签、PR、required checks 和 merge |
-| Harness ledger | active job、revision、attempt、incident、Analyst 建议、人工审批和 effect receipt |
+| Harness ledger | active job、revision、attempt、incident、Analyst 建议、policy/人工恢复授权和 effect receipt |
 | Git | 固定 base、实现 HEAD、提交 provenance 和 clean-tree |
 | Herdr / Pi | worktree、持久 pane、interactive agent 或 Worker/Reviewer RPC runner；只提供执行与可观察性 |
 | Observer / Telegram Bridge | 不持有权威工作流事实；只保存通知 outbox 与 Telegram offset |
@@ -324,7 +327,9 @@ blocked incident
   -> Analyst advice
       -> hold: stop
       -> fresh retry recommendation
-  -> exact human approval
+  -> deterministic Controller policy
+      -> 命中精确低风险规则且 fingerprint 未使用：记录一次自动授权
+      -> 其他情况：要求精确人工审批
   -> close old pane
   -> fresh Worker or Reviewer attempt
 ```
@@ -340,7 +345,7 @@ blocked incident
 | Worker | 首次实现、Reviewer actionable findings 后的 rework、获批的 Worker 恢复 | 不可变 Issue snapshot、task digest、base/branch、可选的结构化 rework/recovery handoff | 可修改任务 worktree、测试、执行一次 focused self-check、提交并调用 `worker_submit`；不能提供结果身份、启动 review subagent、push 或建 PR。只有 Harness 绑定的 durable result 与 Git 验证同时通过才完成 |
 | Reviewer | 每次 Worker HEAD 被接受后 | Issue 目标、固定 base、精确 HEAD、Harness 生成的 Git evidence、固定验证 argv | 顶层无通用 shell/edit/write；先预检实际验证环境，再独立检查 Standards 和 Spec，在验证副本运行命令，通过 `review_submit` 返回 `pass/changes/blocked` |
 | Analyst | claim 后建立任务绑定 session；正常主链不介入，只有 blocked 时执行判断 turn | 任务 snapshot、incident、账本/Git/最近 review 等有界证据；最多请求 `maxAnalystTurns` 轮白名单只读证据 | 只能建议 `hold` 或 policy 允许的 fresh retry；不能写状态、改 Git、操作 Herdr 或批准自己 |
-| 人类 | provider/运行时变更、风险接受和恢复授权时 | 精确 revision、incident、analysis 与证据 | 唯一可签发 retry approval；审批后 Controller 仍会重新检查 policy、身份和 Git |
+| 人类 | provider/运行时变更、风险接受，以及不在狭窄自动 allowlist 内的恢复授权时 | 精确 revision、incident、analysis 与证据 | 唯一可签发非 allowlist retry approval；审批后 Controller 仍会重新检查 policy、身份和 Git |
 
 Worker 与 Reviewer 是两个独立的顶层 Pi agent。Reviewer 不在旧 Worker 会话中继续运行。
 
@@ -385,7 +390,7 @@ Harness 能够：
 - 为 Attempt 固定执行快照和可信 context provenance；
 - 让任一顶层 lane 可选共用 RPC adapter，并提供单 dispatch、结构化 terminal 与可确认终止；
 - 验证 durable result、Git provenance、精确 review HEAD 和 Reviewer 隔离结果；
-- 执行有界 rework 与经人工批准的 fresh recovery；
+- 执行有界 rework，以及一次 policy 自动授权的低风险基础设施恢复或人工批准的 fresh recovery；
 - 发布 PR、请求 GitHub 原生 auto-merge、观察 merge，并在归档后领取下一个 Issue；
 - 让 Worker 与 Reviewer 独立选择 provider/model/thinking。
 
@@ -521,7 +526,7 @@ Controller 不会自动 rerun CI，也不会自动 rebase。若操作者在 revi
 - 单一 active job snapshot 与 terminal job 摘要；
 - compare-and-swap revision 和 append-only 保存事件；
 - Controller 排他 lease 与存活心跳；
-- incident、Analyst effect receipts、session identity、approval 与 reassessment；
+- incident、Analyst effect receipts、session identity、policy/人工恢复授权与 reassessment；
 - required-check 失败证据与有界 CI 回修计数；
 - 每次 Reviewer attempt 的只读源码快照、验证副本、fixed-point evidence、descriptor 和外部 result。
 

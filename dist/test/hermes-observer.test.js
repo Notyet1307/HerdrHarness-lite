@@ -94,7 +94,49 @@ test("Hermes observer baselines old logs and retries text or approval-card deliv
         writeBridge("/usr/bin/true");
         assert.equal(runObserver().status, 0);
         assert.ok(!readObserver(observerState).outbox.some((entry) => entry.kind === "approval"));
+        const automaticRecovery = {
+            id: "approval-auto-001",
+            jobRevision: blocked.activeJob.revision,
+            incidentId: blocked.activeJob.incident.id,
+            analysisId: blocked.activeJob.analysis.id,
+            action: "retry_fresh_reviewer",
+            basis: "policy_rule",
+            policyRule: "reviewer_same_head_infrastructure",
+            fingerprint: "f".repeat(64),
+            attemptId: "reviewer-old-001",
+            actor: "harness:auto-recovery",
+            reason: "reviewer_same_head_infrastructure",
+            createdAt: "2026-08-07T00:03:00.000Z",
+            consumedAt: null,
+        };
         blocked.activeJob.revision += 1;
+        blocked.activeJob.state = "recovery_approved";
+        blocked.activeJob.incident.automaticRecovery = {
+            rule: automaticRecovery.policyRule,
+            fingerprint: automaticRecovery.fingerprint,
+        };
+        blocked.activeJob.approval = automaticRecovery;
+        blocked.activeJob.automaticRecoveries = [automaticRecovery];
+        writeFileSync(ledgerPath, `${JSON.stringify(blocked)}\n`, { encoding: "utf8", mode: 0o600 });
+        writeBridge("/usr/bin/false");
+        assert.equal(runObserver().status, 0);
+        observer = readObserver(observerState);
+        const automaticNotice = observer.outbox.find((entry) => entry.key === "auto-recovery:approval-auto-001");
+        assert.equal(automaticNotice?.kind, "text");
+        assert.match(automaticNotice?.message ?? "", /自动恢复已授权 · 无需处理/);
+        assert.match(automaticNotice?.message ?? "", /启动全新 Reviewer/);
+        assert.match(automaticNotice?.message ?? "", /自动额度已用尽/);
+        assert.ok(!observer.outbox.some((entry) => entry.kind === "approval"));
+        for (const entry of observer.outbox)
+            entry.nextAttemptAt = 0;
+        writeFileSync(observerState, `${JSON.stringify(observer)}\n`, { encoding: "utf8", mode: 0o600 });
+        writeBridge("/usr/bin/true");
+        assert.equal(runObserver().status, 0);
+        assert.equal(readObserver(observerState).outbox.length, 0);
+        blocked.activeJob.revision += 1;
+        blocked.activeJob.state = "blocked";
+        blocked.activeJob.approval = null;
+        blocked.activeJob.automaticRecoveries[0].consumedAt = "2026-08-07T00:03:30.000Z";
         blocked.activeJob.incident.class = "ci_failure";
         blocked.activeJob.incident.lane = "controller";
         blocked.activeJob.incident.attemptId = null;
@@ -129,9 +171,11 @@ test("Hermes observer baselines old logs and retries text or approval-card deliv
         };
         const heldLedger = `${JSON.stringify(blocked)}\n`;
         writeFileSync(ledgerPath, heldLedger, { encoding: "utf8", mode: 0o600 });
+        rmSync(observerState, { force: true });
         writeBridge("/usr/bin/false");
         assert.equal(runObserver().status, 0);
         observer = readObserver(observerState);
+        assert.ok(!observer.outbox.some((entry) => entry.key === "auto-recovery:approval-auto-001"));
         const holdCard = observer.outbox.find((entry) => entry.kind === "card");
         assert.ok(holdCard, JSON.stringify(observer.outbox));
         assert.match(holdCard.message ?? "", /自动诊断未完成/);

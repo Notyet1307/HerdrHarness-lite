@@ -245,6 +245,7 @@ export declare class FakeHerdr implements HerdrPort {
     started: string[];
     startedCwds: string[];
     startedArgv: string[][];
+    startFailure: Error | null;
     paneCommands: Array<{
         command: string;
         argv: string[];

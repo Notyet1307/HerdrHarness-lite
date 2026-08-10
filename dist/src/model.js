@@ -109,6 +109,9 @@ export function assertJobInvariant(job) {
             new Set(job.incident.allowedActions).size !== job.incident.allowedActions.length)) {
         throw new Error("incident has an invalid recovery action");
     }
+    if (job.incident?.automaticRecovery && (!["worker_pre_dispatch_infrastructure", "reviewer_same_head_infrastructure"].includes(job.incident.automaticRecovery.rule)
+        || !/^[0-9a-f]{64}$/i.test(job.incident.automaticRecovery.fingerprint)))
+        throw new Error("incident has an invalid automatic recovery candidate");
     if (job.analysis && !isRecoveryAction(job.analysis.action)) {
         throw new Error("analysis has an invalid recovery action");
     }
@@ -117,7 +120,8 @@ export function assertJobInvariant(job) {
     }
     if (job.approval?.basis !== undefined &&
         job.approval.basis !== "analyst_advice" &&
-        job.approval.basis !== "human_decision") {
+        job.approval.basis !== "human_decision" &&
+        job.approval.basis !== "policy_rule") {
         throw new Error("approval has an invalid basis");
     }
     if (job.approval?.basis === "human_decision" &&
@@ -126,6 +130,30 @@ export function assertJobInvariant(job) {
             !Number.isFinite(Date.parse(job.approval.createdAt)))) {
         throw new Error("human decision approval is not auditable");
     }
+    const automaticRecoveries = job.automaticRecoveries ?? [];
+    if (automaticRecoveries.length > 32
+        || new Set(automaticRecoveries.map((entry) => entry.id)).size !== automaticRecoveries.length
+        || new Set(automaticRecoveries.map((entry) => entry.fingerprint)).size !== automaticRecoveries.length
+        || automaticRecoveries.some((entry) => (entry.basis !== "policy_rule"
+            || !isRetryAction(entry.action)
+            || !["worker_pre_dispatch_infrastructure", "reviewer_same_head_infrastructure"].includes(entry.policyRule)
+            || (entry.policyRule === "worker_pre_dispatch_infrastructure") !== (entry.action === "retry_fresh_worker")
+            || !/^[0-9a-f]{64}$/i.test(entry.fingerprint)
+            || !isBoundedText(entry.id, 512)
+            || !isBoundedText(entry.incidentId, 512)
+            || !isBoundedText(entry.analysisId, 512)
+            || !isBoundedText(entry.attemptId, 512)
+            || !isBoundedText(entry.actor, 512)
+            || !isBoundedText(entry.reason, 2_000)
+            || !Number.isInteger(entry.jobRevision)
+            || entry.jobRevision < 0
+            || !Number.isFinite(Date.parse(entry.createdAt))
+            || (entry.consumedAt !== null && !Number.isFinite(Date.parse(entry.consumedAt))))))
+        throw new Error("job has invalid automatic recovery history");
+    if (job.approval?.basis === "policy_rule" && !automaticRecoveries.some((entry) => (entry.id === job.approval.id
+        && entry.policyRule === job.approval.policyRule
+        && entry.fingerprint === job.approval.fingerprint)))
+        throw new Error("policy approval has no automatic recovery history");
     if (job.reassessments !== undefined &&
         (!Array.isArray(job.reassessments) || job.reassessments.some((entry) => (!entry ||
             !Number.isInteger(entry.jobRevision) ||

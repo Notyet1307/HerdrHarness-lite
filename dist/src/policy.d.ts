@@ -1,6 +1,12 @@
-import type { Attempt, AttemptResult, AnalystAdvice, BlockClass, EvidencePack, HarnessState, Incident, Job, JobState, RecoveryAction } from "./model.js";
+import type { Attempt, AttemptResult, AnalystAdvice, Approval, AutomaticRecoveryCandidate, BlockClass, EvidencePack, HarnessState, Incident, Job, JobState, RecoveryAction } from "./model.js";
 import type { Clock, IdGenerator } from "./ports.js";
 export declare function allowedActionsFor(blockClass: BlockClass, lane: Incident["lane"]): RecoveryAction[];
+export declare function automaticRecoveryCandidateForAttempt(job: Job, attempt: Attempt): AutomaticRecoveryCandidate | undefined;
+export declare function automaticRecoveryFor(job: Job, advice: AnalystAdvice): (AutomaticRecoveryCandidate & {
+    action: Exclude<RecoveryAction, "hold">;
+    attemptId: string;
+}) | null;
+export declare function isAutomaticRecoveryApproval(job: Job, approval: Approval): boolean;
 export type OperatorAction = {
     id: string;
     kind: "approve_retry" | "reassess" | "resolve_decision" | "cancel";
@@ -38,6 +44,7 @@ export declare function makeIncident(input: {
     attemptId: string | null;
     blockClass: BlockClass;
     summary: string;
+    automaticRecovery?: AutomaticRecoveryCandidate;
     clock: Clock;
     ids: IdGenerator;
 }): Incident;

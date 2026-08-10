@@ -144,6 +144,39 @@ test("Hermes status stays read-only and renders bounded ledger facts", () => {
         assert.ok(!notification.stdout.includes("revision"));
         assert.ok(!notification.stdout.includes("Incident："));
         assert.ok(!notification.stdout.includes("Telegram 决策卡"));
+        const automaticRecovery = {
+            id: "approval-auto-001",
+            jobRevision: state.activeJob.revision,
+            incidentId: incident.id,
+            analysisId: state.activeJob.analysis.id,
+            action: "retry_fresh_reviewer",
+            basis: "policy_rule",
+            policyRule: "reviewer_same_head_infrastructure",
+            fingerprint: "f".repeat(64),
+            attemptId: attempt.id,
+            actor: "harness:auto-recovery",
+            reason: "reviewer_same_head_infrastructure",
+            createdAt: "2026-08-07T00:03:00.000Z",
+            consumedAt: null,
+        };
+        state.activeJob.revision += 1;
+        state.activeJob.state = "recovery_approved";
+        state.activeJob.incident.automaticRecovery = {
+            rule: automaticRecovery.policyRule,
+            fingerprint: automaticRecovery.fingerprint,
+        };
+        state.activeJob.approval = automaticRecovery;
+        state.activeJob.automaticRecoveries = [automaticRecovery];
+        writeFileSync(join(stateDir, "state.json"), `${JSON.stringify(state)}\n`, { encoding: "utf8", mode: 0o600 });
+        const automatic = run("notification", bridgeConfig);
+        assert.equal(automatic.status, 0);
+        assert.match(automatic.stdout, /自动恢复已授权 · 无需处理/);
+        assert.match(automatic.stdout, /启动全新 Reviewer/);
+        assert.ok(!automatic.stdout.includes("未执行自动恢复"));
+        const automaticIncident = run("incident", bridgeConfig);
+        assert.match(automaticIncident.stdout, /无需人工批准/);
+        state.activeJob.state = "blocked";
+        state.activeJob.approval = null;
         state.activeJob.analysis = {
             ...state.activeJob.analysis,
             id: "analysis-exhausted",
@@ -160,7 +193,7 @@ test("Hermes status stays read-only and renders bounded ledger facts", () => {
         assert.ok(!exhausted.stdout.includes("evidence-gathering turns were exhausted"));
         const summary = run("summary", bridgeConfig);
         assert.equal(summary.status, 0);
-        assert.match(summary.stdout, /owner\/repo#48 · BLOCKED · revision 12/);
+        assert.match(summary.stdout, /owner\/repo#48 · BLOCKED · revision 13/);
         assert.match(summary.stdout, /incident infrastructure_exhausted/);
     }
     finally {

@@ -17,6 +17,8 @@ import {
   type AnalystAdvice,
   type Attempt,
   type AttemptResult,
+  type AutomaticRecovery,
+  type AutomaticRecoveryCandidate,
   type CiFailure,
   type EvidenceItem,
   type ExecutionResource,
@@ -28,7 +30,16 @@ import {
   type ReviewerResult,
   type WorkerResult,
 } from "./model.js";
-import { allowedActionsFor, buildEvidencePack, isDecisionResolutionEligible, makeIncident, validateAttemptResult } from "./policy.js";
+import {
+  allowedActionsFor,
+  automaticRecoveryCandidateForAttempt,
+  automaticRecoveryFor,
+  buildEvidencePack,
+  isAutomaticRecoveryApproval,
+  isDecisionResolutionEligible,
+  makeIncident,
+  validateAttemptResult,
+} from "./policy.js";
 import type {
   AnalystPort,
   AttemptRuntimePort,
@@ -82,6 +93,7 @@ export type TickAction =
   | "attempt_reconciling"
   | "attempt_completed"
   | "analysis_recorded"
+  | "auto_recovery_authorized"
   | "waiting_for_approval"
   | "recovery_applied"
   | "ci_recovered"
@@ -678,11 +690,13 @@ export class HarnessController {
   ): Promise<TickResult> {
     const retries = attempt.reconciliationAttempts ?? 0;
     if (retries >= MAX_ATTEMPT_RECONCILIATIONS) {
+      const automaticRecovery = automaticRecoveryCandidateForAttempt(job, attempt);
       return this.block(state, job, {
         class: "infrastructure_exhausted",
         lane: attempt.lane,
         summary,
         attemptResult: null,
+        ...(automaticRecovery ? { automaticRecovery } : {}),
       });
     }
     const next = evolveJob(job, this.deps.clock.now(), {
@@ -1273,7 +1287,34 @@ export class HarnessController {
         createdAt: this.deps.clock.now(),
       };
     }
-    const next = evolveJob(job, this.deps.clock.now(), { analysis: advice });
+    const now = this.deps.clock.now();
+    const automatic = automaticRecoveryFor(job, advice);
+    if (automatic) {
+      const approval: AutomaticRecovery = {
+        id: this.deps.ids.next("approval"),
+        jobRevision: job.revision,
+        incidentId: job.incident.id,
+        analysisId: advice.id,
+        action: automatic.action,
+        basis: "policy_rule",
+        policyRule: automatic.rule,
+        fingerprint: automatic.fingerprint,
+        attemptId: automatic.attemptId,
+        actor: "harness:auto-recovery",
+        reason: automatic.rule,
+        createdAt: now,
+        consumedAt: null,
+      };
+      const next = evolveJob(job, now, {
+        state: "recovery_approved",
+        analysis: advice,
+        approval,
+        automaticRecoveries: [...(job.automaticRecoveries ?? []), approval],
+      });
+      await this.saveJob(state, job, next);
+      return result(true, "auto_recovery_authorized", job.id, `${automatic.rule} authorized one fresh ${automatic.action}`);
+    }
+    const next = evolveJob(job, now, { analysis: advice });
     await this.saveJob(state, job, next);
     return result(true, "analysis_recorded", job.id, `Analyst advice ${advice.id} recorded with action=${advice.action}`);
   }
@@ -1472,12 +1513,14 @@ export class HarnessController {
       });
     }
     const humanDecision = approval.basis === "human_decision";
+    const policyDecision = approval.basis === "policy_rule";
     if (
       approval.jobRevision >= job.revision ||
       approval.incidentId !== incident.id ||
       approval.analysisId !== analysis.id ||
       !isRetryAction(approval.action) ||
       (humanDecision ? !isDecisionResolutionEligible(job) : approval.action !== analysis.action) ||
+      (policyDecision && !isAutomaticRecoveryApproval(job, approval)) ||
       !incident.allowedActions.includes(approval.action) ||
       !allowedActionsFor(incident.class, incident.lane).includes(approval.action)
     ) {
@@ -1554,6 +1597,9 @@ export class HarnessController {
       ? [...job.attempts, settleAttempt(job.activeAttempt, job.activeAttempt.result, now)]
       : job.attempts;
     const consumed = { ...approval, consumedAt: now };
+    const automaticRecoveries = policyDecision
+      ? (job.automaticRecoveries ?? []).map((entry) => entry.id === approval.id ? { ...entry, consumedAt: now } : entry)
+      : job.automaticRecoveries;
     const pendingHandoff = approvedRecoveryHandoff({
       job,
       incident,
@@ -1569,12 +1615,13 @@ export class HarnessController {
       incident: null,
       analysis: null,
       approval: consumed,
+      ...(automaticRecoveries ? { automaticRecoveries } : {}),
       ...(ciRecovery ? { ciReworkCount: (job.ciReworkCount ?? 0) + 1 } : {}),
       lastError: null,
     });
     await this.saveJob(state, job, next);
     const lane = approval.action === "retry_fresh_reviewer" ? "Reviewer" : "Worker";
-    return result(true, "recovery_applied", job.id, `approval consumed; a fresh ${lane} attempt is now required`);
+    return result(true, "recovery_applied", job.id, `${policyDecision ? "policy authorization" : "approval"} consumed; a fresh ${lane} attempt is now required`);
   }
 
   private async archive(state: HarnessState, job: Job): Promise<TickResult> {
@@ -1633,6 +1680,7 @@ export class HarnessController {
       summary: string;
       attemptResult: AttemptResult | null;
       ciFailure?: CiFailure;
+      automaticRecovery?: AutomaticRecoveryCandidate;
     },
   ): Promise<TickResult> {
     const now = this.deps.clock.now();
@@ -1651,6 +1699,7 @@ export class HarnessController {
       attemptId: activeAttempt?.id ?? null,
       blockClass: input.class,
       summary: input.summary,
+      ...(input.automaticRecovery ? { automaticRecovery: input.automaticRecovery } : {}),
       clock: this.deps.clock,
       ids: this.deps.ids,
     });

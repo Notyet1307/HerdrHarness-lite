@@ -39,7 +39,7 @@ async function cycle(config) {
         state.initialized = true;
         enqueue(state, "observer-online", [
             "🟢 Observer 已上线 · 无需处理",
-            "只推送任务开始、终态和需要关注的异常；恢复仍需精确绑定的人工批准。",
+            "只推送任务开始、终态和需要关注的异常；低风险恢复可按精确策略自动一次，其余仍需人工批准。",
         ].join("\n"));
     }
     await observeLedger(config, state);
@@ -67,11 +67,14 @@ async function observeLedger(config, observer) {
     if (!observer.ledgerInitialized) {
         observer.ledgerInitialized = true;
         baselineLedger(observer, ledger);
-        if (ledger.activeJob?.analysis) {
-            enqueueAnalysis(config, observer, ledger.activeJob, "🧭 当前任务已有 Analyst 恢复建议");
-        }
-        else if (ledger.activeJob?.incident) {
-            enqueue(observer, `incident:${ledger.activeJob.incident.id}`, safeView(config, "notification"));
+        const automaticRecovery = ledger.activeJob ? enqueueCurrentAutomaticRecovery(observer, ledger.activeJob) : false;
+        if (!automaticRecovery) {
+            if (ledger.activeJob?.analysis) {
+                enqueueAnalysis(config, observer, ledger.activeJob, "🧭 当前任务已有 Analyst 恢复建议");
+            }
+            else if (ledger.activeJob?.incident) {
+                enqueue(observer, `incident:${ledger.activeJob.incident.id}`, safeView(config, "notification"));
+            }
         }
         return;
     }
@@ -88,11 +91,14 @@ async function observeLedger(config, observer) {
     const jobChanged = job?.id !== observer.lastJobId;
     if (job && jobChanged) {
         enqueue(observer, `job:${job.id}`, `🚀 任务已开始 · 无需处理\n${clean(job.task.repo, 160)}#${job.task.issueNumber} · ${clean(job.task.title, 240)}`);
-        if (job.analysis) {
-            enqueueAnalysis(config, observer, job, "🧭 Analyst 已给出恢复建议");
-        }
-        else if (job.incident) {
-            enqueue(observer, `incident:${job.incident.id}`, safeView(config, "notification"));
+        const automaticRecovery = enqueueCurrentAutomaticRecovery(observer, job);
+        if (!automaticRecovery) {
+            if (job.analysis) {
+                enqueueAnalysis(config, observer, job, "🧭 Analyst 已给出恢复建议");
+            }
+            else if (job.incident) {
+                enqueue(observer, `incident:${job.incident.id}`, safeView(config, "notification"));
+            }
         }
     }
     else if (job) {
@@ -109,10 +115,11 @@ function observeJob(config, observer, job) {
     }
     const incidentChanged = job.incident?.id !== (observer.lastIncidentId ?? undefined);
     const analysisChanged = job.analysis?.id !== (observer.lastAnalysisId ?? undefined);
-    if (job.analysis && analysisChanged) {
+    const automaticRecoveryChanged = enqueueAutomaticRecoveries(observer, job, observer.lastAutomaticRecoveryCount);
+    if (job.analysis && analysisChanged && !automaticRecoveryChanged) {
         enqueueAnalysis(config, observer, job, "🧭 Analyst 已给出恢复建议");
     }
-    else if (job.incident && incidentChanged) {
+    else if (job.incident && incidentChanged && !automaticRecoveryChanged) {
         enqueue(observer, `incident:${job.incident.id}`, safeView(config, "notification"));
     }
 }
@@ -123,7 +130,41 @@ function baselineLedger(observer, ledger) {
     observer.lastJobState = job?.state ?? null;
     observer.lastIncidentId = job?.incident?.id ?? null;
     observer.lastAnalysisId = job?.analysis?.id ?? null;
+    observer.lastAutomaticRecoveryCount = job?.automaticRecoveries?.length ?? 0;
     observer.terminalCount = ledger.terminalJobs.length;
+}
+function enqueueAutomaticRecoveries(observer, job, offset) {
+    const recoveries = job.automaticRecoveries ?? [];
+    if (recoveries.length <= offset)
+        return false;
+    for (const recovery of recoveries.slice(offset)) {
+        enqueue(observer, `auto-recovery:${recovery.id}`, automaticRecoveryNotice(job, recovery));
+    }
+    return true;
+}
+function enqueueCurrentAutomaticRecovery(observer, job) {
+    const recovery = job.state === "recovery_approved" && job.approval?.basis === "policy_rule"
+        ? (job.automaticRecoveries ?? []).find((entry) => entry.id === job.approval.id)
+        : undefined;
+    if (!recovery)
+        return false;
+    enqueue(observer, `auto-recovery:${recovery.id}`, automaticRecoveryNotice(job, recovery));
+    return true;
+}
+function automaticRecoveryNotice(job, recovery) {
+    const lane = recovery.action === "retry_fresh_reviewer" ? "Reviewer" : "Worker";
+    const reason = recovery.policyRule === "reviewer_same_head_infrastructure"
+        ? "Reviewer 基础设施失败；实现 HEAD 未变化。"
+        : "Worker 在 prompt dispatch 前发生基础设施失败。";
+    return [
+        "♻️ 自动恢复已授权 · 无需处理",
+        `任务：${clean(job.task.repo, 160)}#${job.task.issueNumber} · ${clean(job.task.title, 240)}`,
+        `动作：启动全新 ${lane}`,
+        `原因：${reason}`,
+        `旧 Attempt：${clean(recovery.attemptId, 160)}`,
+        `规则：${recovery.policyRule} · fingerprint ${recovery.fingerprint.slice(0, 12)}`,
+        "限制：该故障指纹的自动额度已用尽；再次发生将转为人工批准。",
+    ].join("\n");
 }
 function observeControllerLog(config, observer) {
     if (!existsSync(config.controllerLog)) {
@@ -518,9 +559,15 @@ function loadState(path) {
         return emptyState();
     assertSecureAbsoluteFile(path, "observer state");
     const raw = JSON.parse(readFileSync(path, "utf8"));
-    const value = raw.version === 1
+    const migrated = raw.version === 1
         ? { ...raw, version: 2, outbox: raw.outbox.map((entry) => ({ kind: "text", ...entry })) }
         : raw;
+    const value = {
+        ...migrated,
+        lastAutomaticRecoveryCount: Number.isInteger(migrated.lastAutomaticRecoveryCount)
+            ? migrated.lastAutomaticRecoveryCount
+            : 0,
+    };
     if (value.version !== 2
         || typeof value.initialized !== "boolean"
         || typeof value.ledgerInitialized !== "boolean"
@@ -533,6 +580,8 @@ function loadState(path) {
         || value.controllerLogOffset < 0
         || !Number.isInteger(value.terminalCount)
         || value.terminalCount < 0
+        || !Number.isInteger(value.lastAutomaticRecoveryCount)
+        || value.lastAutomaticRecoveryCount < 0
         || !Array.isArray(value.outbox)
         || value.outbox.some((entry) => !entry
             || typeof entry.key !== "string"
@@ -562,6 +611,7 @@ function emptyState() {
         lastJobState: null,
         lastIncidentId: null,
         lastAnalysisId: null,
+        lastAutomaticRecoveryCount: 0,
         terminalCount: 0,
         outbox: [],
     };

@@ -266,6 +266,11 @@ export type EvidencePack = {
 };
 export type BlockClass = "agent_decision" | "agent_blocked" | "review_uncertain" | "reviewer_preflight_dirty" | "infrastructure_exhausted" | "integrity_violation" | "stale_task" | "ci_failure" | "ci_rework_exhausted" | "analyst_unavailable";
 export type RecoveryAction = "retry_fresh_worker" | "retry_fresh_reviewer" | "hold";
+export type AutomaticRecoveryRule = "worker_pre_dispatch_infrastructure" | "reviewer_same_head_infrastructure";
+export type AutomaticRecoveryCandidate = {
+    rule: AutomaticRecoveryRule;
+    fingerprint: string;
+};
 export declare function isRecoveryAction(value: unknown): value is RecoveryAction;
 export declare function isRetryAction(value: unknown): value is Exclude<RecoveryAction, "hold">;
 export type Incident = {
@@ -276,6 +281,7 @@ export type Incident = {
     summary: string;
     evidenceDigest: string;
     allowedActions: RecoveryAction[];
+    automaticRecovery?: AutomaticRecoveryCandidate;
     createdAt: string;
 };
 export type AnalystAdvice = {
@@ -307,11 +313,19 @@ export type Approval = {
     analysisId: string;
     action: Exclude<RecoveryAction, "hold">;
     /** Optional because V1 ledgers created before decision resolution have no basis field. */
-    basis?: "analyst_advice" | "human_decision";
+    basis?: "analyst_advice" | "human_decision" | "policy_rule";
+    policyRule?: AutomaticRecoveryRule;
+    fingerprint?: string;
     actor: string;
     reason: string;
     createdAt: string;
     consumedAt: string | null;
+};
+export type AutomaticRecovery = Approval & {
+    basis: "policy_rule";
+    policyRule: AutomaticRecoveryRule;
+    fingerprint: string;
+    attemptId: string;
 };
 export type Reassessment = {
     id: string;
@@ -380,6 +394,7 @@ export type Job = {
     incident: Incident | null;
     analysis: AnalystAdvice | null;
     approval: Approval | null;
+    automaticRecoveries?: AutomaticRecovery[];
     cancellation?: Cancellation | null;
     reassessments?: Reassessment[];
     pullRequest: PullRequestRef | null;

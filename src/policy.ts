@@ -2,6 +2,8 @@ import type {
   Attempt,
   AttemptResult,
   AnalystAdvice,
+  Approval,
+  AutomaticRecoveryCandidate,
   BlockClass,
   EvidencePack,
   HarnessState,
@@ -30,6 +32,82 @@ export function allowedActionsFor(blockClass: BlockClass, lane: Incident["lane"]
     case "analyst_unavailable":
       return ["hold"];
   }
+}
+
+export function automaticRecoveryCandidateForAttempt(job: Job, attempt: Attempt): AutomaticRecoveryCandidate | undefined {
+  if (attempt.result !== null) return undefined;
+  if (attempt.lane === "worker" && attempt.phase !== "running" && attempt.phase !== "settled") {
+    const rule = "worker_pre_dispatch_infrastructure" as const;
+    return {
+      rule,
+      fingerprint: digest({
+        rule,
+        baseSha: attempt.baseSha,
+        expectedRemoteHeadSha: attempt.expectedRemoteHeadSha ?? null,
+      }),
+    };
+  }
+  if (
+    attempt.lane !== "reviewer"
+    || !job.headSha
+    || attempt.expectedHeadSha !== job.headSha
+  ) return undefined;
+  const rule = "reviewer_same_head_infrastructure" as const;
+  return { rule, fingerprint: digest({ rule, baseSha: attempt.baseSha, headSha: job.headSha }) };
+}
+
+export function automaticRecoveryFor(job: Job, advice: AnalystAdvice): (AutomaticRecoveryCandidate & {
+  action: Exclude<RecoveryAction, "hold">;
+  attemptId: string;
+}) | null {
+  const incident = job.incident;
+  const attempt = job.activeAttempt;
+  const candidate = incident?.automaticRecovery;
+  const action = candidate?.rule === "reviewer_same_head_infrastructure"
+    ? "retry_fresh_reviewer"
+    : candidate?.rule === "worker_pre_dispatch_infrastructure"
+      ? "retry_fresh_worker"
+      : null;
+  if (
+    job.state !== "blocked"
+    || job.approval !== null
+    || incident?.class !== "infrastructure_exhausted"
+    || !candidate
+    || !action
+    || incident.attemptId !== attempt?.id
+    || incident.lane !== attempt?.lane
+    || attempt.phase !== "settled"
+    || attempt.result !== null
+    || advice.incidentId !== incident.id
+    || advice.action !== action
+    || !advice.resolutionBrief.trim()
+    || advice.unknowns.length !== 0
+    || !incident.allowedActions.includes(action)
+    || !allowedActionsFor(incident.class, incident.lane).includes(action)
+    || (candidate.rule === "reviewer_same_head_infrastructure" && (
+      attempt.lane !== "reviewer" || !job.headSha || attempt.expectedHeadSha !== job.headSha
+    ))
+    || (candidate.rule === "worker_pre_dispatch_infrastructure" && attempt.lane !== "worker")
+    || (job.automaticRecoveries ?? []).some((entry) => entry.fingerprint === candidate.fingerprint)
+  ) return null;
+  return { ...candidate, action, attemptId: attempt.id };
+}
+
+export function isAutomaticRecoveryApproval(job: Job, approval: Approval): boolean {
+  const candidate = job.incident?.automaticRecovery;
+  return approval.basis === "policy_rule"
+    && candidate !== undefined
+    && approval.policyRule === candidate.rule
+    && approval.fingerprint === candidate.fingerprint
+    && (job.automaticRecoveries ?? []).some((entry) => (
+      entry.id === approval.id
+      && entry.incidentId === approval.incidentId
+      && entry.analysisId === approval.analysisId
+      && entry.attemptId === job.activeAttempt?.id
+      && entry.action === approval.action
+      && entry.policyRule === approval.policyRule
+      && entry.fingerprint === approval.fingerprint
+    ));
 }
 
 export type OperatorAction = {
@@ -308,6 +386,7 @@ export function makeIncident(input: {
   attemptId: string | null;
   blockClass: BlockClass;
   summary: string;
+  automaticRecovery?: AutomaticRecoveryCandidate;
   clock: Clock;
   ids: IdGenerator;
 }): Incident {
@@ -319,6 +398,7 @@ export function makeIncident(input: {
     attemptId: input.attemptId,
     blockClass: input.blockClass,
     summary: input.summary,
+    ...(input.automaticRecovery ? { automaticRecovery: input.automaticRecovery } : {}),
     createdAt,
   };
   return {
@@ -329,6 +409,7 @@ export function makeIncident(input: {
     summary: input.summary,
     evidenceDigest: digest(core),
     allowedActions: allowedActionsFor(input.blockClass, input.lane),
+    ...(input.automaticRecovery ? { automaticRecovery: input.automaticRecovery } : {}),
     createdAt,
   };
 }

@@ -309,6 +309,7 @@ export class FakeHerdr implements HerdrPort {
   started: string[] = [];
   startedCwds: string[] = [];
   startedArgv: string[][] = [];
+  startFailure: Error | null = null;
   paneCommands: Array<{ command: string; argv: string[] }> = [];
   prompts: Array<{ dispatchId: string; skill: "implement" | "code-review"; text: string }> = [];
   closed: string[] = [];
@@ -343,6 +344,9 @@ export class FakeHerdr implements HerdrPort {
     this.started.push(input.handle.agentName);
     this.startedCwds.push(input.cwd);
     this.startedArgv.push([...input.argv]);
+    const failure = this.startFailure;
+    this.startFailure = null;
+    if (failure) throw failure;
   }
 
   async runInPane(input: { command: string; argv: string[] }): Promise<void> {
