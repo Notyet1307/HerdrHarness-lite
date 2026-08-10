@@ -205,7 +205,7 @@ async function main(argv: string[]): Promise<void> {
     if (type === "agent_start" && ++agentStarts > 1) policyViolation = "multiple agent_start events";
     if (type === "agent_end" && event.willRetry === true) policyViolation = "agent_end requested an automatic retry";
     if (type === "unknown") policyViolation = "unknown Pi RPC event";
-    if (type === "extension_ui_request" && !allowedReviewerShutdownCleanup(plan, event, settled)) {
+    if (type === "extension_ui_request" && !allowedReviewerLifecycleCleanup(plan, event, settled, agentStarts)) {
       policyViolation = "forbidden Pi RPC control event";
     }
     if ([
@@ -405,9 +405,9 @@ function validatePlan(plan: PiRpcPlan): void {
   credentialHostArgs(plan);
 }
 
-function allowedReviewerShutdownCleanup(plan: PiRpcPlan, event: JsonObject, settled: boolean): boolean {
+function allowedReviewerLifecycleCleanup(plan: PiRpcPlan, event: JsonObject, settled: boolean, agentStarts: number): boolean {
   const allowedKeys = new Set(["type", "id", "method", "widgetKey"]);
-  return settled
+  return (agentStarts === 0 || settled)
     && plan.snapshot.context?.lane === "reviewer"
     && typeof event.id === "string"
     && event.id.length > 0

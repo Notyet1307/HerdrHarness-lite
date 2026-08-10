@@ -204,7 +204,7 @@ async function main(argv) {
             policyViolation = "agent_end requested an automatic retry";
         if (type === "unknown")
             policyViolation = "unknown Pi RPC event";
-        if (type === "extension_ui_request" && !allowedReviewerShutdownCleanup(plan, event, settled)) {
+        if (type === "extension_ui_request" && !allowedReviewerLifecycleCleanup(plan, event, settled, agentStarts)) {
             policyViolation = "forbidden Pi RPC control event";
         }
         if ([
@@ -414,9 +414,9 @@ function validatePlan(plan) {
         throw new Error("invalid Pi RPC runtime plan");
     credentialHostArgs(plan);
 }
-function allowedReviewerShutdownCleanup(plan, event, settled) {
+function allowedReviewerLifecycleCleanup(plan, event, settled, agentStarts) {
     const allowedKeys = new Set(["type", "id", "method", "widgetKey"]);
-    return settled
+    return (agentStarts === 0 || settled)
         && plan.snapshot.context?.lane === "reviewer"
         && typeof event.id === "string"
         && event.id.length > 0

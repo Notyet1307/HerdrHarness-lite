@@ -9,6 +9,7 @@ let splitStateResponse = true;
 if (process.env.FAKE_PI_MALFORMED_SECRET_PHASE === "before-ready") {
   process.stdout.write(`${process.env.FAKE_PI_MALFORMED_SECRET}\n`);
 }
+if (process.env.FAKE_PI_REVIEWER_CLEANUP === "before-and-after") emitReviewerCleanup();
 
 process.stdin.setEncoding("utf8");
 process.stdin.on("data", (chunk) => {
@@ -111,7 +112,7 @@ function respond(command) {
   emit({ type: "turn_end", message: {}, toolResults: [] });
   emit({ type: "agent_end", messages: [], willRetry: false });
   emit({ type: "agent_settled" });
-  if (process.env.FAKE_PI_REVIEWER_CLEANUP === "after-settled") emitReviewerCleanup();
+  if (["after-settled", "before-and-after"].includes(process.env.FAKE_PI_REVIEWER_CLEANUP)) emitReviewerCleanup();
   if (process.env.FAKE_PI_REVIEWER_CLEANUP === "wrong-key") emitReviewerCleanup("other-widget");
   if (process.env.FAKE_PI_WRITE_AUTH_AFTER_SETTLED === "1") writePrivateAuth();
   if (process.env.FAKE_PI_MALFORMED_AFTER_SETTLED === "1") {

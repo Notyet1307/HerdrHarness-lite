@@ -273,7 +273,7 @@ test("durable runner dispatches Reviewer code-review with the bound custom model
     process.env.FAKE_PI_LANE = "reviewer";
     process.env.FAKE_PI_SKILLS = "code-review";
     process.env.FAKE_PI_THINKING = "max";
-    process.env.FAKE_PI_REVIEWER_CLEANUP = "after-settled";
+    process.env.FAKE_PI_REVIEWER_CLEANUP = "before-and-after";
 
     const execution = new SyncCommandRunner().run(process.execPath, [
       resolve("dist/src/pi-rpc-runner.js"),
@@ -281,6 +281,7 @@ test("durable runner dispatches Reviewer code-review with the bound custom model
       "--plan", join(plan.runtimeRoot, "plan.json"),
     ], { cwd: fixture.root, timeoutMs: 10_000 });
     assert.equal(execution.ok, true, execution.stderr);
+    assert.equal(readJson<{ ok: boolean }>(join(plan.runtimeRoot, "terminal.json")).ok, true);
     assert.equal(readJson<{ credentialMode: string }>(join(plan.runtimeRoot, "ready.json")).credentialMode, "canonical-model-config");
     assert.equal(JSON.parse(readFileSync(fixture.attempt.resultPath, "utf8")).lane, "reviewer");
     assert.equal(readFileSync(modelsPath, "utf8"), modelsContent);
@@ -297,7 +298,7 @@ test("durable runner dispatches Reviewer code-review with the bound custom model
   }
 });
 
-test("durable runner rejects Reviewer UI requests except settled empty subagent cleanup", () => {
+test("durable runner rejects Reviewer UI requests during an active agent or with the wrong widget", () => {
   for (const cleanup of ["before-settled", "wrong-key"]) {
     const fixture = rpcFixture();
     try {
