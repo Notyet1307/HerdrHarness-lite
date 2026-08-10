@@ -632,6 +632,79 @@ test("durable runner fails closed when RPC JSONL breaks before or after settleme
         }
     }
 });
+test("durable runner handles child exit races and records sanitized failures", async () => {
+    const sentinel = "PROVIDER_SECRET_SENTINEL";
+    for (const [mode, expected, ok] of [
+        ["success", { code: 0, signal: null }, true],
+        ["code", { code: 23, signal: null }, false],
+        ["signal", { code: null, signal: "SIGTERM" }, false],
+    ]) {
+        const fixture = rpcFixture();
+        try {
+            const plan = fixture.plan({
+                executable: process.execPath,
+                argv: [
+                    resolve("test/fixtures/fake-pi-rpc.js"),
+                    "--no-session", "--no-context-files", "--no-prompt-templates", "--no-themes",
+                    "--provider", "test", "--model", "model", "--mode", "rpc",
+                ],
+            });
+            writeExclusiveJson(join(plan.runtimeRoot, "plan.json"), plan);
+            writeExclusiveJson(join(plan.runtimeRoot, "dispatch.json"), {
+                version: 1,
+                attemptId: plan.attemptId,
+                generation: plan.generation,
+                planDigest: plan.planDigest,
+                dispatchId: plan.attemptId,
+                promptDigest: fixture.attempt.promptDigest,
+                message: "/skill:implement [harness-dispatch:worker-1]\nimplement",
+            });
+            const execution = new SyncCommandRunner().run(process.execPath, [
+                resolve("dist/src/pi-rpc-runner.js"),
+                "--sdk-entry", resolve("test/fixtures/pi-rpc-sdk-entry.js"),
+                "--plan", join(plan.runtimeRoot, "plan.json"),
+            ], {
+                cwd: fixture.root,
+                timeoutMs: 10_000,
+                env: {
+                    ...process.env,
+                    FAKE_PI_RESULT_PATH: fixture.attempt.resultPath,
+                    FAKE_PI_JOB_ID: "job-1",
+                    FAKE_PI_ATTEMPT_ID: fixture.attempt.id,
+                    FAKE_PI_EXIT_AFTER_SETTLED: mode,
+                    FAKE_PI_EXIT_STDERR: sentinel,
+                },
+            });
+            assert.equal(execution.ok, ok, mode);
+            const terminal = readJson(join(plan.runtimeRoot, "terminal.json"));
+            if (ok) {
+                assert.deepEqual(terminal, { ...receiptIdentity(plan), ok: true, agentSettled: true });
+            }
+            else {
+                assert.deepEqual(terminal, {
+                    ...receiptIdentity(plan),
+                    ok: false,
+                    error: "Pi RPC runner failed",
+                    failureStage: "child-exit",
+                    childExit: expected,
+                });
+                await assert.rejects(() => new PiRpcRuntime({ runInPane: async () => undefined }).wait({
+                    handle: fixture.handle,
+                    attempt: fixture.attempt,
+                    resultPath: fixture.attempt.resultPath,
+                    expectedJobId: "job-1",
+                    expectedAttemptId: fixture.attempt.id,
+                    expectedLane: "worker",
+                }), new RegExp(`Pi RPC runner failed \\(stage=child-exit, child=${mode === "code" ? "exit:23" : "signal:SIGTERM"}\\)`));
+            }
+            for (const path of filesUnder(plan.runtimeRoot))
+                assert.equal(readFileSync(path, "utf8").includes(sentinel), false, path);
+        }
+        finally {
+            rmSync(fixture.root, { recursive: true, force: true });
+        }
+    }
+});
 test("durable runner confirms child exit before acknowledging Controller termination", async () => {
     const fixture = rpcFixture();
     try {

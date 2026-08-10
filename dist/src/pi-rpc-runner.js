@@ -176,6 +176,8 @@ async function main(argv) {
     let settled = false;
     let policyViolation = null;
     let assistantFailure = null;
+    let failureStage = "startup";
+    let childExit = null;
     let agentStarts = 0;
     let eventBytes = 0;
     let logTruncated = false;
@@ -248,6 +250,7 @@ async function main(argv) {
         });
         child.stderr.on("data", () => { });
         client = new RpcClient(child, persistEvent);
+        failureStage = "handshake";
         const initialState = requireResponse(await client.command("get_state"), "get_state");
         validateInitialState(initialState, plan);
         const commands = requireResponse(await client.command("get_commands"), "get_commands");
@@ -267,6 +270,7 @@ async function main(argv) {
             credentialMode: plan.snapshot.credentialMode,
             isolatedAgentDir,
         });
+        failureStage = "await-dispatch";
         const dispatch = await waitForDispatch(plan, client);
         if (!dispatch) {
             await stopChild(child, client);
@@ -275,9 +279,11 @@ async function main(argv) {
             writeAtomicJson(spoolPath(plan.runtimeRoot, "terminated.json"), { ...identity, ok: true, reason: "pre-dispatch termination" });
             return;
         }
+        failureStage = "dispatch";
         credentialHostArgs(plan);
         requireResponse(await client.command("prompt", { message: dispatch.message }), "prompt");
         writeAtomicJson(spoolPath(plan.runtimeRoot, "accepted.json"), { ...identity, ok: true, dispatchId: dispatch.dispatchId });
+        failureStage = "agent-run";
         let abortSent = false;
         let abortStartedAt = null;
         let terminationRequested = false;
@@ -285,7 +291,7 @@ async function main(argv) {
             if (settled)
                 break;
             const exited = await Promise.race([client.exit.then((value) => ({ exited: value })), delay(POLL_MS).then(() => null)]);
-            if (exited)
+            if (exited && !settled)
                 throw new Error(`Pi RPC exited before agent_settled: ${JSON.stringify(exited.exited)}`);
             if (client.failure)
                 throw client.failure;
@@ -300,13 +306,17 @@ async function main(argv) {
                 break;
             }
         }
-        const childExit = await stopChild(child, client);
+        failureStage = "child-shutdown";
+        childExit = await stopChild(child, client);
+        failureStage = "rpc-output";
         if (client.failure)
             throw client.failure;
+        failureStage = "credential-postflight";
         credentialHostArgs(plan);
         preparePiRpcAgentDir(plan.snapshot);
         const terminalError = policyViolation ?? assistantFailure;
         const ok = terminalError === null && !terminationRequested && settled;
+        failureStage = "child-exit";
         if (ok && (childExit.code !== 0 || childExit.signal !== null)) {
             throw new Error(`Pi RPC exited unsuccessfully after settlement: ${JSON.stringify(childExit)}`);
         }
@@ -318,11 +328,11 @@ async function main(argv) {
         });
         writeAtomicJson(spoolPath(plan.runtimeRoot, "terminated.json"), { ...identity, ok: true, reason: "settled and child exited" });
     }
-    catch (error) {
+    catch {
         let terminationError = null;
         if (child && client) {
             try {
-                await stopChild(child, client);
+                childExit ??= await stopChild(child, client);
             }
             catch (stopError) {
                 terminationError = stopError instanceof Error ? stopError.message : String(stopError);
@@ -331,7 +341,13 @@ async function main(argv) {
         else if (child) {
             terminationError = "Pi RPC child exists without a controllable client";
         }
-        writeAtomicJson(spoolPath(plan.runtimeRoot, "terminal.json"), { ...identity, ok: false, error: "Pi RPC runner failed" });
+        writeAtomicJson(spoolPath(plan.runtimeRoot, "terminal.json"), {
+            ...identity,
+            ok: false,
+            error: "Pi RPC runner failed",
+            failureStage,
+            childExit,
+        });
         writeAtomicJson(spoolPath(plan.runtimeRoot, "terminated.json"), {
             ...identity,
             ok: terminationError === null,

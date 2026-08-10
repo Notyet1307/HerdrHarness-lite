@@ -126,6 +126,14 @@ function respond(command) {
   emit({ type: "turn_end", message: {}, toolResults: [] });
   emit({ type: "agent_end", messages: [], willRetry: false });
   emit({ type: "agent_settled" });
+  if (process.env.FAKE_PI_EXIT_AFTER_SETTLED) {
+    if (process.env.FAKE_PI_EXIT_STDERR) process.stderr.write(process.env.FAKE_PI_EXIT_STDERR);
+    process.stdout.write("", () => {
+      if (process.env.FAKE_PI_EXIT_AFTER_SETTLED === "signal") process.kill(process.pid, "SIGTERM");
+      else process.exit(process.env.FAKE_PI_EXIT_AFTER_SETTLED === "success" ? 0 : 23);
+    });
+    return;
+  }
   if (["after-settled", "before-and-after"].includes(process.env.FAKE_PI_REVIEWER_CLEANUP)) emitReviewerCleanup();
   if (process.env.FAKE_PI_REVIEWER_CLEANUP === "wrong-key") emitReviewerCleanup("other-widget");
   if (process.env.FAKE_PI_WRITE_AUTH_AFTER_SETTLED === "1") writePrivateAuth();

@@ -20,6 +20,10 @@ const READY_TIMEOUT_MS = 30_000;
 const ACCEPT_TIMEOUT_MS = 30_000;
 const TERMINATE_TIMEOUT_MS = 30_000;
 const POLL_MS = 50;
+const RUNNER_FAILURE_STAGES = new Set([
+  "startup", "handshake", "await-dispatch", "dispatch", "agent-run",
+  "child-shutdown", "rpc-output", "credential-postflight", "child-exit",
+]);
 
 type RuntimeReceipt = {
   version: 1;
@@ -28,6 +32,8 @@ type RuntimeReceipt = {
   planDigest: string;
   ok: boolean;
   error?: string;
+  failureStage?: string;
+  childExit?: { code: number | null; signal: string | null } | null;
 };
 
 type OwnerReceipt = RuntimeReceipt & { runnerPid: number };
@@ -132,7 +138,7 @@ export class PiRpcRuntime implements AttemptRuntimePort {
     }
     const terminal = waitForReceipt(plan, "terminal.json", null);
     assertReceipt(terminal, plan, "terminal");
-    if (!terminal.ok) throw new Error(`Pi RPC policy/runtime failure: ${terminal.error ?? "unknown failure"}`);
+    if (!terminal.ok) throw new Error(`Pi RPC policy/runtime failure: ${runtimeFailure(terminal)}`);
     const terminated = waitForReceipt(plan, "terminated.json", TERMINATE_TIMEOUT_MS);
     assertReceipt(terminated, plan, "terminated");
     if (!terminated.ok) throw new Error(`Pi RPC termination is not confirmed: ${terminated.error ?? "unknown failure"}`);
@@ -239,6 +245,20 @@ function assertReceipt(receipt: RuntimeReceipt, plan: PiRpcPlan, label: string):
     || receipt.generation !== plan.generation
     || receipt.planDigest !== plan.planDigest
   ) throw new Error(`Pi RPC ${label} receipt has a different identity`);
+}
+
+function runtimeFailure(receipt: RuntimeReceipt): string {
+  const details: string[] = [];
+  if (receipt.failureStage && RUNNER_FAILURE_STAGES.has(receipt.failureStage)) details.push(`stage=${receipt.failureStage}`);
+  const exit = receipt.childExit;
+  if (exit && Number.isInteger(exit.code) && exit.code! >= 0 && exit.code! <= 255 && exit.signal === null) {
+    details.push(`child=exit:${exit.code}`);
+  } else if (exit && exit.code === null && typeof exit.signal === "string" && /^SIG[A-Z0-9]+$/.test(exit.signal)) {
+    details.push(`child=signal:${exit.signal}`);
+  } else if (exit && exit.code === null && exit.signal === null) {
+    details.push("child=unknown");
+  }
+  return `${receipt.error ?? "unknown failure"}${details.length ? ` (${details.join(", ")})` : ""}`;
 }
 
 function processAlive(pid: number): boolean {

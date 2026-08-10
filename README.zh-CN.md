@@ -213,7 +213,7 @@ herdr --session SESSION_NAME agent read AGENT_NAME \
 
 Pi 底部显示实际 `(provider) model • thinking`。配置文件只能表达意图；运行时 footer 和真实探测才证明实际选择。
 
-RPC Worker/Reviewer 没有 Herdr interactive agent 记录；读取账本中的 ExecutionSnapshot，以及对应 attempt `runtime/ready.json`、`accepted.json`、`terminal.json`、`terminated.json`。不要尝试连接或重建 runner 持有的 stdin/stdout。
+RPC Worker/Reviewer 没有 Herdr interactive agent 记录；读取账本中的 ExecutionSnapshot，以及对应 attempt `runtime/ready.json`、`accepted.json`、`terminal.json`、`terminated.json`。通用 runner 故障只暴露固定的 `failureStage` 与 child `{code, signal}`；child stderr 和 Provider payload 仍不会写入。不要尝试连接或重建 runner 持有的 stdin/stdout。
 
 普通 `status` 返回完整账本；`status --operator` 返回稳定的操作投影：当前 mode/phase，以及只对精确 revision、incident、analysis、Attempt 和 HEAD 绑定有效的操作。
 
