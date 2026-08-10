@@ -162,7 +162,7 @@ Worker 与 Reviewer 的配置 Provider；当
 `preflight.dockerRequired=true` 时，还会解析并验证当前本地 Docker Unix
 socket 和 Compose V2。每个 attempt 创建 pane 前会重检当前角色 Provider
 和 Docker。返回 `preflight_failed` 时不会 claim 或 dispatch agent；`run`
-会退出，修复环境后重新启动即可。
+会保持运行并在下个轮询周期自动重试，单次 `tick` 则返回失败。
 
 ### 2. 先用手动 `tick`
 
@@ -177,7 +177,7 @@ node dist/src/cli.js tick --config /ABSOLUTE/PATH/harness.config.json
 | 返回状态 | 下一步 |
 | --- | --- |
 | `idle` | 当前没有可执行 Issue；停止或等待队列变化 |
-| `preflight_failed` | 尚未 dispatch agent；修复消息指出的 Provider/Docker 环境后重跑 `tick`，或重新启动 `run` |
+| `preflight_failed` | 尚未 dispatch agent；`tick` 返回失败，常驻 `run` 保持安全门禁关闭并在下个轮询周期自动重试 |
 | `selected`、`claimed`、`worktree_created` | 核对消息后再执行一次 `tick` |
 | `attempt_prepared`、`attempt_pane_ready`、`attempt_agent_ready` | 再执行一次 `tick`；下一步可能进入长时间 dispatch |
 | `attempt_reconciling` | 正在以同一 Attempt 身份再观察一次；再执行一次 `tick`，不要启动另一个 Controller |

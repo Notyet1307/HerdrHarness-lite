@@ -144,7 +144,9 @@ test("Hermes observer baselines old logs and retries text or approval-card deliv
         writeBridge("/usr/bin/false");
         assert.equal(runObserver().status, 0);
         observer = readObserver(observerState);
-        assert.ok(observer.outbox.some((entry) => (entry.message ?? "").includes("preflight_failed") && (entry.message ?? "").includes("未执行自动恢复")));
+        assert.ok(observer.outbox.some((entry) => (entry.message ?? "").includes("将自动重试") && (entry.message ?? "").includes("未启动新的 Agent")));
+        assert.ok(observer.outbox.every((entry) => !(entry.message ?? "").includes("未执行自动恢复")));
+        assert.equal(observer.controllerDown, false);
         assert.equal(readFileSync(ledgerPath, "utf8"), heldLedger);
         function writeBridge(hermesBin) {
             writeFileSync(bridgeConfig, JSON.stringify({

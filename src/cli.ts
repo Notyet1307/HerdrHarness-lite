@@ -138,7 +138,6 @@ async function main(argv: string[]): Promise<number> {
         cycle += 1;
         const output = await controller.tick();
         process.stdout.write(`${JSON.stringify({ cycle, ...output })}\n`);
-        if (output.action === "preflight_failed") return 1;
         if (maxCycles !== null && cycle >= maxCycles) return output.ok ? 0 : 1;
         Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, pollMs);
       }

@@ -162,7 +162,8 @@ selects a ready issue, it probes both configured Pi Providers and, when
 `preflight.dockerRequired=true`, resolves and verifies the active local Docker
 Unix socket plus Compose V2. It repeats the relevant Provider and Docker check
 before each attempt pane is created. `preflight_failed` makes no claim or agent
-dispatch; `run` exits so the operator can repair the environment and restart.
+dispatch; one-shot `tick` returns failure, while long-running `run` stays alive
+and retries after the configured poll interval.
 
 ### 2. Start with manual `tick`
 
@@ -177,7 +178,7 @@ Each successful `tick` writes at most one durable transition. Continue from its 
 | Result | Next action |
 | --- | --- |
 | `idle` | No executable issue exists; stop or wait for the queue to change |
-| `preflight_failed` | No agent was dispatched; repair the named Provider/Docker environment and rerun `tick`, or restart `run` |
+| `preflight_failed` | No agent was dispatched; `tick` returns failure, while long-running `run` keeps the safety gate closed and retries on its next poll |
 | `selected`, `claimed`, `worktree_created` | Check the message, then run one more `tick` |
 | `attempt_prepared`, `attempt_pane_ready`, `attempt_agent_ready` | Run one more `tick`; the next dispatch may remain attached for a long time |
 | `attempt_reconciling` | The same Attempt identity is being observed once more; run one more `tick` and do not start another Controller |

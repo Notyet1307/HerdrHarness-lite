@@ -200,16 +200,22 @@ function observeControllerEvent(config, observer, line, position) {
     if (alertKey === observer.lastControllerAlertKey)
         return;
     observer.lastControllerAlertKey = alertKey;
+    if (event.action === "preflight_failed") {
+        enqueue(observer, `controller:${position}:preflight_failed`, [
+            "⚠️ 运行环境暂不可用 · 将自动重试",
+            "Controller preflight 暂未通过：",
+            clean(event.message, 700),
+            "安全门禁仍生效，未启动新的 Agent；常驻 Controller 将在下个轮询周期重试。",
+            "无需手动重启；发送 /harness 可查看当前状态。",
+        ].join("\n"));
+        return;
+    }
     enqueue(observer, `controller:${position}:${clean(event.action, 80)}`, [
         "🚨 自动化异常 · 需要检查",
         `Controller 推进失败：${clean(event.action, 80)}`,
         clean(event.message, 700),
         "未执行自动恢复；发送 /harness 查看当前状态。",
     ].join("\n"));
-    if (event.action === "preflight_failed") {
-        observer.controllerDown = true;
-        observer.controllerDownLogMtimeMs = safeLogMtime(config.controllerHeartbeat);
-    }
 }
 function observeHeartbeat(config, observer) {
     const mtime = safeLogMtime(config.controllerHeartbeat);
