@@ -87,7 +87,7 @@ async function observeLedger(config, observer) {
     const job = ledger.activeJob;
     const jobChanged = job?.id !== observer.lastJobId;
     if (job && jobChanged) {
-        enqueue(observer, `job:${job.id}`, `🟦 任务已开始 · 无需处理\n${clean(job.task.repo, 160)}#${job.task.issueNumber} · ${clean(job.task.title, 240)}`);
+        enqueue(observer, `job:${job.id}`, `🚀 任务已开始 · 无需处理\n${clean(job.task.repo, 160)}#${job.task.issueNumber} · ${clean(job.task.title, 240)}`);
         if (job.analysis) {
             enqueueAnalysis(config, observer, job, "🧭 Analyst 已给出恢复建议");
         }

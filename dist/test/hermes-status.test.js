@@ -102,9 +102,33 @@ test("Hermes status stays read-only and renders bounded ledger facts", () => {
         assert.equal(status.status, 0);
         assert.match(status.stdout, /owner\/repo#48/);
         assert.match(status.stdout, /provider=openai-codex · model=gpt-test · effort=max/);
+        assert.match(status.stdout, /本轮运行：尚未记录运行信息，暂时无法确认模型。/);
+        assert.ok(!status.stdout.includes("ledger 未持久化"));
         assert.match(status.stdout, /更新时间：08-07 08:02:00 GMT\+8/);
         assert.ok(!status.stdout.includes("2026-08-07T00:02:00.000Z"));
         assert.ok(!status.stdout.includes("THIS OBJECTIVE MUST NOT BE EXPOSED"));
+        attempt.executionSnapshot = {
+            version: 1,
+            adapter: "pi-rpc",
+            executable: "/opt/pi",
+            runtimeVersion: "0.84.0",
+            argv: [],
+            provider: "review-provider",
+            model: "review-model",
+            thinking: "max",
+            tools: ["read"],
+            sessionMode: "ephemeral",
+            retryMode: "disabled",
+            compactionMode: "disabled",
+            credentialMode: "canonical-model-config",
+            dockerHost: null,
+            resources: [],
+        };
+        attempt.planDigest = "f".repeat(64);
+        writeFileSync(join(stateDir, "state.json"), `${JSON.stringify(state)}\n`, { encoding: "utf8", mode: 0o600 });
+        const boundStatus = run("status", bridgeConfig);
+        assert.equal(boundStatus.status, 0);
+        assert.match(boundStatus.stdout, /本轮运行：Reviewer · pi-rpc · provider=review-provider · model=review-model · effort=max/);
         const blocked = run("incident", bridgeConfig);
         assert.equal(blocked.status, 0);
         assert.match(blocked.stdout, /Analyst 建议：retry_fresh_reviewer/);

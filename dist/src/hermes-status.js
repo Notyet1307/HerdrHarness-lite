@@ -61,7 +61,7 @@ function renderStatus(state, config) {
         lines.push(`HEAD：${shortSha(job.headSha)}`);
     if (job.pullRequest)
         lines.push(`PR：#${job.pullRequest.number} ${clean(job.pullRequest.url, 500)}`);
-    lines.push(`Worker 配置：${runtimeSelection(config.workerArgv)}`, `Reviewer 配置：${runtimeSelection(config.reviewerArgv)}`, "实际运行模型：ledger 未持久化时不可从配置推断。", `更新时间：${displayTime(job.updatedAt)}`, `下一步：${nextStep(job, projection)}`);
+    lines.push(`Worker 配置：${runtimeSelection(config.workerArgv)}`, `Reviewer 配置：${runtimeSelection(config.reviewerArgv)}`, `本轮运行：${activeRuntime(job)}`, `更新时间：${displayTime(job.updatedAt)}`, `下一步：${nextStep(job, projection)}`);
     return lines.join("\n");
 }
 function renderNotification(state) {
@@ -70,7 +70,7 @@ function renderNotification(state) {
         return "当前没有需要处理的 Harness 任务。";
     const incident = job.incident;
     if (!incident)
-        return `🟦 运行中 · 无需处理\n${clean(job.task.repo, 160)}#${job.task.issueNumber} · ${clean(job.task.title, 240)}`;
+        return `⚙️ 运行中 · 无需处理\n${clean(job.task.repo, 160)}#${job.task.issueNumber} · ${clean(job.task.title, 240)}`;
     const analysis = job.analysis?.incidentId === incident.id ? job.analysis : null;
     const conclusion = analysis ? presentedAnalysisSummary(analysis) : "Harness 已记录阻塞，正在等待自动诊断。";
     const recommendation = analysis?.action === "hold"
@@ -188,6 +188,21 @@ function runtimeSelection(argv) {
     return [provider ? `provider=${clean(provider, 120)}` : null, model ? `model=${clean(model, 160)}` : null, effort ? `effort=${clean(effort, 40)}` : null]
         .filter((value) => value !== null)
         .join(" · ");
+}
+function activeRuntime(job) {
+    const attempt = job.activeAttempt;
+    if (!attempt)
+        return "尚未开始。";
+    const snapshot = attempt.executionSnapshot;
+    if (!snapshot)
+        return "尚未记录运行信息，暂时无法确认模型。";
+    return [
+        attempt.lane === "worker" ? "Worker" : "Reviewer",
+        snapshot.adapter,
+        `provider=${clean(snapshot.provider ?? "Pi 默认值", 120)}`,
+        `model=${clean(snapshot.model ?? "Pi 默认值", 160)}`,
+        `effort=${clean(snapshot.thinking, 40)}`,
+    ].join(" · ");
 }
 function loadBridgeConfig(path) {
     const parsed = readJson(path);

@@ -179,7 +179,7 @@ async function observeLedger(config: ObserverConfig, observer: ObserverState): P
     enqueue(
       observer,
       `job:${job.id}`,
-      `🟦 任务已开始 · 无需处理\n${clean(job.task.repo, 160)}#${job.task.issueNumber} · ${clean(job.task.title, 240)}`,
+      `🚀 任务已开始 · 无需处理\n${clean(job.task.repo, 160)}#${job.task.issueNumber} · ${clean(job.task.title, 240)}`,
     );
     if (job.analysis) {
       enqueueAnalysis(config, observer, job, "🧭 Analyst 已给出恢复建议");

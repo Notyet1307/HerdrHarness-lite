@@ -56,7 +56,7 @@ test("Hermes observer baselines old logs and retries text or approval-card deliv
     assert.equal(runObserver().status, 0);
     observer = readObserver(observerState);
     assert.deepEqual(observer.outbox.map((entry) => entry.key), ["job:job-001"]);
-    assert.equal(observer.outbox[0]!.message, "🟦 任务已开始 · 无需处理\nowner/repo#48 · Expose durable status");
+    assert.equal(observer.outbox[0]!.message, "🚀 任务已开始 · 无需处理\nowner/repo#48 · Expose durable status");
 
     for (const entry of observer.outbox) entry.nextAttemptAt = 0;
     writeFileSync(observerState, `${JSON.stringify(observer)}\n`, { encoding: "utf8", mode: 0o600 });
