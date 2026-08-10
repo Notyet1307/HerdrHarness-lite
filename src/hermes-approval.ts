@@ -19,6 +19,7 @@ const CHALLENGE_TTL_MS = 10 * 60 * 1_000;
 const MAX_STDIN_BYTES = 1_024;
 const LANE_ID = /^[a-z0-9][a-z0-9-]{0,31}$/;
 const TIMELINE_TIME = new Intl.DateTimeFormat("zh-CN", {
+  timeZone: "Asia/Shanghai",
   month: "2-digit",
   day: "2-digit",
   hour: "2-digit",

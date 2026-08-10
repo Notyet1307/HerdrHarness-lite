@@ -7,6 +7,16 @@ import { projectOperatorState, type OperatorAction, type OperatorProjection } fr
 
 const MAX_MESSAGE_LENGTH = 3_500;
 const LANE_ID = /^[a-z0-9][a-z0-9-]{0,31}$/;
+const DISPLAY_TIME = new Intl.DateTimeFormat("zh-CN", {
+  timeZone: "Asia/Shanghai",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+  hourCycle: "h23",
+  timeZoneName: "short",
+});
 
 type BridgeConfig = {
   harnessConfig: string;
@@ -69,7 +79,7 @@ function renderStatus(state: HarnessState, config: HarnessStatusConfig): string 
     `Worker 配置：${runtimeSelection(config.workerArgv)}`,
     `Reviewer 配置：${runtimeSelection(config.reviewerArgv)}`,
     "实际运行模型：ledger 未持久化时不可从配置推断。",
-    `更新时间：${clean(job.updatedAt, 80)}`,
+    `更新时间：${displayTime(job.updatedAt)}`,
     `下一步：${nextStep(job, projection)}`,
   );
   return lines.join("\n");
@@ -263,6 +273,13 @@ function clean(value: string, max: number): string {
 
 function shortSha(value: string): string {
   return clean(value, 12);
+}
+
+function displayTime(value: string): string {
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return clean(value, 80);
+  const parts = Object.fromEntries(DISPLAY_TIME.formatToParts(date).map((part) => [part.type, part.value]));
+  return `${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second} ${parts.timeZoneName}`;
 }
 
 function bounded(value: string): string {

@@ -6,6 +6,16 @@ import { MAX_CI_REWORKS } from "./model.js";
 import { projectOperatorState } from "./policy.js";
 const MAX_MESSAGE_LENGTH = 3_500;
 const LANE_ID = /^[a-z0-9][a-z0-9-]{0,31}$/;
+const DISPLAY_TIME = new Intl.DateTimeFormat("zh-CN", {
+    timeZone: "Asia/Shanghai",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+    timeZoneName: "short",
+});
 async function main(argv) {
     const command = argv[2] || "status";
     if (command !== "status" && command !== "incident" && command !== "summary" && command !== "notification") {
@@ -51,7 +61,7 @@ function renderStatus(state, config) {
         lines.push(`HEAD：${shortSha(job.headSha)}`);
     if (job.pullRequest)
         lines.push(`PR：#${job.pullRequest.number} ${clean(job.pullRequest.url, 500)}`);
-    lines.push(`Worker 配置：${runtimeSelection(config.workerArgv)}`, `Reviewer 配置：${runtimeSelection(config.reviewerArgv)}`, "实际运行模型：ledger 未持久化时不可从配置推断。", `更新时间：${clean(job.updatedAt, 80)}`, `下一步：${nextStep(job, projection)}`);
+    lines.push(`Worker 配置：${runtimeSelection(config.workerArgv)}`, `Reviewer 配置：${runtimeSelection(config.reviewerArgv)}`, "实际运行模型：ledger 未持久化时不可从配置推断。", `更新时间：${displayTime(job.updatedAt)}`, `下一步：${nextStep(job, projection)}`);
     return lines.join("\n");
 }
 function renderNotification(state) {
@@ -230,6 +240,13 @@ function clean(value, max) {
 }
 function shortSha(value) {
     return clean(value, 12);
+}
+function displayTime(value) {
+    const date = new Date(value);
+    if (!Number.isFinite(date.getTime()))
+        return clean(value, 80);
+    const parts = Object.fromEntries(DISPLAY_TIME.formatToParts(date).map((part) => [part.type, part.value]));
+    return `${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second} ${parts.timeZoneName}`;
 }
 function bounded(value) {
     return value.length <= MAX_MESSAGE_LENGTH ? value : `${value.slice(0, MAX_MESSAGE_LENGTH - 20)}\n…内容已截断`;

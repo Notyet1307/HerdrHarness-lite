@@ -106,6 +106,8 @@ test("Hermes status stays read-only and renders bounded ledger facts", () => {
     assert.equal(status.status, 0);
     assert.match(status.stdout, /owner\/repo#48/);
     assert.match(status.stdout, /provider=openai-codex · model=gpt-test · effort=max/);
+    assert.match(status.stdout, /更新时间：08-07 08:02:00 GMT\+8/);
+    assert.ok(!status.stdout.includes("2026-08-07T00:02:00.000Z"));
     assert.ok(!status.stdout.includes("THIS OBJECTIVE MUST NOT BE EXPOSED"));
 
     const blocked = run("incident", bridgeConfig);
@@ -152,6 +154,7 @@ test("Hermes status stays read-only and renders bounded ledger facts", () => {
 function run(command: string, config: string) {
   return spawnSync(process.execPath, [resolve("dist/src/hermes-status.js"), command, "--config", config], {
     encoding: "utf8",
+    env: { ...process.env, TZ: "UTC" },
     timeout: 5_000,
   });
 }

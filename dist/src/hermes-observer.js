@@ -11,6 +11,7 @@ const MAX_OUTBOX = 512;
 const LOG_CHUNK_BYTES = 1024 * 1024;
 const RETRY_DELAYS_MS = [5_000, 30_000, 120_000, 600_000, 1_800_000];
 const TIMELINE_TIME = new Intl.DateTimeFormat("zh-CN", {
+    timeZone: "Asia/Shanghai",
     month: "2-digit",
     day: "2-digit",
     hour: "2-digit",
