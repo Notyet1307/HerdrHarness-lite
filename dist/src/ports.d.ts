@@ -15,8 +15,8 @@ export type HarnessConfig = {
     /** Native Pi arguments only; Herdr selects `pi` and Controller validates the role contract. */
     workerArgv: string[];
     reviewerArgv: string[];
-    /** Worker-only canary. Reviewer always remains on the Herdr interactive Pi adapter. */
     workerRuntime?: "herdr-pi-cli" | "pi-rpc";
+    reviewerRuntime?: "herdr-pi-cli" | "pi-rpc";
     preflight?: {
         /** Command used for bounded live Provider probes. Defaults to `pi`. */
         piBin?: string;
@@ -43,7 +43,9 @@ export interface RuntimePreflightPort {
         roleArgv: string[];
         piBin: string;
         agentDir?: string;
-        oauthAgentDir?: string;
+        credentialAgentDir?: string;
+        credentialMode?: "canonical-oauth" | "canonical-model-config";
+        modelConfig?: ExecutionResource;
         rpcHost?: ExecutionResource;
     }): Promise<void>;
     probeDocker(input: {
@@ -169,6 +171,7 @@ export interface GitPort {
         reviewAxisAgent: ExecutionResource;
         piExecutable: string;
         piRuntimeVersion: string;
+        piAgentDir: string;
     }): Promise<{
         reviewPath: string;
         descriptorPath: string;

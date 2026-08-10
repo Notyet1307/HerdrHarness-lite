@@ -105,7 +105,7 @@ async function main(argv) {
             github: new GitHubGh(new SyncCommandRunner(), config.autoMerge === true),
             git: new GitCli(),
             herdr,
-            workerRpc: new PiRpcRuntime(herdr),
+            piRpc: new PiRpcRuntime(herdr),
             analyst: new JsonCommandAnalyst(config.analyst.command, config.analyst.argv ?? []),
             evidence: new LocalEvidence(),
             preflight: new RuntimePreflightCli(),

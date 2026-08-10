@@ -10,6 +10,7 @@
   "maxReviewRounds": 3,
   "maxAnalystTurns": 3,
   "workerRuntime": "herdr-pi-cli",
+  "reviewerRuntime": "herdr-pi-cli",
   "preflight": {
     "piBin": "pi",
     "dockerRequired": false

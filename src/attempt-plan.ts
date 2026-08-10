@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { lstatSync, readdirSync, readFileSync, realpathSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { digest, type Attempt, type AttemptRuntimeAdapter, type ExecutionContext, type ExecutionResource, type ExecutionSnapshot } from "./model.js";
 
 export function buildExecutionSnapshot(input: {
@@ -10,9 +10,10 @@ export function buildExecutionSnapshot(input: {
   argv: string[];
   retryMode?: ExecutionSnapshot["retryMode"];
   compactionMode?: ExecutionSnapshot["compactionMode"];
+  credentialMode?: ExecutionSnapshot["credentialMode"];
   dockerHost?: string | null;
   context?: ExecutionContext;
-  extraResources?: Array<{ kind: "agent" | "runtime"; path: string }>;
+  extraResources?: Array<{ kind: "agent" | "runtime" | "model-config"; path: string }>;
 }): ExecutionSnapshot {
   return {
     version: 1,
@@ -27,12 +28,12 @@ export function buildExecutionSnapshot(input: {
     sessionMode: input.argv.includes("--no-session") ? "ephemeral" : "fresh-persistent",
     retryMode: input.retryMode ?? "runtime-default",
     compactionMode: input.compactionMode ?? "runtime-default",
-    credentialMode: input.adapter === "pi-rpc" ? "canonical-oauth" : "runtime-default",
+    credentialMode: input.credentialMode ?? (input.adapter === "pi-rpc" ? "canonical-oauth" : "runtime-default"),
     dockerHost: input.dockerHost ?? null,
     resources: [
-      ...flagValues(input.argv, "--skill").map((path) => resource("skill", path)),
-      ...flagValues(input.argv, "--extension").map((path) => resource("extension", path)),
-      ...(input.extraResources ?? []).map(({ kind, path }) => resource(kind, path)),
+      ...flagValues(input.argv, "--skill").map((path) => executionResource("skill", path)),
+      ...flagValues(input.argv, "--extension").map((path) => executionResource("extension", path)),
+      ...(input.extraResources ?? []).map(({ kind, path }) => executionResource(kind, path)),
     ],
     ...(input.context ? { context: input.context } : {}),
   };
@@ -75,7 +76,14 @@ function flagValues(argv: string[], flag: string): string[] {
   return argv.flatMap((value, index) => value === flag && argv[index + 1] ? [argv[index + 1]!] : []);
 }
 
-function resource(kind: ExecutionResource["kind"], path: string): ExecutionResource {
+export function executionResource(kind: ExecutionResource["kind"], path: string): ExecutionResource {
+  if (kind === "model-config") {
+    if (!isAbsolute(path)) throw new Error("models.json path must be absolute");
+    const stat = lstatSync(path);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || (stat.mode & 0o777) !== 0o600) {
+      throw new Error("models.json must be a private regular single-link file");
+    }
+  }
   const realPath = realpathSync(path);
   const digestRoot = (kind === "extension" || kind === "runtime") && lstatSync(realPath).isFile() ? dirname(realPath) : realPath;
   return { kind, path: realPath, digest: executionResourceDigest(digestRoot) };

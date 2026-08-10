@@ -34,9 +34,13 @@ function respond(command) {
     const response = {
       ...base,
       data: {
-        model: { provider: "test", id: "model" },
+        model: {
+          provider: "test",
+          id: "model",
+          ...(process.env.FAKE_PI_MODEL_SECRET ? { headers: { Authorization: process.env.FAKE_PI_MODEL_SECRET } } : {}),
+        },
         unicodeBoundary: "中",
-        thinkingLevel: "high",
+        thinkingLevel: process.env.FAKE_PI_THINKING ?? "high",
         isStreaming: false,
         isCompacting: false,
         sessionFile: null,
@@ -57,7 +61,7 @@ function respond(command) {
     emit({
       ...base,
       data: {
-        commands: ["implement", "tdd", "focused-self-check"].map((name) => ({
+        commands: (process.env.FAKE_PI_SKILLS ?? "implement,tdd,focused-self-check").split(",").map((name) => ({
           name: `skill:${name}`,
           source: "skill",
           location: "path",
@@ -77,12 +81,23 @@ function respond(command) {
   if (command.type !== "prompt") return;
 
   emit({ type: "agent_start" });
+  emit({ type: "turn_start" });
   if (process.env.FAKE_PI_WAIT_FOR_ABORT === "1") return;
-  writeFileSync(process.env.FAKE_PI_RESULT_PATH, `${JSON.stringify({
+  const lane = process.env.FAKE_PI_LANE ?? "worker";
+  writeFileSync(process.env.FAKE_PI_RESULT_PATH, `${JSON.stringify(lane === "reviewer" ? {
     version: 1,
     jobId: process.env.FAKE_PI_JOB_ID,
     attemptId: process.env.FAKE_PI_ATTEMPT_ID,
-    lane: "worker",
+    lane,
+    status: "pass",
+    summary: "fake RPC review completed",
+    reviewedHeadSha: "b".repeat(40),
+    findings: [],
+  } : {
+    version: 1,
+    jobId: process.env.FAKE_PI_JOB_ID,
+    attemptId: process.env.FAKE_PI_ATTEMPT_ID,
+    lane,
     status: "completed",
     summary: "fake RPC completed",
     headSha: "b".repeat(40),
@@ -92,8 +107,12 @@ function respond(command) {
     process.stdout.write("{malformed\n");
     return;
   }
+  if (process.env.FAKE_PI_REVIEWER_CLEANUP === "before-settled") emitReviewerCleanup();
+  emit({ type: "turn_end", message: {}, toolResults: [] });
   emit({ type: "agent_end", messages: [], willRetry: false });
   emit({ type: "agent_settled" });
+  if (process.env.FAKE_PI_REVIEWER_CLEANUP === "after-settled") emitReviewerCleanup();
+  if (process.env.FAKE_PI_REVIEWER_CLEANUP === "wrong-key") emitReviewerCleanup("other-widget");
   if (process.env.FAKE_PI_WRITE_AUTH_AFTER_SETTLED === "1") writePrivateAuth();
   if (process.env.FAKE_PI_MALFORMED_AFTER_SETTLED === "1") {
     setTimeout(() => process.stdout.write("{malformed-after-settled\n"), 0);
@@ -101,6 +120,10 @@ function respond(command) {
   if (process.env.FAKE_PI_MALFORMED_SECRET_PHASE === "after-settled") {
     setTimeout(() => process.stdout.write(`${process.env.FAKE_PI_MALFORMED_SECRET}\n`), 0);
   }
+}
+
+function emitReviewerCleanup(widgetKey = "subagent-async") {
+  emit({ type: "extension_ui_request", id: "reviewer-cleanup", method: "setWidget", widgetKey });
 }
 
 function writePrivateAuth() {

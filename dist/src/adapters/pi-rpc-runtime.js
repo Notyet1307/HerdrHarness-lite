@@ -55,8 +55,9 @@ export class PiRpcRuntime {
             cwd: "",
             argv: input.attempt.executionSnapshot?.argv ?? [],
         }, false);
-        if (input.attempt.lane !== "worker" || input.skill !== "implement")
-            throw new Error("Pi RPC pilot accepts Worker dispatch only");
+        const expectedSkill = input.attempt.lane === "worker" ? "implement" : "code-review";
+        if (input.skill !== expectedSkill)
+            throw new Error(`Pi RPC ${input.attempt.lane} dispatch requires ${expectedSkill}`);
         if (digest(input.text) !== input.attempt.promptDigest)
             throw new Error("Pi RPC prompt body differs from the immutable prompt digest");
         const dispatch = {
@@ -143,8 +144,8 @@ export class PiRpcRuntime {
     }
     plan(input, requireLaunchIdentity = true) {
         const snapshot = input.attempt.executionSnapshot;
-        if (input.attempt.lane !== "worker" || snapshot?.adapter !== "pi-rpc" || !input.attempt.planDigest) {
-            throw new Error("Pi RPC received a non-Worker or unbound Attempt");
+        if (snapshot?.adapter !== "pi-rpc" || !input.attempt.planDigest) {
+            throw new Error("Pi RPC received an unbound Attempt");
         }
         if (snapshot.runtimeVersion !== SUPPORTED_PI_RPC_VERSION) {
             throw new Error(`Pi RPC requires the qualified Pi version ${SUPPORTED_PI_RPC_VERSION}, got ${snapshot.runtimeVersion}`);
@@ -216,9 +217,9 @@ function processAlive(pid) {
 function assertRuntimePolicy(receipt, plan) {
     if (receipt.autoRetryDisableAccepted !== true
         || receipt.autoCompactionEnabled !== false
-        || receipt.credentialMode !== "canonical-oauth"
+        || receipt.credentialMode !== plan.snapshot.credentialMode
         || receipt.isolatedAgentDir !== join(plan.runtimeRoot, "pi-agent")) {
-        throw new Error("Pi RPC ready receipt did not prove retry, compaction, and canonical OAuth isolation");
+        throw new Error("Pi RPC ready receipt did not prove retry, compaction, and credential isolation");
     }
 }
 function boundRuntimeResource(plan, name) {

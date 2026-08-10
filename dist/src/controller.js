@@ -1,7 +1,7 @@
-import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { Buffer } from "node:buffer";
-import { basename, dirname, isAbsolute, resolve } from "node:path";
-import { attemptPlanDigest, buildExecutionSnapshot, executionPlanMatches, executionResourceDigest } from "./attempt-plan.js";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { attemptPlanDigest, buildExecutionSnapshot, executionPlanMatches, executionResource } from "./attempt-plan.js";
 import { selectNextTask } from "./eligibility.js";
 import { assertJobInvariant, digest, evolveJob, isRetryAction, MAX_ATTEMPT_RECONCILIATIONS, MAX_CI_REWORKS, taskFromSelection, } from "./model.js";
 import { allowedActionsFor, buildEvidencePack, isDecisionResolutionEligible, makeIncident, validateAttemptResult } from "./policy.js";
@@ -19,6 +19,7 @@ const PI_RPC_RUNNER = resolve(import.meta.dirname, "pi-rpc-runner.js");
 const PI_RPC_SDK_ENTRY = resolve(import.meta.dirname, "pi-rpc-sdk-entry.js");
 const WORKER_DESCRIPTOR_ENV = "HERDR_HARNESS_WORKER_DESCRIPTOR";
 const REVIEW_DESCRIPTOR_ENV = "HERDR_HARNESS_REVIEW_DESCRIPTOR";
+const REVIEW_CANONICAL_AGENT_DIR_ENV = "HERDR_HARNESS_REVIEW_CANONICAL_PI_AGENT_DIR";
 const PI_AGENT_DIR_ENV = "PI_CODING_AGENT_DIR";
 const REVIEW_SUBAGENT_CEILING_ENV = "PI_SUBAGENT_CAPABILITY_CEILING_V1";
 const SUPPORTED_PI_SUBAGENTS_VERSION = "0.42.1";
@@ -39,8 +40,8 @@ export class HarnessController {
     constructor(deps) {
         this.deps = deps;
         validateConfig(deps.config);
-        if (deps.config.workerRuntime === "pi-rpc" && !deps.workerRpc) {
-            throw new Error("workerRuntime=pi-rpc requires the Worker RPC adapter");
+        if ((deps.config.workerRuntime === "pi-rpc" || deps.config.reviewerRuntime === "pi-rpc") && !deps.piRpc) {
+            throw new Error("pi-rpc runtime selection requires the Pi RPC adapter");
         }
     }
     async tick() {
@@ -291,25 +292,30 @@ export class HarnessController {
             const dockerHost = this.deps.config.preflight?.dockerRequired === true
                 ? (await this.deps.preflight.probeDocker({ cwd: this.deps.config.localPath })).host
                 : null;
+            const useRpc = rpcEnabled(this.deps.config, lane);
             executionSnapshot = buildExecutionSnapshot({
-                adapter: lane === "worker" && this.deps.config.workerRuntime === "pi-rpc" ? "pi-rpc" : "herdr-pi-cli",
+                adapter: useRpc ? "pi-rpc" : "herdr-pi-cli",
                 executable: runtime.executable,
                 runtimeVersion: runtime.version,
                 argv: [
                     ...(lane === "worker" ? this.deps.config.workerArgv : this.deps.config.reviewerArgv),
                     "--append-system-prompt",
                     context.bundlePath,
-                    ...(lane === "worker" && this.deps.config.workerRuntime === "pi-rpc" ? ["--mode", "rpc"] : []),
+                    ...(useRpc ? ["--mode", "rpc"] : []),
                 ],
                 context,
-                retryMode: lane === "worker" && this.deps.config.workerRuntime === "pi-rpc" ? "disabled" : "runtime-default",
-                compactionMode: lane === "worker" && this.deps.config.workerRuntime === "pi-rpc" ? "disabled" : "runtime-default",
+                retryMode: useRpc ? "disabled" : "runtime-default",
+                compactionMode: useRpc ? "disabled" : "runtime-default",
+                credentialMode: useRpc ? (lane === "worker" ? "canonical-oauth" : "canonical-model-config") : "runtime-default",
                 dockerHost,
                 extraResources: [
                     ...(lane === "reviewer" ? [{ kind: "agent", path: BUNDLED_REVIEW_AXIS_AGENT }] : []),
-                    ...(lane === "worker" && this.deps.config.workerRuntime === "pi-rpc" ? [
+                    ...(useRpc ? [
                         { kind: "runtime", path: PI_RPC_RUNNER },
                         { kind: "runtime", path: PI_RPC_SDK_ENTRY },
+                    ] : []),
+                    ...(useRpc && lane === "reviewer" ? [
+                        { kind: "model-config", path: join(context.agentDir, "models.json") },
                     ] : []),
                 ],
             });
@@ -426,12 +432,14 @@ export class HarnessController {
                         reviewAxisAgent: reviewAxisAgents[0],
                         piExecutable: attempt.executionSnapshot.executable,
                         piRuntimeVersion: attempt.executionSnapshot.runtimeVersion,
+                        piAgentDir: attempt.executionSnapshot.context.agentDir,
                     });
                     cwd = workspace.reviewPath;
                     env = {
                         [REVIEW_DESCRIPTOR_ENV]: workspace.descriptorPath,
                         [REVIEW_SUBAGENT_CEILING_ENV]: REVIEW_SUBAGENT_CEILING,
                         [PI_AGENT_DIR_ENV]: attempt.executionSnapshot.context.agentDir,
+                        [REVIEW_CANONICAL_AGENT_DIR_ENV]: attempt.executionSnapshot.context.agentDir,
                         DOCKER_HOST: preflight.dockerHost ?? "",
                     };
                 }
@@ -575,33 +583,47 @@ export class HarnessController {
             if (!executionSnapshot && this.deps.config.preflight?.dockerRequired === true) {
                 dockerHost = (await this.deps.preflight.probeDocker({ cwd: this.deps.config.localPath })).host;
             }
-            const rpcAgentDir = executionSnapshot?.adapter === "pi-rpc"
-                ? piRpcAgentDir(executionSnapshot)
-                : undefined;
-            const rpcHost = executionSnapshot?.resources.find((resource) => resource.kind === "runtime" && basename(resource.path) === "pi-rpc-sdk-entry.js");
-            const preclaimRpc = !executionSnapshot && this.deps.config.workerRuntime === "pi-rpc"
-                ? {
-                    runtime: await this.deps.preflight.inspectPi({
-                        cwd: this.deps.config.localPath,
-                        piBin: this.deps.config.preflight?.piBin ?? "pi",
-                    }),
-                    oauthAgentDir: (await this.deps.preflight.assertNoAmbientSystemPrompt({ cwd: this.deps.config.localPath })).agentDir,
-                    agentDir: resolve(this.deps.config.stateDir, "preflight", "pi-rpc-agent"),
-                    rpcHost: runtimeResource(PI_RPC_SDK_ENTRY),
-                }
+            const preclaimNeedsRpc = !executionSnapshot && lanes.some((lane) => rpcEnabled(this.deps.config, lane));
+            const preclaimRuntime = preclaimNeedsRpc
+                ? await this.deps.preflight.inspectPi({
+                    cwd: this.deps.config.localPath,
+                    piBin: this.deps.config.preflight?.piBin ?? "pi",
+                })
+                : null;
+            const preclaimCredentialAgentDir = preclaimNeedsRpc
+                ? (await this.deps.preflight.assertNoAmbientSystemPrompt({ cwd: this.deps.config.localPath })).agentDir
                 : null;
             for (const lane of lanes) {
-                const admission = lane === "worker" ? preclaimRpc : null;
+                const useRpc = executionSnapshot?.adapter === "pi-rpc" || (!executionSnapshot && rpcEnabled(this.deps.config, lane));
+                const credentialMode = useRpc ? (lane === "worker" ? "canonical-oauth" : "canonical-model-config") : undefined;
+                if (credentialMode && executionSnapshot && executionSnapshot.credentialMode !== credentialMode) {
+                    throw new Error(`${lane} RPC snapshot has the wrong credential mode`);
+                }
+                const credentialAgentDir = useRpc
+                    ? executionSnapshot?.context?.agentDir ?? preclaimCredentialAgentDir ?? undefined
+                    : undefined;
+                const modelConfigs = executionSnapshot?.resources.filter((resource) => resource.kind === "model-config") ?? [];
+                if (credentialMode === "canonical-model-config" && executionSnapshot && modelConfigs.length !== 1) {
+                    throw new Error("Reviewer RPC snapshot must bind exactly one models.json");
+                }
+                const modelConfig = credentialMode === "canonical-model-config"
+                    ? modelConfigs[0] ?? executionResource("model-config", join(credentialAgentDir, "models.json"))
+                    : undefined;
+                const rpcHost = useRpc
+                    ? executionSnapshot
+                        ? executionSnapshot.resources.find((resource) => resource.kind === "runtime" && basename(resource.path) === "pi-rpc-sdk-entry.js")
+                        : executionResource("runtime", PI_RPC_SDK_ENTRY)
+                    : undefined;
                 await this.deps.preflight.probeProvider({
                     lane,
                     cwd: this.deps.config.localPath,
                     roleArgv: executionSnapshot?.argv ?? (lane === "worker" ? this.deps.config.workerArgv : this.deps.config.reviewerArgv),
-                    piBin: executionSnapshot?.executable ?? admission?.runtime.executable ?? this.deps.config.preflight?.piBin ?? "pi",
-                    ...(rpcAgentDir || admission ? { agentDir: rpcAgentDir ?? admission.agentDir } : {}),
-                    ...(rpcAgentDir && executionSnapshot?.context ? { oauthAgentDir: executionSnapshot.context.agentDir } : {}),
-                    ...(admission ? { oauthAgentDir: admission.oauthAgentDir } : {}),
-                    ...(rpcAgentDir && rpcHost ? { rpcHost } : {}),
-                    ...(admission ? { rpcHost: admission.rpcHost } : {}),
+                    piBin: executionSnapshot?.executable ?? preclaimRuntime?.executable ?? this.deps.config.preflight?.piBin ?? "pi",
+                    ...(useRpc ? { agentDir: executionSnapshot ? piRpcAgentDir(executionSnapshot) : resolve(this.deps.config.stateDir, "preflight", `pi-rpc-${lane}-agent`) } : {}),
+                    ...(credentialAgentDir ? { credentialAgentDir } : {}),
+                    ...(credentialMode ? { credentialMode } : {}),
+                    ...(modelConfig ? { modelConfig } : {}),
+                    ...(rpcHost ? { rpcHost } : {}),
                 });
             }
             return { ok: true, dockerHost };
@@ -634,10 +656,11 @@ export class HarnessController {
                 argv: expected.argv,
                 retryMode: expected.retryMode,
                 compactionMode: expected.compactionMode,
+                credentialMode: expected.credentialMode,
                 dockerHost: expected.dockerHost,
                 context: expected.context,
                 extraResources: expected.resources
-                    .filter((resource) => resource.kind === "agent" || resource.kind === "runtime")
+                    .filter((resource) => resource.kind === "agent" || resource.kind === "runtime" || resource.kind === "model-config")
                     .map((resource) => ({ kind: resource.kind, path: resource.path })),
             });
             if (digest(observed) === digest(expected))
@@ -660,16 +683,16 @@ export class HarnessController {
     }
     runtimeFor(attempt) {
         if (attempt.executionSnapshot?.adapter === "pi-rpc") {
-            if (!this.deps.workerRpc || attempt.lane !== "worker")
-                throw new Error("Pi RPC is only available for Worker attempts");
-            return this.deps.workerRpc;
+            if (!this.deps.piRpc)
+                throw new Error("Pi RPC adapter is unavailable");
+            return this.deps.piRpc;
         }
         return this.deps.herdr;
     }
     attemptCwd(job, attempt) {
         if (!job.worktree)
             throw new Error("attempt has no worktree cwd");
-        return attempt.lane === "worker" ? job.worktree.path : resolve(dirname(attempt.resultPath), "source");
+        return attempt.lane === "worker" ? job.worktree.path : resolve(dirname(attempt.resultPath), "workspace", "source");
     }
     async closeAttempt(attempt, reason) {
         if (!attempt.handle)
@@ -1428,9 +1451,8 @@ export class HarnessController {
         await this.deps.store.save({ ...state, activeJob: next }, current.revision);
     }
 }
-function runtimeResource(path) {
-    const realPath = realpathSync(path);
-    return { kind: "runtime", path: realPath, digest: executionResourceDigest(dirname(realPath)) };
+function rpcEnabled(config, lane) {
+    return (lane === "worker" ? config.workerRuntime : config.reviewerRuntime) === "pi-rpc";
 }
 function settleAttempt(attempt, resultValue, now) {
     return {
@@ -1513,12 +1535,17 @@ function validateConfig(config) {
             throw new Error("preflight.dockerRequired must be boolean");
         }
     }
-    if (config.workerRuntime !== undefined && config.workerRuntime !== "herdr-pi-cli" && config.workerRuntime !== "pi-rpc") {
-        throw new Error("workerRuntime must be herdr-pi-cli or pi-rpc");
-    }
-    if (config.workerRuntime === "pi-rpc" && (flagValues(config.workerArgv, "--provider").length !== 1
-        || flagValues(config.workerArgv, "--model").length !== 1)) {
-        throw new Error("workerRuntime=pi-rpc requires one explicit --provider and one exact --model ID");
+    for (const [name, runtime, argv] of [
+        ["workerRuntime", config.workerRuntime, config.workerArgv],
+        ["reviewerRuntime", config.reviewerRuntime, config.reviewerArgv],
+    ]) {
+        if (runtime !== undefined && runtime !== "herdr-pi-cli" && runtime !== "pi-rpc") {
+            throw new Error(`${name} must be herdr-pi-cli or pi-rpc`);
+        }
+        if (runtime === "pi-rpc" && (flagValues(argv, "--provider").length !== 1
+            || flagValues(argv, "--model").length !== 1)) {
+            throw new Error(`${name}=pi-rpc requires one explicit --provider and one exact --model ID`);
+        }
     }
     validatePiRoleArgv("workerArgv", config.workerArgv, ["implement", "tdd", "focused-self-check"], ["read", "bash", "edit", "write", "grep", "find", "ls", "worker_submit"], ["high", "xhigh", "max"]);
     validatePiRoleArgv("reviewerArgv", config.reviewerArgv, ["code-review"], ["read", "grep", "find", "ls", "subagent", "review_preflight", "review_validate", "review_submit"], ["max"]);

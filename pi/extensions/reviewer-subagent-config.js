@@ -1,19 +1,25 @@
 import { createHash } from "node:crypto";
 import { accessSync, constants, existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
-import { isAbsolute, relative } from "node:path";
+import { isAbsolute, relative, resolve } from "node:path";
 
 const DESCRIPTOR_ENV = "HERDR_HARNESS_REVIEW_DESCRIPTOR";
 export const ORIGINAL_AGENT_DIR_ENV = "HERDR_HARNESS_REVIEW_ORIGINAL_PI_AGENT_DIR";
+export const CANONICAL_AGENT_DIR_ENV = "HERDR_HARNESS_REVIEW_CANONICAL_PI_AGENT_DIR";
 export const PI_PACKAGE_ROOT_ENV = "PI_SUBAGENTS_PI_CODING_AGENT_PACKAGE_ROOT";
 
 export default function reviewerSubagentConfig() {
   const descriptorPath = process.env[DESCRIPTOR_ENV];
-  const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
-  if (!descriptorPath || !isAbsolute(descriptorPath) || !originalAgentDir || !isAbsolute(originalAgentDir)) {
+  const runtimeAgentDir = process.env.PI_CODING_AGENT_DIR;
+  const originalAgentDir = process.env[CANONICAL_AGENT_DIR_ENV] ?? runtimeAgentDir;
+  if (!descriptorPath || !isAbsolute(descriptorPath) || !runtimeAgentDir || !isAbsolute(runtimeAgentDir)
+    || !originalAgentDir || !isAbsolute(originalAgentDir)) {
     throw new Error("Reviewer subagent config isolation requires absolute descriptor and Pi agent directories");
   }
   if (process.env[ORIGINAL_AGENT_DIR_ENV]) throw new Error("Reviewer subagent config isolation was already applied");
   const descriptor = JSON.parse(readFileSync(descriptorPath, "utf8"));
+  if (resolve(originalAgentDir) !== descriptor.piAgentDir) {
+    throw new Error("Reviewer canonical Pi agent directory differs from the Attempt descriptor");
+  }
   const configPath = realpathSync(descriptor.subagentConfigPath ?? "");
   const configDir = realpathSync(descriptor.subagentConfigDir ?? "");
   const content = readFileSync(configPath, "utf8");
@@ -39,6 +45,7 @@ export default function reviewerSubagentConfig() {
   }
   accessSync(wrapperPath, constants.X_OK);
   process.env[ORIGINAL_AGENT_DIR_ENV] = originalAgentDir;
+  delete process.env[CANONICAL_AGENT_DIR_ENV];
   delete process.env[PI_PACKAGE_ROOT_ENV];
   process.env.PI_CODING_AGENT_DIR = configDir;
   process.env.PI_SUBAGENT_PI_BINARY = wrapperPath;

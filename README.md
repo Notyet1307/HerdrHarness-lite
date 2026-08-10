@@ -4,7 +4,7 @@ English | [简体中文](./README.zh-CN.md)
 
 HerdrHarness Lite is a small, fail-closed controller for delivering GitHub issues. A durable state machine coordinates GitHub, Git, Herdr, fresh Pi Workers, independent Reviewers, and a Codex Analyst. Agent sessions, terminal output, notifications, and chat replies are never delivery truth.
 
-Herdr owns worktrees and durable panes. Reviewers and default Workers use interactive Pi; an optional Worker-only canary runs a supervised Pi RPC runner in a Herdr pane. Hermes is no longer required by the recommended Telegram path; it is retained only as a backward-compatible transport.
+Herdr owns worktrees and durable panes. Worker and top-level Reviewer Attempts use interactive Pi by default and may independently select a supervised Pi RPC runner in a Herdr pane. Hermes is no longer required by the recommended Telegram path; it is retained only as a backward-compatible transport.
 
 ## Read this first
 
@@ -20,9 +20,8 @@ The control plane and notification plane are deliberately independent:
 ```text
 Control plane
 GitHub + Git <-> Controller <-> durable ledger
-                    |-> Herdr pane -> fresh interactive Pi Reviewer
-                    |-> Herdr pane -> interactive Pi Worker (default)
-                    |                  or durable runner -> Pi RPC Worker (canary)
+                    |-> Herdr pane -> fresh Pi Reviewer (interactive or durable RPC runner)
+                    |-> Herdr pane -> fresh Pi Worker (interactive or durable RPC runner)
                     `-> task-bound Codex Analyst when evidence is needed
 
 Notification and operator plane
@@ -37,7 +36,7 @@ Harness Core is the only workflow authority. The Controller performs automatic t
 | Component | Responsibility | Authority boundary |
 | --- | --- | --- |
 | Controller (`src/controller.ts`) | One durable transition per `tick`; effects, verification, recovery, publish, and merge observation | Sole automatic transition writer under the state-directory lease |
-| Herdr + Pi | Worktree/pane host and fresh Worker/Reviewer execution, with an optional supervised Worker RPC runner | Runtime and liveness only; neither RPC terminal nor Herdr state replaces durable result plus Harness Git verification |
+| Herdr + Pi | Worktree/pane host and fresh Worker/Reviewer execution, with an optional supervised RPC runner per lane | Runtime and liveness only; neither RPC terminal nor Herdr state replaces durable result plus Harness Git verification |
 | Codex Analyst | Bounded evidence analysis for blocked work | Recommends `hold` or a policy-allowed fresh retry; never approves or writes state |
 | Observer (`src/hermes-observer.ts`) | Reads ledger, Controller JSONL, and heartbeat; maintains a retrying notification outbox | No workflow-state authority; it may create only transport outbox/challenge state. The filename is retained for compatibility and standalone mode does not require Hermes |
 | [Harness Telegram Bridge](https://github.com/Notyet1307/harness-telegram-bridge) | Sends cards, polls `/harness` and callbacks, and invokes existing status/approval CLIs | Transport only; stores Telegram offset and never edits the ledger directly |
@@ -256,7 +255,7 @@ A handoff must include job ID, revision/state, issue, attempt ID, HEAD, PR, vali
 | GitHub | Issue state, dependencies, queue labels, pull requests, required checks, and merge |
 | Harness ledger | Active job, revision, attempt, incident, Analyst advice, human approval, and effect receipts |
 | Git | Fixed base, implementation HEAD, commit provenance, and clean tree |
-| Herdr / Pi | Worktrees, durable panes, and either interactive agents or the Worker RPC runner; execution and observability only |
+| Herdr / Pi | Worktrees, durable panes, and either interactive agents or the Worker/Reviewer RPC runner; execution and observability only |
 | Observer / Telegram Bridge | No authoritative workflow facts; notification outbox and Telegram offset only |
 
 No layer substitutes for another. Herdr `idle/done`, a Pi final reply, or a terminal screenshot is liveness evidence only; it cannot replace a durable result, Git verification, Reviewer decision, or GitHub merge.
@@ -269,10 +268,10 @@ GitHub ready issue
   -> durable selection and claim
   -> task-bound Codex Analyst session
   -> isolated Herdr worktree
-  -> fresh Pi Worker (interactive or Worker-only RPC canary)
+  -> fresh Pi Worker (interactive or RPC, selected by lane config)
   -> one focused self-check over the task diff
   -> durable result + Git verification
-  -> fresh independent Pi Reviewer
+  -> fresh independent Pi Reviewer (interactive or top-level RPC)
       -> pass: publish PR
       -> changes: fresh Worker -> fresh Reviewer
   -> optional GitHub native auto-merge
@@ -314,7 +313,7 @@ Before any agent start or prompt side effect, each new Attempt persists an `Exec
 
 Pi context/session/prompt-template/theme discovery is disabled. The Harness reads at most one root policy directly from the `job.baseSha` Git object using Pi precedence (`AGENTS.override.md`, `AGENTS.md`, `AGENTS.MD`, `CLAUDE.md`, `CLAUDE.MD`), records path/mode/source SHA/digest, and injects a read-only bundle. A policy reference does not grant another candidate file instruction authority unless the Harness separately exports it into the manifest. The bundled Worker TDD adapter likewise treats candidate `CONTEXT.md`, ADRs, and rule files as data rather than ambient instructions. Candidate-Head rule files are review data for the top-level Reviewer and both fresh review-axis children. Pi CLI cannot disable only `SYSTEM.md` while retaining its default system prompt, so a `SYSTEM.md` in the bound user agent directory or candidate root blocks launch; the bound agent directory is explicitly injected into every Herdr pane.
 
-With `workerRuntime=pi-rpc`, the Controller never owns RPC pipes. A foreground runner in the Herdr pane owns Pi stdin/stdout; the Controller writes O_EXCL intents and reads atomic receipts. A thin, version-pinned Pi SDK host separates credentials from runtime state: `ModelRuntime` uses the exact canonical global `auth.json` path for built-in subscription OAuth, while settings and sessions remain in memory and resources/context remain Attempt-bound. OAuth refresh therefore uses Pi's normal global lock; the token file is never copied, linked, placed in the private directory, or returned to the Controller. The global `auth.json` must already exist as a private regular single-link file, and custom `models.json` entries remain excluded. The RPC Provider probe uses this same SDK seam and proves the selected subscription OAuth before the Attempt starts. The runner verifies before ready and again after child exit that the private agent directory contains no `settings.json`, `auth.json`, or `models.json`. Before accepting a prompt, it also proves a fresh in-memory session, requires the pinned Pi 0.84.0 `set_auto_retry(false)` receipt, and reads back auto-compaction as disabled. A different Pi version blocks until the protocol is requalified. `agent_settled` establishes only a runtime terminal; completion still requires the existing durable result and Git provenance. Reviewer RPC migration is explicitly deferred; see [`docs/plans/attempt-runtime-evolution.md`](./docs/plans/attempt-runtime-evolution.md).
+With `workerRuntime=pi-rpc` or `reviewerRuntime=pi-rpc`, the Controller never owns RPC pipes. A foreground runner in the Herdr pane owns Pi stdin/stdout; the Controller writes O_EXCL intents and reads atomic receipts. The version-pinned SDK host keeps settings and sessions in memory and keeps resources/context Attempt-bound. Worker uses the exact canonical `auth.json` pathname so subscription OAuth refresh shares Pi's normal lock. Reviewer instead captures strict-JSON bytes from the exact canonical `models.json`, requires their digest to match the execution plan, normalizes one supported standalone custom provider into a complete public `ProviderConfigInput`, and registers it through public `ModelRuntime.registerProvider` with an empty, non-persistent credential store. The normalization fills Pi-compatible model defaults, folds model overrides, and accepts only the deployed compat subset (`supportsStore`, `supportsDeveloperRole`, `requiresReasoningContentOnAssistantMessages`, and Pi 0.84 `thinkingFormat` values); built-in-provider overlays, OAuth providers, comments, and unsupported fields fail closed. The source file must be a private regular single-link file. Neither credential has a second disk file or link, appears in a receipt, or is returned to the Controller. The RPC Provider probe uses the same credential seam before selection and again before launch. The runner proves a fresh session, disables auto-retry and auto-compaction, and rejects credential/resource drift before accepting the prompt and after child exit. A different Pi version blocks until the protocol is requalified. `agent_settled` establishes only a runtime terminal; completion still requires the existing durable result and Git provenance. Reviewer RPC changes only the top-level Reviewer runtime; its two fixed review-axis children retain the existing immutable wrapper and capability ceiling.
 
 ### Review, rework, and Reviewer isolation
 
@@ -345,7 +344,7 @@ The Harness can:
 - create a durable claim and maintain one active job;
 - create an isolated worktree and fresh Worker/Reviewer agents;
 - bind each Attempt to an immutable execution snapshot and trusted context provenance;
-- optionally run a Worker RPC adapter with one dispatch, structured terminal, and confirmed termination;
+- optionally run either top-level lane through the shared RPC adapter with one dispatch, structured terminal, and confirmed termination;
 - verify durable results, Git provenance, exact review HEAD, and isolated Reviewer output;
 - perform bounded rework and human-approved fresh recovery;
 - publish a PR, request GitHub native auto-merge, observe merge, and claim another issue after archive;
@@ -379,7 +378,8 @@ Treat [`harness.config.example.json`](./harness.config.example.json) as the sing
 | `preflight.dockerRequired` | Require local Docker daemon and Compose V2; bind only the resolved local Unix socket into Worker/Reviewer validation |
 | `reviewerValidationArgv` | Fixed validation argv executed directly by the Harness without shell interpolation |
 | `autoMerge` | Request GitHub native auto-merge after Reviewer pass |
-| `workerRuntime` | `herdr-pi-cli` (default) or the Worker-only `pi-rpc` canary; RPC requires an explicit built-in `--provider`, exact built-in `--model`, and an existing Pi subscription OAuth login in canonical `auth.json`; custom `models.json` is excluded and Reviewer is unchanged |
+| `workerRuntime` | `herdr-pi-cli` (default) or `pi-rpc`; RPC requires an explicit built-in `--provider`, exact built-in `--model`, and canonical subscription OAuth in private `auth.json` |
+| `reviewerRuntime` | `herdr-pi-cli` (default) or `pi-rpc`; RPC requires an explicit custom `--provider`/`--model` backed by canonical private `models.json` |
 | `workerArgv` / `reviewerArgv` | Pi role contracts validated by the Controller |
 | `herdr.session` | Required named Herdr session |
 | `analyst` | Command and arguments for the task-bound Codex Analyst wrapper |

@@ -41,12 +41,20 @@ export class RuntimePreflightCli {
         const agentDir = input.agentDir === undefined
             ? undefined
             : preparePiRpcAgentDirAt(input.agentDir);
-        if (agentDir && !input.oauthAgentDir)
-            throw new Error("RPC Provider probe requires the canonical OAuth agent directory");
+        if (agentDir && (!input.credentialAgentDir || !input.credentialMode)) {
+            throw new Error("RPC Provider probe requires a canonical credential mode and agent directory");
+        }
         if (agentDir && (input.rpcHost?.kind !== "runtime"
             || basename(input.rpcHost.path) !== "pi-rpc-sdk-entry.js"
             || executionResourceDigest(dirname(input.rpcHost.path)) !== input.rpcHost.digest))
             throw new Error("RPC Provider probe requires the bound Pi SDK host");
+        if (agentDir && input.credentialMode === "canonical-model-config" && (input.modelConfig?.kind !== "model-config"
+            || basename(input.modelConfig.path) !== "models.json"
+            || executionResourceDigest(input.modelConfig.path) !== input.modelConfig.digest))
+            throw new Error("RPC Provider probe requires the bound canonical models.json");
+        if (agentDir && input.credentialMode === "canonical-oauth" && input.modelConfig) {
+            throw new Error("subscription OAuth RPC must not load models.json");
+        }
         const probeArgs = [
             "--no-session",
             "--no-approve",
@@ -62,7 +70,9 @@ export class RuntimePreflightCli {
             input.rpcHost.path,
             "--pi-executable", input.piBin,
             "--expected-version", SUPPORTED_PI_RPC_VERSION,
-            "--oauth-agent-dir", input.oauthAgentDir,
+            "--credential-mode", input.credentialMode,
+            "--credential-agent-dir", input.credentialAgentDir,
+            ...(input.modelConfig ? ["--model-config-path", input.modelConfig.path, "--model-config-digest", input.modelConfig.digest] : []),
             "--private-agent-dir", agentDir,
             "--probe-message", `Reply with exactly ${PROVIDER_MARKER}`,
             "--",

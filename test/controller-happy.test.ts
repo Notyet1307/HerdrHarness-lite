@@ -1,9 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { Buffer } from "node:buffer";
-import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { HarnessController } from "../src/controller.js";
 import type { HarnessConfig } from "../src/ports.js";
 import {
@@ -42,6 +42,7 @@ const config: HarnessConfig = {
   reviewerArgv: validReviewerArgv,
 };
 const rpcWorkerArgv = [...validWorkerArgv, "--provider", "test", "--model", "model"];
+const rpcReviewerArgv = [...validReviewerArgv, "--provider", "custom", "--model", "review-model"];
 
 test("config rejects non-string native Pi arguments", () => {
   for (const field of ["workerArgv", "reviewerArgv"] as const) {
@@ -206,7 +207,7 @@ test("config requires every ambient-discovery hardening flag", () => {
   }
 });
 
-test("Pi RPC configuration requires the Worker runtime adapter", () => {
+test("Pi RPC configuration requires the shared runtime adapter", () => {
   const dependencies = {
     config: { ...config, workerRuntime: "pi-rpc" as const, workerArgv: rpcWorkerArgv },
     store: new MemoryStore(),
@@ -219,8 +220,13 @@ test("Pi RPC configuration requires the Worker runtime adapter", () => {
     ids: new SequenceIds(),
     preflight: new FakeRuntimePreflight(),
   };
-  assert.throws(() => new HarnessController(dependencies), /requires the Worker RPC adapter/);
+  assert.throws(() => new HarnessController(dependencies), /requires the Pi RPC adapter/);
   assert.throws(() => new HarnessController({ ...dependencies, config: { ...config, workerRuntime: "pi-rpc" } }), /requires one explicit --provider/);
+  assert.throws(() => new HarnessController({
+    ...dependencies,
+    config: { ...config, reviewerRuntime: "pi-rpc", reviewerArgv: rpcReviewerArgv },
+  }), /requires the Pi RPC adapter/);
+  assert.throws(() => new HarnessController({ ...dependencies, config: { ...config, reviewerRuntime: "pi-rpc" } }), /requires one explicit --provider/);
 });
 
 test("runtime preflight fails before claim and does not reserve an issue", async () => {
@@ -409,7 +415,7 @@ test("Pi RPC canary preflights and routes only Worker through its isolated runti
     github: new FakeGitHub([issue({ number: 37, title: "Worker RPC canary" })]),
     git: new FakeGit(),
     herdr,
-    workerRpc,
+    piRpc: workerRpc,
     analyst: new FakeAnalyst(),
     evidence: new FakeEvidence(),
     clock: new FakeClock(),
@@ -429,8 +435,9 @@ test("Pi RPC canary preflights and routes only Worker through its isolated runti
   assert.deepEqual(store.state.activeJob?.attempts[0]?.executionSnapshot?.argv.slice(-2), ["--mode", "rpc"]);
   const rpcProbes = preflight.providerCalls.filter((call) => call.lane === "worker");
   assert.equal(rpcProbes.length, 2);
-  assert.equal(rpcProbes[0]?.agentDir, "/state/preflight/pi-rpc-agent");
-  assert.equal(rpcProbes[0]?.oauthAgentDir, "/pi-agent");
+  assert.equal(rpcProbes[0]?.agentDir, "/state/preflight/pi-rpc-worker-agent");
+  assert.equal(rpcProbes[0]?.credentialAgentDir, "/pi-agent");
+  assert.equal(rpcProbes[0]?.credentialMode, "canonical-oauth");
   assert.equal(rpcProbes[0]?.piBin, "/opt/pi");
   assert.equal(rpcProbes[0]?.rpcHost?.kind, "runtime");
   assert.match(rpcProbes[1]?.agentDir ?? "", /\/runtime\/pi-agent$/);
@@ -449,7 +456,7 @@ test("Pi RPC Worker admission failure makes no durable selection or claim", asyn
     github,
     git: new FakeGit(),
     herdr: new FakeHerdr([]),
-    workerRpc: new FakeHerdr([]),
+    piRpc: new FakeHerdr([]),
     analyst: new FakeAnalyst(),
     evidence: new FakeEvidence(),
     clock: new FakeClock(),
@@ -464,8 +471,55 @@ test("Pi RPC Worker admission failure makes no durable selection or claim", asyn
   assert.deepEqual(github.claims, []);
   assert.equal(preflight.providerCalls.length, 1);
   assert.equal(preflight.providerCalls[0]?.lane, "worker");
-  assert.equal(preflight.providerCalls[0]?.agentDir, "/state/preflight/pi-rpc-agent");
+  assert.equal(preflight.providerCalls[0]?.agentDir, "/state/preflight/pi-rpc-worker-agent");
   assert.equal(preflight.providerCalls[0]?.rpcHost?.kind, "runtime");
+});
+
+test("Pi RPC routes Reviewer through the durable runtime with one bound custom model config", async () => {
+  const root = mkdtempSync(join(tmpdir(), "harness-reviewer-rpc-"));
+  const agentDir = join(root, "pi-agent");
+  mkdirSync(agentDir);
+  writeFileSync(join(agentDir, "models.json"), '{"providers":{}}\n', { mode: 0o600 });
+  const store = new MemoryStore();
+  const herdr = new FakeHerdr([{ lane: "worker", status: "completed", headSha: "b".repeat(40) }]);
+  const reviewerRpc = new FakeHerdr([{ lane: "reviewer", status: "pass" }]);
+  const preflight = new FakeRuntimePreflight();
+  preflight.agentDir = agentDir;
+  try {
+    const controller = new HarnessController({
+      config: { ...config, reviewerRuntime: "pi-rpc", reviewerArgv: rpcReviewerArgv },
+      store,
+      github: new FakeGitHub([issue({ number: 39, title: "Reviewer RPC" })]),
+      git: new FakeGit(),
+      herdr,
+      piRpc: reviewerRpc,
+      analyst: new FakeAnalyst(),
+      evidence: new FakeEvidence(),
+      clock: new FakeClock(),
+      ids: new SequenceIds(),
+      preflight,
+    });
+    for (let index = 0; index < 13; index += 1) await controller.tick();
+
+    assert.deepEqual(herdr.prompts.map((prompt) => prompt.skill), ["implement"]);
+    assert.deepEqual(reviewerRpc.prompts.map((prompt) => prompt.skill), ["code-review"]);
+    const reviewer = store.state.activeJob?.attempts.find((attempt) => attempt.lane === "reviewer");
+    assert.equal(reviewer?.executionSnapshot?.adapter, "pi-rpc");
+    assert.equal(reviewer?.executionSnapshot?.credentialMode, "canonical-model-config");
+    assert.deepEqual(reviewer?.executionSnapshot?.argv.slice(-2), ["--mode", "rpc"]);
+    assert.equal(reviewer?.executionSnapshot?.resources.filter((resource) => resource.kind === "model-config").length, 1);
+    const pane = herdr.prepared.find((entry) => entry.lane === "reviewer");
+    assert.equal(pane?.env.HERDR_HARNESS_REVIEW_CANONICAL_PI_AGENT_DIR, agentDir);
+    assert.equal(reviewerRpc.startedCwds[0], join(dirname(reviewer!.resultPath), "workspace", "source"));
+    const probes = preflight.providerCalls.filter((call) => call.lane === "reviewer");
+    assert.equal(probes.length, 2);
+    assert.equal(probes[0]?.agentDir, "/state/preflight/pi-rpc-reviewer-agent");
+    assert.equal(probes[0]?.credentialMode, "canonical-model-config");
+    assert.equal(probes[0]?.modelConfig?.kind, "model-config");
+    assert.equal(probes.some((call) => call.agentDir === undefined), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("legacy running Attempts remain observable but legacy pre-start Attempts cannot launch", async () => {

@@ -1,6 +1,6 @@
 # Attempt runtime 演进任务
 
-本轮只有三个独立交付面。每项只有一个主要结果和一个主要验收入口；后项不得削弱现有 ledger、result 与 Git fixed-point 真值。
+前三项是初始独立交付面；稳定后按用户决定追加 Task 4。每项只有一个主要结果和一个主要验收入口；后项不得削弱现有 ledger、result 与 Git fixed-point 真值。
 
 ## Task 1 — 不可变 ExecutionSnapshot
 
@@ -35,7 +35,7 @@
 
 可信 policy 对其他仓库文件的引用不会自动授予指令权威；只有 manifest 内从 trust anchor 导出的条目能成为 governing context。
 
-## Task 3 — Worker-only Pi RPC adapter 试点
+## Task 3 — Worker Pi RPC adapter
 
 **主要结果：** Worker Attempt 可选择由 Controller 外的持久 runner 托管 Pi RPC；Controller 仍是唯一 workflow writer，且 Controller 重启后可重连同一 Attempt。
 
@@ -50,8 +50,20 @@
 5. Pi event 只用于运行观察；完成仍由 Harness result 与 Git 验证决定。
 6. Worker CLI 路径保留为第二个真实 adapter，并与 RPC 共用同一 ExecutionSnapshot 合约。
 7. SDK host 只把 canonical subscription OAuth 交给 `ModelRuntime`，继续用 Pi 原生 pathname lock 完成 refresh；settings/session 内存化，Attempt 私有目录禁止出现凭据或模型配置文件。
-8. Reviewer 继续使用现有 CLI 路径。
+8. Reviewer 在本任务完成时仍使用现有 CLI 路径。
 
-## 明确延后 — Reviewer runtime 迁移
+## Task 4 — Reviewer 顶层 Pi RPC adapter
 
-Reviewer 迁移不属于本轮三个交付面。只有 Worker RPC 在真实任务中稳定运行、重启恢复与结果/Git 收敛均有证据后，才单独建票评估 Reviewer 的 subagent extension、只读 snapshot、validation tool 与双轴证据迁移；不得直接复用 Worker 的“已稳定”结论。
+**主要结果：** Reviewer 顶层 Attempt 使用与 Worker 相同的 durable runner/spool 与 SDK host，同时保留 exact-HEAD 只读 snapshot、固定 validation tool、Standards/Spec 双轴 child 和 `review_submit`/Git gate。
+
+**主要验收入口：** Reviewer RPC 集成测试证明 `/skill:code-review` 只 dispatch 一次，canonical `models.json` 的路径与摘要绑定到 Attempt，API key 不形成持久副本或写入 receipt，且最终 `pass/changes` 仍必须通过原 Reviewer gate。
+
+验收断言：
+
+1. Reviewer RPC 使用显式 provider/model 和 `canonical-model-config`，不复用 Worker 的 OAuth 假设。
+2. SDK host 从 canonical `models.json` 捕获摘要匹配的严格 JSON 字节，在内存把受支持的独立 custom provider 规范化为完整 `ProviderConfigInput`，再通过公开 `ModelRuntime.registerProvider` 注册；compat 仅允许当前部署所需的三个布尔字段与 Pi 0.84 `thinkingFormat` 枚举，不支持的 provider/config 形态 fail closed，私有 agent dir 不出现 `auth.json`、`models.json` 或 credential cache。
+3. Provider probe、正式 runtime 和重启恢复消费同一 execution resource identity。
+4. 顶层 Reviewer retry/compaction 关闭，session fresh；两条 child 仍由原不可变 wrapper、私有 agent registry 和 capability ceiling 约束。
+5. `agent_settled`、child completed 或 validation completed 均不直接成为 workflow truth；durable Reviewer result、exact HEAD 和 clean-tree 验证保持不变。
+
+本任务不迁移 pi-subagents 内部的两条 child 到 SDK host；只有它们需要独立的 durable lifecycle/control 时再单独拆票。

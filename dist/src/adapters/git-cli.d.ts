@@ -69,6 +69,7 @@ export declare class GitCli implements GitPort {
         reviewAxisAgent: ExecutionResource;
         piExecutable: string;
         piRuntimeVersion: string;
+        piAgentDir: string;
     }): Promise<{
         reviewPath: string;
         descriptorPath: string;

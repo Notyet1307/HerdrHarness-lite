@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { RuntimePreflightCli } from "../src/adapters/runtime-preflight.js";
 import type { CommandResult, CommandRunner } from "../src/adapters/command.js";
-import { executionResourceDigest } from "../src/attempt-plan.js";
+import { executionResource, executionResourceDigest } from "../src/attempt-plan.js";
 import type { ExecutionResource } from "../src/model.js";
 
 class RecordingRunner implements CommandRunner {
@@ -82,7 +82,8 @@ test("RPC Provider preflight uses canonical OAuth with an Attempt-private settin
       cwd: "/repo",
       piBin: "/opt/pi",
       agentDir: isolatedAgentDir,
-      oauthAgentDir: sourceAgentDir,
+      credentialAgentDir: sourceAgentDir,
+      credentialMode: "canonical-oauth",
       rpcHost,
       roleArgv: [
         "--no-approve",
@@ -100,7 +101,8 @@ test("RPC Provider preflight uses canonical OAuth with an Attempt-private settin
         rpcHost.path,
         "--pi-executable", "/opt/pi",
         "--expected-version", "0.84.0",
-        "--oauth-agent-dir", sourceAgentDir,
+        "--credential-mode", "canonical-oauth",
+        "--credential-agent-dir", sourceAgentDir,
         "--private-agent-dir", isolatedAgentDir,
         "--probe-message", "Reply with exactly HERDR_HARNESS_PROVIDER_OK",
         "--",
@@ -130,6 +132,44 @@ test("Provider preflight rejects a successful process with no model marker", asy
   }), /no success marker/);
 });
 
+test("RPC Reviewer preflight passes one bound canonical models.json to the SDK host", async () => {
+  const root = mkdtempSync(join(tmpdir(), "harness-reviewer-rpc-preflight-"));
+  const credentialAgentDir = join(root, "credential-agent");
+  const isolatedAgentDir = join(root, "runtime", "pi-agent");
+  const rpcHost = createRpcHost(root);
+  mkdirSync(credentialAgentDir);
+  const modelsPath = join(credentialAgentDir, "models.json");
+  writeFileSync(modelsPath, '{"providers":{}}\n', { mode: 0o600 });
+  const modelConfig = executionResource("model-config", modelsPath);
+  const runner = new RecordingRunner([ok("HERDR_HARNESS_PROVIDER_OK\n")]);
+  try {
+    await new RuntimePreflightCli(runner, {}).probeProvider({
+      lane: "reviewer",
+      cwd: "/repo",
+      piBin: "/opt/pi",
+      agentDir: isolatedAgentDir,
+      credentialAgentDir,
+      credentialMode: "canonical-model-config",
+      modelConfig,
+      rpcHost,
+      roleArgv: ["--provider", "custom", "--model", "review-model", "--thinking", "max"],
+    });
+    assert.deepEqual(runner.calls[0]?.args.slice(0, 15), [
+      rpcHost.path,
+      "--pi-executable", "/opt/pi",
+      "--expected-version", "0.84.0",
+      "--credential-mode", "canonical-model-config",
+      "--credential-agent-dir", credentialAgentDir,
+      "--model-config-path", modelConfig.path,
+      "--model-config-digest", modelConfig.digest,
+      "--private-agent-dir", isolatedAgentDir,
+    ]);
+    assert.equal(existsSync(join(isolatedAgentDir, "models.json")), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("RPC Provider preflight rejects credentials persisted into private auth", async () => {
   const root = mkdtempSync(join(tmpdir(), "harness-pi-rpc-auth-write-"));
   const sourceAgentDir = join(root, "source-agent");
@@ -147,7 +187,8 @@ test("RPC Provider preflight rejects credentials persisted into private auth", a
       cwd: "/repo",
       piBin: "/opt/pi",
       agentDir: isolatedAgentDir,
-      oauthAgentDir: sourceAgentDir,
+      credentialAgentDir: sourceAgentDir,
+      credentialMode: "canonical-oauth",
       rpcHost,
       roleArgv: ["--provider", "provider-a", "--model", "model-a", "--thinking", "max"],
     }), /must not contain auth\.json/);

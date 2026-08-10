@@ -7,7 +7,7 @@ import { dirname, join, resolve } from "node:path";
 import { PiRpcRuntime } from "../src/adapters/pi-rpc-runtime.js";
 import { SyncCommandRunner } from "../src/adapters/command.js";
 import { digest, type AgentHandle, type Attempt, type ExecutionSnapshot } from "../src/model.js";
-import { executionResourceDigest } from "../src/attempt-plan.js";
+import { executionResource, executionResourceDigest } from "../src/attempt-plan.js";
 import { StrictJsonlDecoder } from "../src/pi-rpc-runner.js";
 import {
   readJson,
@@ -168,6 +168,7 @@ test("durable runner disables retry and compaction before dispatch and settles t
     job: process.env.FAKE_PI_JOB_ID,
     attempt: process.env.FAKE_PI_ATTEMPT_ID,
     malformed: process.env.FAKE_PI_MALFORMED_AFTER_PROMPT,
+    modelSecret: process.env.FAKE_PI_MODEL_SECRET,
   };
   try {
     const plan = fixture.plan({
@@ -206,6 +207,8 @@ test("durable runner disables retry and compaction before dispatch and settles t
     process.env.FAKE_PI_RESULT_PATH = fixture.attempt.resultPath;
     process.env.FAKE_PI_JOB_ID = "job-1";
     process.env.FAKE_PI_ATTEMPT_ID = fixture.attempt.id;
+    const modelSecret = "MODEL_HEADER_SECRET_SENTINEL";
+    process.env.FAKE_PI_MODEL_SECRET = modelSecret;
 
     const execution = new SyncCommandRunner().run(process.execPath, [
       resolve("dist/src/pi-rpc-runner.js"),
@@ -230,11 +233,150 @@ test("durable runner disables retry and compaction before dispatch and settles t
     assert.equal(readJson<{ ok: boolean; agentSettled: boolean }>(join(plan.runtimeRoot, "terminal.json")).agentSettled, true);
     assert.equal(readJson<{ ok: boolean }>(join(plan.runtimeRoot, "terminated.json")).ok, true);
     assert.equal(JSON.parse(readFileSync(fixture.attempt.resultPath, "utf8")).attemptId, fixture.attempt.id);
+    for (const path of filesUnder(plan.runtimeRoot)) assert.equal(readFileSync(path, "utf8").includes(modelSecret), false, path);
   } finally {
     restoreEnv("FAKE_PI_RESULT_PATH", previous.result);
     restoreEnv("FAKE_PI_JOB_ID", previous.job);
     restoreEnv("FAKE_PI_ATTEMPT_ID", previous.attempt);
     restoreEnv("FAKE_PI_MALFORMED_AFTER_PROMPT", previous.malformed);
+    restoreEnv("FAKE_PI_MODEL_SECRET", previous.modelSecret);
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("durable runner dispatches Reviewer code-review with the bound custom model config", () => {
+  const fixture = rpcFixture();
+  const previous = {
+    result: process.env.FAKE_PI_RESULT_PATH,
+    job: process.env.FAKE_PI_JOB_ID,
+    attempt: process.env.FAKE_PI_ATTEMPT_ID,
+    lane: process.env.FAKE_PI_LANE,
+    skills: process.env.FAKE_PI_SKILLS,
+    thinking: process.env.FAKE_PI_THINKING,
+    cleanup: process.env.FAKE_PI_REVIEWER_CLEANUP,
+  };
+  try {
+    const { plan, modelsPath, modelsContent } = reviewerPlan(fixture);
+    writeExclusiveJson(join(plan.runtimeRoot, "plan.json"), plan);
+    writeExclusiveJson(join(plan.runtimeRoot, "dispatch.json"), {
+      version: 1,
+      attemptId: plan.attemptId,
+      generation: plan.generation,
+      planDigest: plan.planDigest,
+      dispatchId: plan.attemptId,
+      promptDigest: fixture.attempt.promptDigest,
+      message: "/skill:code-review [harness-dispatch:reviewer-1]\nreview",
+    });
+    process.env.FAKE_PI_RESULT_PATH = fixture.attempt.resultPath;
+    process.env.FAKE_PI_JOB_ID = "job-1";
+    process.env.FAKE_PI_ATTEMPT_ID = fixture.attempt.id;
+    process.env.FAKE_PI_LANE = "reviewer";
+    process.env.FAKE_PI_SKILLS = "code-review";
+    process.env.FAKE_PI_THINKING = "max";
+    process.env.FAKE_PI_REVIEWER_CLEANUP = "after-settled";
+
+    const execution = new SyncCommandRunner().run(process.execPath, [
+      resolve("dist/src/pi-rpc-runner.js"),
+      "--sdk-entry", resolve("test/fixtures/pi-rpc-sdk-entry.js"),
+      "--plan", join(plan.runtimeRoot, "plan.json"),
+    ], { cwd: fixture.root, timeoutMs: 10_000 });
+    assert.equal(execution.ok, true, execution.stderr);
+    assert.equal(readJson<{ credentialMode: string }>(join(plan.runtimeRoot, "ready.json")).credentialMode, "canonical-model-config");
+    assert.equal(JSON.parse(readFileSync(fixture.attempt.resultPath, "utf8")).lane, "reviewer");
+    assert.equal(readFileSync(modelsPath, "utf8"), modelsContent);
+    assert.equal(existsSync(join(plan.runtimeRoot, "pi-agent", "models.json")), false);
+  } finally {
+    restoreEnv("FAKE_PI_RESULT_PATH", previous.result);
+    restoreEnv("FAKE_PI_JOB_ID", previous.job);
+    restoreEnv("FAKE_PI_ATTEMPT_ID", previous.attempt);
+    restoreEnv("FAKE_PI_LANE", previous.lane);
+    restoreEnv("FAKE_PI_SKILLS", previous.skills);
+    restoreEnv("FAKE_PI_THINKING", previous.thinking);
+    restoreEnv("FAKE_PI_REVIEWER_CLEANUP", previous.cleanup);
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("durable runner rejects Reviewer UI requests except settled empty subagent cleanup", () => {
+  for (const cleanup of ["before-settled", "wrong-key"]) {
+    const fixture = rpcFixture();
+    try {
+      const { plan } = reviewerPlan(fixture);
+      writeExclusiveJson(join(plan.runtimeRoot, "plan.json"), plan);
+      writeExclusiveJson(join(plan.runtimeRoot, "dispatch.json"), {
+        version: 1,
+        attemptId: plan.attemptId,
+        generation: plan.generation,
+        planDigest: plan.planDigest,
+        dispatchId: plan.attemptId,
+        promptDigest: fixture.attempt.promptDigest,
+        message: "/skill:code-review [harness-dispatch:reviewer-1]\nreview",
+      });
+      const execution = new SyncCommandRunner().run(process.execPath, [
+        resolve("dist/src/pi-rpc-runner.js"),
+        "--sdk-entry", resolve("test/fixtures/pi-rpc-sdk-entry.js"),
+        "--plan", join(plan.runtimeRoot, "plan.json"),
+      ], {
+        cwd: fixture.root,
+        timeoutMs: 10_000,
+        env: {
+          ...process.env,
+          FAKE_PI_RESULT_PATH: fixture.attempt.resultPath,
+          FAKE_PI_JOB_ID: "job-1",
+          FAKE_PI_ATTEMPT_ID: fixture.attempt.id,
+          FAKE_PI_LANE: "reviewer",
+          FAKE_PI_SKILLS: "code-review",
+          FAKE_PI_THINKING: "max",
+          FAKE_PI_REVIEWER_CLEANUP: cleanup,
+        },
+      });
+      assert.equal(execution.ok, true, execution.stderr);
+      assert.equal(readJson<{ ok: boolean }>(join(plan.runtimeRoot, "terminal.json")).ok, false);
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("durable runner rejects Reviewer models.json drift before prompt side effects", async () => {
+  const fixture = rpcFixture();
+  try {
+    const { plan, modelsPath } = reviewerPlan(fixture);
+    writeExclusiveJson(join(plan.runtimeRoot, "plan.json"), plan);
+    const child = spawn(process.execPath, [
+      resolve("dist/src/pi-rpc-runner.js"),
+      "--sdk-entry", resolve("test/fixtures/pi-rpc-sdk-entry.js"),
+      "--plan", join(plan.runtimeRoot, "plan.json"),
+    ], {
+      cwd: fixture.root,
+      env: {
+        ...process.env,
+        FAKE_PI_RESULT_PATH: fixture.attempt.resultPath,
+        FAKE_PI_JOB_ID: "job-1",
+        FAKE_PI_ATTEMPT_ID: fixture.attempt.id,
+        FAKE_PI_LANE: "reviewer",
+        FAKE_PI_SKILLS: "code-review",
+        FAKE_PI_THINKING: "max",
+      },
+      stdio: "ignore",
+    });
+    await waitForFile(join(plan.runtimeRoot, "ready.json"));
+    writeFileSync(modelsPath, '{"providers":{"custom":{"apiKey":"DRIFTED","models":[]}}}\n', { mode: 0o600 });
+    writeExclusiveJson(join(plan.runtimeRoot, "dispatch.json"), {
+      version: 1,
+      attemptId: plan.attemptId,
+      generation: plan.generation,
+      planDigest: plan.planDigest,
+      dispatchId: plan.attemptId,
+      promptDigest: fixture.attempt.promptDigest,
+      message: "/skill:code-review [harness-dispatch:reviewer-1]\nreview",
+    });
+    const code = await new Promise<number | null>((resolveExit) => child.on("exit", resolveExit));
+    assert.equal(code, 1);
+    assert.equal(readJson<{ ok: boolean }>(join(plan.runtimeRoot, "terminal.json")).ok, false);
+    assert.equal(existsSync(join(plan.runtimeRoot, "accepted.json")), false);
+    assert.equal(existsSync(fixture.attempt.resultPath), false);
+  } finally {
     rmSync(fixture.root, { recursive: true, force: true });
   }
 });
@@ -598,6 +740,40 @@ function rpcFixture(): {
     };
   };
   return { root, runtimeRoot, handle, snapshot, attempt, plan };
+}
+
+function reviewerPlan(fixture: ReturnType<typeof rpcFixture>): { plan: PiRpcPlan; modelsPath: string; modelsContent: string } {
+  const agentDir = fixture.snapshot.context!.agentDir;
+  mkdirSync(agentDir, { recursive: true });
+  const modelsPath = join(agentDir, "models.json");
+  const modelsContent = '{"providers":{"custom":{"apiKey":"REVIEWER_SECRET","models":[]}}}\n';
+  writeFileSync(modelsPath, modelsContent, { mode: 0o600 });
+  fixture.snapshot.context!.lane = "reviewer";
+  fixture.snapshot.credentialMode = "canonical-model-config";
+  fixture.snapshot.thinking = "max";
+  fixture.snapshot.tools = ["read", "subagent", "review_submit"];
+  fixture.snapshot.resources = [
+    { kind: "skill", path: "/skills/code-review", digest: "e".repeat(64) },
+    executionResource("model-config", modelsPath),
+    runtimeResource(resolve("dist/src/pi-rpc-runner.js")),
+    runtimeResource(resolve("test/fixtures/pi-rpc-sdk-entry.js")),
+  ];
+  fixture.attempt.id = "reviewer-1";
+  fixture.attempt.lane = "reviewer";
+  fixture.attempt.expectedHeadSha = "b".repeat(40);
+  fixture.attempt.promptDigest = digest("review");
+  return {
+    modelsPath,
+    modelsContent,
+    plan: fixture.plan({
+      executable: process.execPath,
+      argv: [
+        resolve("test/fixtures/fake-pi-rpc.js"),
+        "--no-session", "--no-context-files", "--no-prompt-templates", "--no-themes",
+        "--provider", "test", "--model", "model", "--thinking", "max", "--mode", "rpc",
+      ],
+    }),
+  };
 }
 
 function receiptIdentity(plan: PiRpcPlan): Record<string, unknown> {

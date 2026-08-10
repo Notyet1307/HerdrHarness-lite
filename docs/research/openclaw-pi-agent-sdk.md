@@ -75,7 +75,7 @@ child 完成后，OpenClaw 构造 `task_completion` 事件并注入 requester se
 
 ## 与 HerdrHarness-lite 的逐项差距
 
-> 状态说明：本节记录的是本轮改造前的研究基线。当前分支已经按下文“直接借鉴”完成 ExecutionSnapshot、显式 context closure 和 Worker-only RPC 试点；实现后的验收边界以 [`attempt-runtime-evolution.md`](../plans/attempt-runtime-evolution.md) 与当前测试为准。
+> 状态说明：本节记录的是改造前的研究基线。当前分支已经按下文“直接借鉴”完成 ExecutionSnapshot、显式 context closure，以及 Worker 与顶层 Reviewer 的 RPC adapter；实现后的验收边界以 [`attempt-runtime-evolution.md`](../plans/attempt-runtime-evolution.md) 与当前测试为准。
 
 | 维度 | OpenClaw 外部 SDK 时期 | HerdrHarness-lite 当前事实 | 差距判断 |
 | --- | --- | --- | --- |

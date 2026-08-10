@@ -33,6 +33,7 @@ test("Reviewer tools isolate validation and write one identity-bound result", as
     const previousSecret = process.env.HERDR_REVIEWER_TEST_SECRET;
     const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
     const previousOriginalAgentDir = process.env.HERDR_HARNESS_REVIEW_ORIGINAL_PI_AGENT_DIR;
+    const previousCanonicalAgentDir = process.env.HERDR_HARNESS_REVIEW_CANONICAL_PI_AGENT_DIR;
     const previousSubagentPiBinary = process.env.PI_SUBAGENT_PI_BINARY;
     const previousPiPackageRoot = process.env.PI_SUBAGENTS_PI_CODING_AGENT_PACKAGE_ROOT;
     try {
@@ -55,6 +56,7 @@ test("Reviewer tools isolate validation and write one identity-bound result", as
                 "const fs=require('node:fs');fs.writeFileSync('validation-only.txt','ok');fs.writeFileSync('validation-env.json',JSON.stringify(process.env))",
             ],
             dockerHost: null,
+            piAgentDir: join(root, "original-agent"),
             ...runtime,
             validationPath: validation,
             scratchPath: scratch,
@@ -65,13 +67,18 @@ test("Reviewer tools isolate validation and write one identity-bound result", as
         mkdirSync(join(originalAgentDir, "extensions", "subagent"), { recursive: true });
         writeFileSync(join(originalAgentDir, "extensions", "subagent", "config.json"), JSON.stringify({
             forceTopLevelAsync: true,
+            fleetView: true,
             intercomBridge: { mode: "always", instructionFile: "candidate-controlled.md" },
         }));
-        process.env.PI_CODING_AGENT_DIR = originalAgentDir;
+        const privateAgentDir = join(root, "top-level-private-agent");
+        mkdirSync(privateAgentDir);
+        process.env.PI_CODING_AGENT_DIR = privateAgentDir;
+        process.env.HERDR_HARNESS_REVIEW_CANONICAL_PI_AGENT_DIR = originalAgentDir;
         process.env.PI_SUBAGENTS_PI_CODING_AGENT_PACKAGE_ROOT = join(root, "malicious-pi-package");
         const configExtension = await import(pathToFileURL(resolve("pi/extensions/reviewer-subagent-config.js")).href);
         configExtension.default();
         assert.equal(process.env.PI_CODING_AGENT_DIR, realpathSync(runtime.subagentConfigDir));
+        assert.equal(process.env.HERDR_HARNESS_REVIEW_CANONICAL_PI_AGENT_DIR, undefined);
         assert.equal(process.env.PI_SUBAGENT_PI_BINARY, realpathSync(runtime.piSubagentWrapperPath));
         assert.equal(process.env.PI_SUBAGENTS_PI_CODING_AGENT_PACKAGE_ROOT, undefined);
         const tools = new Map();
@@ -252,6 +259,7 @@ test("Reviewer tools isolate validation and write one identity-bound result", as
             process.env.HERDR_REVIEWER_TEST_SECRET = previousSecret;
         restoreEnv("PI_CODING_AGENT_DIR", previousAgentDir);
         restoreEnv("HERDR_HARNESS_REVIEW_ORIGINAL_PI_AGENT_DIR", previousOriginalAgentDir);
+        restoreEnv("HERDR_HARNESS_REVIEW_CANONICAL_PI_AGENT_DIR", previousCanonicalAgentDir);
         restoreEnv("PI_SUBAGENT_PI_BINARY", previousSubagentPiBinary);
         restoreEnv("PI_SUBAGENTS_PI_CODING_AGENT_PACKAGE_ROOT", previousPiPackageRoot);
         rmSync(root, { recursive: true, force: true });
@@ -278,6 +286,7 @@ test("Reviewer environment preflight blocks review axes but still permits a dura
             reviewedHeadSha: "c".repeat(40),
             validationArgv: ["definitely-missing-review-command"],
             dockerHost: null,
+            piAgentDir: join(root, "original-agent"),
             ...runtime,
             validationPath: join(root, "validation"),
             scratchPath: join(root, "scratch"),
@@ -348,6 +357,7 @@ function prepareReviewRuntime(root, reviewPath) {
     const configContent = `${JSON.stringify({
         asyncByDefault: false,
         forceTopLevelAsync: false,
+        fleetView: false,
         intercomBridge: { mode: "off" },
     }, null, 2)}\n`;
     mkdirSync(join(runtimePath, ".agents"), { recursive: true });

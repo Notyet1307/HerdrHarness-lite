@@ -9,6 +9,7 @@ const OUTPUT_LIMIT = 50_000;
 const SAFE_SUBAGENT_CONFIG = {
   asyncByDefault: false,
   forceTopLevelAsync: false,
+  fleetView: false,
   intercomBridge: { mode: "off" },
 };
 
@@ -266,7 +267,7 @@ function assertReviewRuntime(descriptor) {
     throw new Error("Reviewer subagent config snapshot changed after Attempt preparation");
   }
   if (JSON.stringify(JSON.parse(configContent)) !== JSON.stringify(SAFE_SUBAGENT_CONFIG)) {
-    throw new Error("Reviewer subagent config does not disable ambient async and intercom behavior");
+    throw new Error("Reviewer subagent config does not disable ambient async, Fleet UI, and intercom behavior");
   }
   if (
     readFileSync(emptyAppendSystemPromptPath, "utf8") !== ""

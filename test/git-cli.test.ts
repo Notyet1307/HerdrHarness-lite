@@ -177,6 +177,7 @@ test("Reviewer preparation exports a read-only exact-HEAD snapshot and writable 
       },
       piExecutable: fakePiPath,
       piRuntimeVersion: "0.84.0",
+      piAgentDir: join(root, "pi-agent"),
     };
 
     const workspace = await new GitCli(runner).prepareReviewer(input);

@@ -17,7 +17,7 @@ type Dependencies = {
     clock: Clock;
     ids: IdGenerator;
     preflight: RuntimePreflightPort;
-    workerRpc?: AttemptRuntimePort;
+    piRpc?: AttemptRuntimePort;
 };
 /**
  * One controller owns all writes. Each tick performs at most one durable state

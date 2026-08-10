@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { Buffer } from "node:buffer";
 import { accessSync, chmodSync, constants, cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { basename, join, relative, resolve, sep } from "node:path";
+import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { ContextEntry, ExecutionContext, ExecutionResource } from "../model.js";
 import { executionResourceDigest } from "../attempt-plan.js";
 import type { BaseSyncVerification, GitPort, ReviewerVerification, WorkerVerification } from "../ports.js";
@@ -13,6 +13,7 @@ const MAX_CONTEXT_BYTES = 128 * 1024;
 const REVIEWER_SUBAGENT_CONFIG = `${JSON.stringify({
   asyncByDefault: false,
   forceTopLevelAsync: false,
+  fleetView: false,
   intercomBridge: { mode: "off" },
 }, null, 2)}\n`;
 
@@ -307,6 +308,7 @@ export class GitCli implements GitPort {
     reviewAxisAgent: ExecutionResource;
     piExecutable: string;
     piRuntimeVersion: string;
+    piAgentDir: string;
   }): Promise<{ reviewPath: string; descriptorPath: string; evidencePath: string }> {
     const rootPath = resolve(input.rootPath);
     if (pathsOverlap(input.worktree.path, rootPath)) throw new Error("Reviewer state must be outside the product worktree");
@@ -329,6 +331,8 @@ export class GitCli implements GitPort {
     const piExecutable = realpathSync(input.piExecutable);
     accessSync(piExecutable, constants.X_OK);
     if (!input.piRuntimeVersion.trim() || /[\0\r\n]/.test(input.piRuntimeVersion)) throw new Error("Reviewer Pi runtime version is invalid");
+    if (!isAbsolute(input.piAgentDir) || /[\0\r\n]/.test(input.piAgentDir)) throw new Error("Reviewer Pi agent directory is invalid");
+    const piAgentDir = resolve(input.piAgentDir);
     const emptyAppendSystemPromptPath = join(runtimePath, "empty-append-system.md");
     const emptyAppendSystemPromptDigest = textDigest("");
     const piSubagentWrapperPath = join(runtimePath, "pi-subagent");
@@ -354,6 +358,7 @@ export class GitCli implements GitPort {
       subagentConfigDigest,
       piExecutable,
       piRuntimeVersion: input.piRuntimeVersion,
+      piAgentDir,
       emptyAppendSystemPromptPath,
       emptyAppendSystemPromptDigest,
       piSubagentWrapperPath,

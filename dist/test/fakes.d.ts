@@ -32,7 +32,9 @@ export declare class FakeRuntimePreflight implements RuntimePreflightPort {
         roleArgv: string[];
         piBin: string;
         agentDir?: string;
-        oauthAgentDir?: string;
+        credentialAgentDir?: string;
+        credentialMode?: "canonical-oauth" | "canonical-model-config";
+        modelConfig?: ExecutionResource;
         rpcHost?: ExecutionResource;
     }>;
     dockerCalls: string[];
@@ -59,7 +61,9 @@ export declare class FakeRuntimePreflight implements RuntimePreflightPort {
         roleArgv: string[];
         piBin: string;
         agentDir?: string;
-        oauthAgentDir?: string;
+        credentialAgentDir?: string;
+        credentialMode?: "canonical-oauth" | "canonical-model-config";
+        modelConfig?: ExecutionResource;
         rpcHost?: ExecutionResource;
     }): Promise<void>;
     probeDocker(input: {
@@ -189,6 +193,7 @@ export declare class FakeGit implements GitPort {
         reviewAxisAgent: ExecutionResource;
         piExecutable: string;
         piRuntimeVersion: string;
+        piAgentDir: string;
     }): Promise<{
         reviewPath: string;
         descriptorPath: string;
@@ -236,6 +241,7 @@ export declare class FakeHerdr implements HerdrPort {
         };
     }>;
     started: string[];
+    startedCwds: string[];
     startedArgv: string[][];
     paneCommands: Array<{
         command: string;
@@ -285,6 +291,7 @@ export declare class FakeHerdr implements HerdrPort {
         handle: {
             agentName: string;
         };
+        cwd: string;
         argv: string[];
     }): Promise<void>;
     runInPane(input: {

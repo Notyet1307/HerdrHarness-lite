@@ -70,7 +70,9 @@ export class FakeRuntimePreflight implements RuntimePreflightPort {
     roleArgv: string[];
     piBin: string;
     agentDir?: string;
-    oauthAgentDir?: string;
+    credentialAgentDir?: string;
+    credentialMode?: "canonical-oauth" | "canonical-model-config";
+    modelConfig?: ExecutionResource;
     rpcHost?: ExecutionResource;
   }> = [];
   dockerCalls: string[] = [];
@@ -98,7 +100,9 @@ export class FakeRuntimePreflight implements RuntimePreflightPort {
     roleArgv: string[];
     piBin: string;
     agentDir?: string;
-    oauthAgentDir?: string;
+    credentialAgentDir?: string;
+    credentialMode?: "canonical-oauth" | "canonical-model-config";
+    modelConfig?: ExecutionResource;
     rpcHost?: ExecutionResource;
   }): Promise<void> {
     this.providerCalls.push({ ...input, roleArgv: [...input.roleArgv] });
@@ -276,7 +280,7 @@ export class FakeGit implements GitPort {
     if (this.trustedContextFailure) throw this.trustedContextFailure;
   }
 
-  async prepareReviewer(input: { rootPath: string; validationArgv: string[]; dockerHost: string | null; reviewAxisAgent: ExecutionResource; piExecutable: string; piRuntimeVersion: string }): Promise<{ reviewPath: string; descriptorPath: string; evidencePath: string }> {
+  async prepareReviewer(input: { rootPath: string; validationArgv: string[]; dockerHost: string | null; reviewAxisAgent: ExecutionResource; piExecutable: string; piRuntimeVersion: string; piAgentDir: string }): Promise<{ reviewPath: string; descriptorPath: string; evidencePath: string }> {
     this.reviewerValidationArgv.push([...input.validationArgv]);
     this.reviewerDockerHosts.push(input.dockerHost);
     return {
@@ -301,6 +305,7 @@ type Outcome = (
 export class FakeHerdr implements HerdrPort {
   prepared: Array<{ attemptId: string; lane: string; cwd: string; env: Record<string, string>; handle: { agentName: string; paneId: string; tabId: string; workspaceId: string } }> = [];
   started: string[] = [];
+  startedCwds: string[] = [];
   startedArgv: string[][] = [];
   paneCommands: Array<{ command: string; argv: string[] }> = [];
   prompts: Array<{ dispatchId: string; skill: "implement" | "code-review"; text: string }> = [];
@@ -332,8 +337,9 @@ export class FakeHerdr implements HerdrPort {
     return handle;
   }
 
-  async startAgent(input: { handle: { agentName: string }; argv: string[] }): Promise<void> {
+  async startAgent(input: { handle: { agentName: string }; cwd: string; argv: string[] }): Promise<void> {
     this.started.push(input.handle.agentName);
+    this.startedCwds.push(input.cwd);
     this.startedArgv.push([...input.argv]);
   }
 

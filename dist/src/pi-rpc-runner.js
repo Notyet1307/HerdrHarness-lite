@@ -5,15 +5,17 @@ import { basename, dirname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { Buffer } from "node:buffer";
 import { digest } from "./model.js";
-import { executionResourceDigest } from "./attempt-plan.js";
+import { executionResource, executionResourceDigest } from "./attempt-plan.js";
 import { readJson, preparePiRpcAgentDir, spoolPath, SUPPORTED_PI_RPC_VERSION, writeAtomicJson, writeExclusiveJson, } from "./pi-rpc-spool.js";
 const MAX_RPC_LINE_BYTES = 1024 * 1024;
 const MAX_EVENT_LOG_BYTES = 512 * 1024;
 const COMMAND_TIMEOUT_MS = 30_000;
 const EXIT_TIMEOUT_MS = 10_000;
 const POLL_MS = 50;
+const REVIEW_ORIGINAL_AGENT_DIR_ENV = "HERDR_HARNESS_REVIEW_CANONICAL_PI_AGENT_DIR";
 const KNOWN_EVENT_TYPES = new Set([
     "agent_start", "agent_end", "agent_settled",
+    "turn_start", "turn_end",
     "message_start", "message_update", "message_end",
     "tool_execution_start", "tool_execution_update", "tool_execution_end",
     "bash_execution_update", "queue_update",
@@ -202,9 +204,12 @@ async function main(argv) {
             policyViolation = "agent_end requested an automatic retry";
         if (type === "unknown")
             policyViolation = "unknown Pi RPC event";
+        if (type === "extension_ui_request" && !allowedReviewerShutdownCleanup(plan, event, settled)) {
+            policyViolation = "forbidden Pi RPC control event";
+        }
         if ([
             "auto_retry_start", "auto_retry_end", "compaction_start", "compaction_end", "queue_update",
-            "extension_ui_request", "extension_ui_response",
+            "extension_ui_response",
             "summarization_retry_scheduled", "summarization_retry_attempt_start", "summarization_retry_finished",
         ].includes(type)) {
             policyViolation = "forbidden Pi RPC control event";
@@ -218,13 +223,19 @@ async function main(argv) {
             sdkEntryPath,
             "--pi-executable", plan.snapshot.executable,
             "--expected-version", plan.snapshot.runtimeVersion,
-            "--oauth-agent-dir", plan.snapshot.context.agentDir,
+            ...credentialHostArgs(plan),
             "--private-agent-dir", isolatedAgentDir,
             "--",
             ...plan.snapshot.argv,
         ], {
             cwd: plan.cwd,
-            env: { ...process.env, PI_CODING_AGENT_DIR: isolatedAgentDir },
+            env: {
+                ...process.env,
+                PI_CODING_AGENT_DIR: isolatedAgentDir,
+                ...(plan.snapshot.context.lane === "reviewer"
+                    ? { [REVIEW_ORIGINAL_AGENT_DIR_ENV]: plan.snapshot.context.agentDir }
+                    : {}),
+            },
             stdio: ["pipe", "pipe", "pipe"],
         });
         child.stderr.on("data", () => { });
@@ -245,10 +256,8 @@ async function main(argv) {
             piPid: child.pid,
             autoRetryDisableAccepted: true,
             autoCompactionEnabled: false,
-            credentialMode: "canonical-oauth",
+            credentialMode: plan.snapshot.credentialMode,
             isolatedAgentDir,
-            runtimeModel: object(controlledState.data).model ?? null,
-            thinkingLevel: object(controlledState.data).thinkingLevel,
         });
         const dispatch = await waitForDispatch(plan, client);
         if (!dispatch) {
@@ -258,6 +267,7 @@ async function main(argv) {
             writeAtomicJson(spoolPath(plan.runtimeRoot, "terminated.json"), { ...identity, ok: true, reason: "pre-dispatch termination" });
             return;
         }
+        credentialHostArgs(plan);
         requireResponse(await client.command("prompt", { message: dispatch.message }), "prompt");
         writeAtomicJson(spoolPath(plan.runtimeRoot, "accepted.json"), { ...identity, ok: true, dispatchId: dispatch.dispatchId });
         let abortSent = false;
@@ -285,6 +295,7 @@ async function main(argv) {
         const childExit = await stopChild(child, client);
         if (client.failure)
             throw client.failure;
+        credentialHostArgs(plan);
         preparePiRpcAgentDir(plan.snapshot);
         const ok = policyViolation === null && !terminationRequested && settled;
         if (ok && (childExit.code !== 0 || childExit.signal !== null)) {
@@ -335,7 +346,8 @@ async function waitForDispatch(plan, client) {
                 || value.promptDigest !== plan.promptDigest
                 || typeof value.message !== "string")
                 throw new Error("Pi RPC dispatch has a different identity");
-            const prefix = `/skill:implement [harness-dispatch:${value.dispatchId}]\n`;
+            const skill = plan.snapshot.context.lane === "worker" ? "implement" : "code-review";
+            const prefix = `/skill:${skill} [harness-dispatch:${value.dispatchId}]\n`;
             if (!value.message.startsWith(prefix) || digest(value.message.slice(prefix.length)) !== plan.promptDigest) {
                 throw new Error("Pi RPC dispatch body differs from the immutable prompt digest");
             }
@@ -380,6 +392,8 @@ function validateCommands(response, plan) {
             throw new Error(`Pi RPC loaded an ambient skill: ${loaded}`);
 }
 function validatePlan(plan) {
+    const lane = plan.snapshot.context?.lane;
+    const expectedCredentialMode = lane === "worker" ? "canonical-oauth" : "canonical-model-config";
     if (plan.version !== 1
         || !plan.attemptId
         || !plan.generation
@@ -389,7 +403,8 @@ function validatePlan(plan) {
         || plan.snapshot.runtimeVersion !== SUPPORTED_PI_RPC_VERSION
         || plan.snapshot.retryMode !== "disabled"
         || plan.snapshot.compactionMode !== "disabled"
-        || plan.snapshot.credentialMode !== "canonical-oauth"
+        || (lane !== "worker" && lane !== "reviewer")
+        || plan.snapshot.credentialMode !== expectedCredentialMode
         || !plan.snapshot.provider
         || !plan.snapshot.model
         || !plan.snapshot.context?.agentDir
@@ -397,6 +412,42 @@ function validatePlan(plan) {
         || !plan.snapshot.argv.includes("--mode")
         || !plan.snapshot.argv.includes("rpc"))
         throw new Error("invalid Pi RPC runtime plan");
+    credentialHostArgs(plan);
+}
+function allowedReviewerShutdownCleanup(plan, event, settled) {
+    const allowedKeys = new Set(["type", "id", "method", "widgetKey"]);
+    return settled
+        && plan.snapshot.context?.lane === "reviewer"
+        && typeof event.id === "string"
+        && event.id.length > 0
+        && event.method === "setWidget"
+        && event.widgetKey === "subagent-async"
+        && Object.keys(event).every((key) => allowedKeys.has(key));
+}
+function credentialHostArgs(plan) {
+    const agentDir = plan.snapshot.context?.agentDir;
+    if (!agentDir)
+        throw new Error("Pi RPC plan has no canonical credential agent directory");
+    const modelConfigs = plan.snapshot.resources.filter((resource) => resource.kind === "model-config");
+    if (plan.snapshot.credentialMode === "canonical-oauth") {
+        if (modelConfigs.length !== 0)
+            throw new Error("subscription OAuth RPC must not bind models.json");
+        return ["--credential-mode", "canonical-oauth", "--credential-agent-dir", agentDir];
+    }
+    if (plan.snapshot.credentialMode !== "canonical-model-config" || modelConfigs.length !== 1) {
+        throw new Error("custom-model RPC must bind exactly one models.json");
+    }
+    const modelConfig = modelConfigs[0];
+    const observed = executionResource("model-config", modelConfig.path);
+    if (basename(modelConfig.path) !== "models.json" || observed.path !== modelConfig.path || observed.digest !== modelConfig.digest) {
+        throw new Error("Pi RPC models.json changed after Attempt preparation");
+    }
+    return [
+        "--credential-mode", "canonical-model-config",
+        "--credential-agent-dir", agentDir,
+        "--model-config-path", modelConfig.path,
+        "--model-config-digest", modelConfig.digest,
+    ];
 }
 function boundRuntimeResource(plan, name) {
     const matches = plan.snapshot.resources.filter((resource) => resource.kind === "runtime" && basename(resource.path) === name);

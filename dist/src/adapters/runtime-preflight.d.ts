@@ -23,7 +23,9 @@ export declare class RuntimePreflightCli implements RuntimePreflightPort {
         roleArgv: string[];
         piBin: string;
         agentDir?: string;
-        oauthAgentDir?: string;
+        credentialAgentDir?: string;
+        credentialMode?: "canonical-oauth" | "canonical-model-config";
+        modelConfig?: ExecutionResource;
         rpcHost?: ExecutionResource;
     }): Promise<void>;
     probeDocker(input: {

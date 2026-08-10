@@ -242,6 +242,7 @@ export class FakeHerdr {
     outcomes;
     prepared = [];
     started = [];
+    startedCwds = [];
     startedArgv = [];
     paneCommands = [];
     prompts = [];
@@ -269,6 +270,7 @@ export class FakeHerdr {
     }
     async startAgent(input) {
         this.started.push(input.handle.agentName);
+        this.startedCwds.push(input.cwd);
         this.startedArgv.push([...input.argv]);
     }
     async runInPane(input) {
