@@ -12,6 +12,10 @@ const RUNNER_FAILURE_STAGES = new Set([
     "startup", "handshake", "await-dispatch", "dispatch", "agent-run",
     "child-shutdown", "rpc-output", "credential-postflight", "child-exit",
 ]);
+const RUNNER_FAILURE_CLASSES = new Set([
+    "rate_limit", "authentication", "context_limit", "timeout",
+    "upstream_5xx", "network", "assistant_aborted", "unknown",
+]);
 export class PiRpcRuntime {
     host;
     constructor(host) {
@@ -208,6 +212,11 @@ function assertReceipt(receipt, plan, label) {
 }
 function runtimeFailure(receipt) {
     const details = [];
+    if (receipt.failureClass && RUNNER_FAILURE_CLASSES.has(receipt.failureClass)) {
+        details.push(`class=${receipt.failureClass}`);
+        if (typeof receipt.retryable === "boolean")
+            details.push(`retryable=${receipt.retryable ? "yes" : "no"}`);
+    }
     if (receipt.failureStage && RUNNER_FAILURE_STAGES.has(receipt.failureStage))
         details.push(`stage=${receipt.failureStage}`);
     const exit = receipt.childExit;

@@ -59,7 +59,7 @@ export function automaticRecoveryFor(job, advice) {
         || advice.incidentId !== incident.id
         || advice.action !== action
         || !advice.resolutionBrief.trim()
-        || advice.unknowns.length !== 0
+        || (candidate.rule === "worker_pre_dispatch_infrastructure" && advice.unknowns.length !== 0)
         || !incident.allowedActions.includes(action)
         || !allowedActionsFor(incident.class, incident.lane).includes(action)
         || (candidate.rule === "reviewer_same_head_infrastructure" && (attempt.lane !== "reviewer" || !job.headSha || attempt.expectedHeadSha !== job.headSha))

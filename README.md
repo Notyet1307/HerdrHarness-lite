@@ -215,7 +215,7 @@ herdr --session SESSION_NAME agent read AGENT_NAME \
 
 The Pi footer shows the effective `(provider) model • thinking`. Configuration expresses intent; the live footer and a real probe establish the selected runtime.
 
-An RPC Worker/Reviewer has no Herdr interactive-agent record. Inspect its ledger ExecutionSnapshot and the Attempt's `runtime/ready.json`, `accepted.json`, `terminal.json`, and `terminated.json` receipts. A generic runner failure exposes only a fixed `failureStage` plus the child `{code, signal}`; child stderr and Provider payloads remain excluded. Never try to reconnect or recreate the runner-owned stdin/stdout pipes.
+An RPC Worker/Reviewer has no Herdr interactive-agent record. Inspect its ledger ExecutionSnapshot and the Attempt's `runtime/ready.json`, `accepted.json`, `terminal.json`, and `terminated.json` receipts. An assistant failure exposes only fixed `failureClass`, `retryable`, `failureStage`, and child `{code, signal}` fields; child stderr and Provider payloads remain excluded. Never try to reconnect or recreate the runner-owned stdin/stdout pipes.
 
 Plain `status` returns the complete ledger. `status --operator` returns the stable operator projection: current mode/phase and only the actions that are valid for the exact revision, incident, analysis, Attempt, and HEAD bindings.
 
@@ -249,7 +249,7 @@ node dist/src/cli.js decide --config /ABSOLUTE/PATH/harness.config.json \
 
 If `state=blocked` and no Analyst decision exists, run exactly one `tick`, then read `status --operator` again. The projection exposes only actions allowed by the current job, revision, incident, analysis, Attempt, and Git fixed point.
 
-Two narrow infrastructure failures may receive one automatic fresh retry after the Analyst recommends that exact action with no unknowns: a Worker failure before prompt dispatch/acceptance, bound to the same base fingerprint; or a Reviewer failure with no result, bound to the same exact HEAD fingerprint. The Controller records the policy rule and consumed fingerprint in the ledger before acting. A repeated fingerprint, any Worker failure after dispatch, CI rework, integrity/drift failure, unknown evidence, or content decision remains blocked for human action.
+Two narrow infrastructure failures may receive one automatic fresh retry after the Analyst recommends that exact action. A Worker failure must be before prompt dispatch/acceptance, bound to the same base fingerprint, and have no Analyst unknowns. A Reviewer failure must have no result and remain bound to the same exact HEAD; review-outcome unknowns do not block this retry because the Controller independently rechecks the settled Attempt, clean tree, and unchanged HEAD. The Controller records the policy rule and consumed fingerprint in the ledger before acting. A repeated fingerprint or any failure outside these exact gates—including Worker failure after dispatch, CI rework, integrity/drift failure, or content decision—remains blocked for human action.
 
 | Projected action | Human evidence required | Effect |
 | --- | --- | --- |
@@ -294,7 +294,7 @@ A handoff must include job ID, revision/state, issue, attempt ID, HEAD, PR, vali
 | System | Authoritative facts |
 | --- | --- |
 | GitHub | Issue state, dependencies, queue labels, pull requests, required checks, and merge |
-| Harness ledger | Active job, revision, attempt, incident, Analyst advice, policy/human recovery authorization, and effect receipts |
+| Harness ledger | Claimed task/dependency snapshot, active job, revision, attempt, incident, Analyst advice, policy/human recovery authorization, and effect receipts |
 | Git | Fixed base, implementation HEAD, commit provenance, and clean tree |
 | Herdr / Pi | Worktrees, durable panes, and either interactive agents or the Worker/Reviewer RPC runner; execution and observability only |
 | Observer / Telegram Bridge | No authoritative workflow facts; notification outbox and Telegram offset only |
@@ -352,7 +352,7 @@ Worker and Reviewer are separate top-level Pi agents. Review never continues ins
 
 ### Attempt execution plan and context trust
 
-Before any agent start or prompt side effect, each new Attempt persists an `ExecutionSnapshot + AttemptContextEnvelope + planDigest`. The execution snapshot binds the probed Pi executable/exact version, effective argv, role-resource/local-extension-closure digests, session/retry/compaction mode, Docker host, result channel, and explicit context manifest. The role-scoped envelope projects only identity, trusted authority digests, untrusted task data, exact Git target, bounded evidence, runtime selectors, and the allowed writeback contract into the final prompt. Restarts use only these bound values; plan, version, resource, environment, envelope, prompt, or bundle drift fails closed. A legacy snapshot-less running Attempt may only be observed. A legacy pre-dispatch Attempt cannot produce a new side effect.
+Before any agent start or prompt side effect, each new Attempt persists an `ExecutionSnapshot + AttemptContextEnvelope + planDigest`. At selection, the task snapshot also binds the sorted GitHub dependency closure as `{number,state}` entries, so the Analyst and later Attempts see the same dependency facts that admitted the task; this is an immutable claim-time snapshot, not a live GitHub refresh. The execution snapshot binds the probed Pi executable/exact version, effective argv, role-resource/local-extension-closure digests, session/retry/compaction mode, Docker host, result channel, and explicit context manifest. The role-scoped envelope projects only identity, trusted authority digests, untrusted task data, exact Git target, bounded evidence, runtime selectors, and the allowed writeback contract into the final prompt. Restarts use only these bound values; plan, version, resource, environment, envelope, prompt, or bundle drift fails closed. A legacy snapshot-less running Attempt may only be observed. A legacy pre-dispatch Attempt cannot produce a new side effect.
 
 Reviewer findings and approved recovery/CI decisions move through a versioned `TypedHandoff`, never a free-form continuation prompt. It binds source revision/digests and the next lane/base/HEAD, then moves atomically from `Job.pendingHandoff` into the next Attempt envelope. Handoffs and issue/evidence text remain untrusted task data: they can add obligations, references, and unknowns, but cannot widen tools, runtime, or repository-policy authority.
 

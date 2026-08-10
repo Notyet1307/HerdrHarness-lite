@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { HarnessController } from "../src/controller.js";
 import { assertJobInvariant } from "../src/model.js";
-import { operatorActionsFor, projectOperatorState } from "../src/policy.js";
+import { automaticRecoveryFor, operatorActionsFor, projectOperatorState } from "../src/policy.js";
 import { approveRecovery, cancelHeldJob, reassessIncident, resolveDecision } from "../src/recovery.js";
 import { FakeAnalyst, FakeClock, FakeEvidence, FakeGit, FakeGitHub, FakeHerdr, FakeRuntimePreflight, MemoryStore, SequenceIds, issue, validReviewerArgv, validWorkerArgv, } from "./fakes.js";
 const config = {
@@ -233,7 +233,7 @@ test("an approved retry rechecks and accepts a late exact Worker result before s
         expectedRemoteHeadSha: null,
     });
 });
-test("Reviewer infrastructure failure automatically retries once on the same HEAD", async () => {
+test("Reviewer infrastructure failure automatically retries once despite unknown review outcomes", async () => {
     const store = new MemoryStore();
     const clock = new FakeClock();
     const ids = new SequenceIds();
@@ -247,7 +247,10 @@ test("Reviewer infrastructure failure automatically retries once on the same HEA
             summary: "The Reviewer provider failed before producing a durable result",
             resolutionBrief: "Retry the independent review against the unchanged implementation HEAD.",
             evidenceRefs: ["task"],
-            unknowns: [],
+            unknowns: [
+                "the fixed validation result is unknown until a fresh Reviewer runs",
+                "the unchanged HEAD has not yet received an independent verdict",
+            ],
         }]);
     const controller = new HarnessController({
         config,
@@ -344,6 +347,14 @@ test("Worker pre-dispatch infrastructure failure automatically retries once per 
     herdr.startFailure = new Error("Worker provider startup failed");
     assert.equal((await controller.tick()).action, "blocked");
     assert.equal(store.state.activeJob?.incident?.automaticRecovery?.rule, "worker_pre_dispatch_infrastructure");
+    assert.equal(automaticRecoveryFor(store.state.activeJob, {
+        ...advice,
+        id: "analysis-with-unknown",
+        incidentId: store.state.activeJob.incident.id,
+        evidenceDigest: "a".repeat(64),
+        createdAt: "2026-08-10T00:00:00.000Z",
+        unknowns: ["whether the Worker received the prompt"],
+    }), null);
     assert.equal((await controller.tick()).action, "auto_recovery_authorized");
     const first = store.state.activeJob;
     assert.equal(first.approval?.basis, "policy_rule");

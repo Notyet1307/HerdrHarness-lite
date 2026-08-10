@@ -37,6 +37,7 @@ const KNOWN_EVENT_TYPES = new Set([
 type JsonObject = Record<string, unknown>;
 type Child = ReturnType<typeof spawn>;
 type ChildExit = { code: number | null; signal: string | null };
+type AssistantFailure = { error: string; failureClass: string; retryable: boolean };
 
 export class StrictJsonlDecoder {
   private buffer = "";
@@ -181,7 +182,7 @@ async function main(argv: string[]): Promise<void> {
   let client: RpcClient | null = null;
   let settled = false;
   let policyViolation: string | null = null;
-  let assistantFailure: string | null = null;
+  let assistantFailure: AssistantFailure | null = null;
   let failureStage = "startup";
   let childExit: ChildExit | null = null;
   let agentStarts = 0;
@@ -197,7 +198,7 @@ async function main(argv: string[]): Promise<void> {
     if (message.role === "assistant" && (message.stopReason === "error" || message.stopReason === "aborted")) {
       summary.role = "assistant";
       summary.stopReason = message.stopReason;
-      assistantFailure = `Pi RPC assistant ended with ${message.stopReason}`;
+      assistantFailure = classifyAssistantFailure(message.stopReason, message.errorMessage);
     }
     if (type === "agent_end") summary.willRetry = event.willRetry === true;
     if (type === "tool_execution_start" || type === "tool_execution_end") {
@@ -313,7 +314,8 @@ async function main(argv: string[]): Promise<void> {
     failureStage = "credential-postflight";
     credentialHostArgs(plan);
     preparePiRpcAgentDir(plan.snapshot);
-    const terminalError = policyViolation ?? assistantFailure;
+    const assistantTerminalFailure = assistantFailure as AssistantFailure | null;
+    const terminalError = policyViolation ?? assistantTerminalFailure?.error ?? null;
     const ok = terminalError === null && !terminationRequested && settled;
     failureStage = "child-exit";
     if (ok && (childExit.code !== 0 || childExit.signal !== null)) {
@@ -323,6 +325,12 @@ async function main(argv: string[]): Promise<void> {
       ...identity,
       ok,
       ...(!ok ? { error: terminalError ?? "runtime terminated by Controller" } : {}),
+      ...(!policyViolation && assistantTerminalFailure ? {
+        failureStage: "agent-run",
+        failureClass: assistantTerminalFailure.failureClass,
+        retryable: assistantTerminalFailure.retryable,
+        childExit,
+      } : {}),
       agentSettled: settled,
     });
     writeAtomicJson(spoolPath(plan.runtimeRoot, "terminated.json"), { ...identity, ok: true, reason: "settled and child exited" });
@@ -352,6 +360,32 @@ async function main(argv: string[]): Promise<void> {
     });
     throw new Error("Pi RPC runner failed");
   }
+}
+
+function classifyAssistantFailure(stopReason: "error" | "aborted", errorMessage: unknown): AssistantFailure {
+  if (stopReason === "aborted") {
+    return { error: "Pi RPC assistant ended with aborted", failureClass: "assistant_aborted", retryable: false };
+  }
+  const message = typeof errorMessage === "string" ? errorMessage.toLowerCase() : "";
+  if (/\b429\b|rate[ -]?limit|too many requests/.test(message)) {
+    return { error: "Pi RPC assistant ended with error", failureClass: "rate_limit", retryable: true };
+  }
+  if (/\b(?:401|403)\b|unauthori[sz]ed|authentication|invalid api key|token expired/.test(message)) {
+    return { error: "Pi RPC assistant ended with error", failureClass: "authentication", retryable: false };
+  }
+  if (/context (?:length|window)|maximum context|token limit/.test(message)) {
+    return { error: "Pi RPC assistant ended with error", failureClass: "context_limit", retryable: false };
+  }
+  if (/\b(?:408|504)\b|timed? out|timeout/.test(message)) {
+    return { error: "Pi RPC assistant ended with error", failureClass: "timeout", retryable: true };
+  }
+  if (/\b5\d\d\b|bad gateway|service unavailable/.test(message)) {
+    return { error: "Pi RPC assistant ended with error", failureClass: "upstream_5xx", retryable: true };
+  }
+  if (/econn|enotfound|socket hang up|fetch failed|network|\beof\b/.test(message)) {
+    return { error: "Pi RPC assistant ended with error", failureClass: "network", retryable: true };
+  }
+  return { error: "Pi RPC assistant ended with error", failureClass: "unknown", retryable: false };
 }
 
 async function waitForDispatch(plan: PiRpcPlan, client: RpcClient): Promise<{ dispatchId: string; message: string } | null> {

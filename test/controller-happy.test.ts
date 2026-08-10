@@ -264,7 +264,11 @@ test("Attempt binds one immutable execution snapshot and ignores later config dr
   const controller = new HarnessController({
     config: runtimeConfig,
     store,
-    github: new FakeGitHub([issue({ number: 31, title: "Immutable execution plan" })]),
+    github: new FakeGitHub([issue({
+      number: 31,
+      title: "Immutable execution plan",
+      blockedBy: [{ number: 29, state: "CLOSED" }, { number: 30, state: "CLOSED" }],
+    })]),
     git: new FakeGit(),
     herdr,
     analyst: new FakeAnalyst(),
@@ -288,6 +292,10 @@ test("Attempt binds one immutable execution snapshot and ignores later config dr
   assert.equal(attempt?.contextEnvelope?.identity.attemptId, attempt?.id);
   assert.equal(attempt?.contextEnvelope?.task.trust, "untrusted-task-data");
   assert.equal(attempt?.contextEnvelope?.task.issueNumber, 31);
+  assert.deepEqual(
+    (attempt?.contextEnvelope?.task as Record<string, unknown> | undefined)?.blockedBy,
+    [{ number: 29, state: "CLOSED" }, { number: 30, state: "CLOSED" }],
+  );
   assert.equal(
     attempt?.contextEnvelope?.authority.repositoryPolicy.manifestDigest,
     attempt?.executionSnapshot?.context?.manifestDigest,

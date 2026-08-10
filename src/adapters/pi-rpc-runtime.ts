@@ -24,6 +24,10 @@ const RUNNER_FAILURE_STAGES = new Set([
   "startup", "handshake", "await-dispatch", "dispatch", "agent-run",
   "child-shutdown", "rpc-output", "credential-postflight", "child-exit",
 ]);
+const RUNNER_FAILURE_CLASSES = new Set([
+  "rate_limit", "authentication", "context_limit", "timeout",
+  "upstream_5xx", "network", "assistant_aborted", "unknown",
+]);
 
 type RuntimeReceipt = {
   version: 1;
@@ -33,6 +37,8 @@ type RuntimeReceipt = {
   ok: boolean;
   error?: string;
   failureStage?: string;
+  failureClass?: string;
+  retryable?: boolean;
   childExit?: { code: number | null; signal: string | null } | null;
 };
 
@@ -249,6 +255,10 @@ function assertReceipt(receipt: RuntimeReceipt, plan: PiRpcPlan, label: string):
 
 function runtimeFailure(receipt: RuntimeReceipt): string {
   const details: string[] = [];
+  if (receipt.failureClass && RUNNER_FAILURE_CLASSES.has(receipt.failureClass)) {
+    details.push(`class=${receipt.failureClass}`);
+    if (typeof receipt.retryable === "boolean") details.push(`retryable=${receipt.retryable ? "yes" : "no"}`);
+  }
   if (receipt.failureStage && RUNNER_FAILURE_STAGES.has(receipt.failureStage)) details.push(`stage=${receipt.failureStage}`);
   const exit = receipt.childExit;
   if (exit && Number.isInteger(exit.code) && exit.code! >= 0 && exit.code! <= 255 && exit.signal === null) {

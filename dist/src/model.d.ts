@@ -27,6 +27,8 @@ export type TaskSnapshot = {
     title: string;
     objective: string;
     labels: string[];
+    /** Missing only on ledgers created before dependency closure was bound to the task. */
+    blockedBy?: IssueReference[];
     issueUpdatedAt: string;
     digest: string;
 };

@@ -85,7 +85,7 @@ test("Pi RPC adapter persists one launch and one dispatch across Controller rest
   }
 });
 
-test("Pi RPC adapter never invents a missing dispatch and fails closed on policy terminal", async () => {
+test("Pi RPC adapter never invents a missing dispatch and reports only sanitized terminal diagnostics", async () => {
   const fixture = rpcFixture();
   try {
     const plan = fixture.plan();
@@ -103,7 +103,11 @@ test("Pi RPC adapter never invents a missing dispatch and fails closed on policy
     writeAtomicJson(join(plan.runtimeRoot, "terminal.json"), {
       ...receiptIdentity(plan),
       ok: false,
-      error: "forbidden Pi RPC event: auto_retry_start",
+      error: "Pi RPC assistant ended with error",
+      failureStage: "agent-run",
+      failureClass: "rate_limit",
+      retryable: true,
+      childExit: { code: 0, signal: null },
     });
     await assert.rejects(() => new PiRpcRuntime({ runInPane: async () => undefined }).wait({
       handle: fixture.handle,
@@ -112,7 +116,7 @@ test("Pi RPC adapter never invents a missing dispatch and fails closed on policy
       expectedJobId: "job-1",
       expectedAttemptId: fixture.attempt.id,
       expectedLane: "worker",
-    }), /auto_retry_start/);
+    }), /Pi RPC assistant ended with error \(class=rate_limit, retryable=yes, stage=agent-run, child=exit:0\)/);
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
   }
@@ -479,6 +483,7 @@ test("durable runner rejects a settled assistant failure without persisting Prov
   for (const stopReason of ["error", "aborted"] as const) {
     const fixture = rpcFixture();
     const sentinel = `access_token_${stopReason}_SENTINEL`;
+    const providerError = stopReason === "error" ? `HTTP 429 rate limit: ${sentinel}` : sentinel;
     try {
       const plan = fixture.plan({
         executable: process.execPath,
@@ -509,7 +514,7 @@ test("durable runner rejects a settled assistant failure without persisting Prov
         env: {
           ...process.env,
           FAKE_PI_ASSISTANT_STOP_REASON: stopReason,
-          FAKE_PI_ASSISTANT_ERROR: sentinel,
+          FAKE_PI_ASSISTANT_ERROR: providerError,
         },
       });
 
@@ -520,6 +525,10 @@ test("durable runner rejects a settled assistant failure without persisting Prov
           ...receiptIdentity(plan),
           ok: false,
           error: `Pi RPC assistant ended with ${stopReason}`,
+          failureStage: "agent-run",
+          failureClass: stopReason === "error" ? "rate_limit" : "assistant_aborted",
+          retryable: stopReason === "error",
+          childExit: { code: 0, signal: null },
           agentSettled: true,
         },
       );

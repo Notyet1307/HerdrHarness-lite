@@ -15,6 +15,7 @@ export function taskFromSelection(repo, selected) {
         title: selected.issue.title,
         objective: selected.issue.body,
         labels: [...selected.issue.labels].sort(),
+        blockedBy: [...selected.issue.blockedBy].sort((a, b) => a.number - b.number || a.state.localeCompare(b.state)),
         issueUpdatedAt: selected.issue.updatedAt,
     };
     const identity = {
@@ -23,6 +24,7 @@ export function taskFromSelection(repo, selected) {
         mapNumber: value.mapNumber,
         title: value.title,
         objective: value.objective,
+        blockedBy: value.blockedBy,
         issueUpdatedAt: value.issueUpdatedAt,
     };
     return { ...value, digest: digest(identity) };

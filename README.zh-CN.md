@@ -214,7 +214,7 @@ herdr --session SESSION_NAME agent read AGENT_NAME \
 
 Pi 底部显示实际 `(provider) model • thinking`。配置文件只能表达意图；运行时 footer 和真实探测才证明实际选择。
 
-RPC Worker/Reviewer 没有 Herdr interactive agent 记录；读取账本中的 ExecutionSnapshot，以及对应 attempt `runtime/ready.json`、`accepted.json`、`terminal.json`、`terminated.json`。通用 runner 故障只暴露固定的 `failureStage` 与 child `{code, signal}`；child stderr 和 Provider payload 仍不会写入。不要尝试连接或重建 runner 持有的 stdin/stdout。
+RPC Worker/Reviewer 没有 Herdr interactive agent 记录；读取账本中的 ExecutionSnapshot，以及对应 attempt `runtime/ready.json`、`accepted.json`、`terminal.json`、`terminated.json`。assistant 故障只暴露固定的 `failureClass`、`retryable`、`failureStage` 与 child `{code, signal}`；child stderr 和 Provider payload 仍不会写入。不要尝试连接或重建 runner 持有的 stdin/stdout。
 
 普通 `status` 返回完整账本；`status --operator` 返回稳定的操作投影：当前 mode/phase，以及只对精确 revision、incident、analysis、Attempt 和 HEAD 绑定有效的操作。
 
@@ -248,7 +248,7 @@ node dist/src/cli.js decide --config /ABSOLUTE/PATH/harness.config.json \
 
 如果 `state=blocked` 且尚无 Analyst 结论，只执行一次 `tick`，然后重新读取 `status --operator`。投影只会暴露当前 job、revision、incident、analysis、Attempt 与 Git fixed point 允许的动作。
 
-只有两类低风险基础设施故障可以在 Analyst 给出精确 retry 建议且 `unknowns` 为空后，自动获得一次 fresh retry：Worker 在 prompt dispatch/acceptance 之前失败，并绑定同一 base fingerprint；或 Reviewer 无结果失败，并绑定同一精确 HEAD fingerprint。Controller 在执行前把 policy rule 与已消费 fingerprint 写入 ledger。重复 fingerprint、Worker dispatch 之后的失败、CI 回修、完整性/漂移故障、未知证据和内容决策都继续阻塞，等待人工操作。
+只有两类低风险基础设施故障可以在 Analyst 给出精确 retry 建议后，自动获得一次 fresh retry。Worker 必须在 prompt dispatch/acceptance 之前失败、绑定同一 base fingerprint，且 Analyst `unknowns` 为空。Reviewer 必须无结果并仍绑定同一精确 HEAD；“尚未得到评审结论”这类 unknown 不再阻止重试，因为 Controller 会独立重检 settled Attempt、干净工作树和未变化的 HEAD。Controller 在执行前把 policy rule 与已消费 fingerprint 写入 ledger。重复 fingerprint，以及不满足这些精确门禁的 Worker dispatch 后失败、CI 回修、完整性/漂移故障或内容决策，仍继续阻塞并等待人工操作。
 
 | 投影动作 | 所需人工证据 | 效果 |
 | --- | --- | --- |
@@ -293,7 +293,7 @@ Option ID 是 compare-and-swap 绑定；任一事实变化后都会失效。显�
 | 系统 | 负责的事实 |
 | --- | --- |
 | GitHub | Issue 状态、依赖、队列标签、PR、required checks 和 merge |
-| Harness ledger | active job、revision、attempt、incident、Analyst 建议、policy/人工恢复授权和 effect receipt |
+| Harness ledger | claim 时的任务/依赖快照、active job、revision、attempt、incident、Analyst 建议、policy/人工恢复授权和 effect receipt |
 | Git | 固定 base、实现 HEAD、提交 provenance 和 clean-tree |
 | Herdr / Pi | worktree、持久 pane、interactive agent 或 Worker/Reviewer RPC runner；只提供执行与可观察性 |
 | Observer / Telegram Bridge | 不持有权威工作流事实；只保存通知 outbox 与 Telegram offset |
@@ -351,7 +351,7 @@ Worker 与 Reviewer 是两个独立的顶层 Pi agent。Reviewer 不在旧 Worke
 
 ### Attempt 执行计划与上下文信任
 
-每个新 Attempt 在任何 agent 启动或 prompt 副作用前持久化 `ExecutionSnapshot + AttemptContextEnvelope + planDigest`。ExecutionSnapshot 绑定探测到的 Pi executable/精确版本、实际 argv、role resource 与 extension 本地模块闭包 digest、session/retry/compaction 模式、Docker host、result channel 和显式 context manifest；按角色裁剪的 Envelope 只把身份、可信 authority digest、不可信任务数据、精确 Git 目标、有界证据、runtime selector 与允许的 writeback contract 投影进最终 prompt。Controller 重启后只读这些绑定值；配置、版本、资源、环境、Envelope、prompt、bundle 或计划漂移都会 fail closed。旧 ledger 中已经 running 的无快照 Attempt 只能继续观察，不能重启或重发；旧的 pre-dispatch Attempt 不能产生新副作用。
+每个新 Attempt 在任何 agent 启动或 prompt 副作用前持久化 `ExecutionSnapshot + AttemptContextEnvelope + planDigest`。选单时，任务快照还会把 GitHub 依赖闭包按 `{number,state}` 排序后绑定，因此 Analyst 与后续 Attempt 看到的正是准入任务时的同一组依赖事实；这是不可变的 claim-time snapshot，不是实时 GitHub 刷新。ExecutionSnapshot 绑定探测到的 Pi executable/精确版本、实际 argv、role resource 与 extension 本地模块闭包 digest、session/retry/compaction 模式、Docker host、result channel 和显式 context manifest；按角色裁剪的 Envelope 只把身份、可信 authority digest、不可信任务数据、精确 Git 目标、有界证据、runtime selector 与允许的 writeback contract 投影进最终 prompt。Controller 重启后只读这些绑定值；配置、版本、资源、环境、Envelope、prompt、bundle 或计划漂移都会 fail closed。旧 ledger 中已经 running 的无快照 Attempt 只能继续观察，不能重启或重发；旧的 pre-dispatch Attempt 不能产生新副作用。
 
 Reviewer findings 与获批的 recovery/CI 决策通过带版本的 `TypedHandoff` 传递，不再拼接自由文本续跑 prompt。它绑定来源 revision/digest 和下一条 lane/base/HEAD，再从 `Job.pendingHandoff` 原子移动到下一 Attempt Envelope。Handoff、Issue 与 evidence 始终是不可信任务数据：可以增加 obligation、reference 和 unknown，不能扩大 tools、runtime 或 repository-policy authority。
 
