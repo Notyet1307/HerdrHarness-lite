@@ -1,10 +1,14 @@
 #!/usr/bin/env node
-import { chmodSync, readFileSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 let buffer = "";
 let autoCompactionEnabled = true;
 let splitStateResponse = true;
+
+if (process.env.FAKE_PI_MALFORMED_SECRET_PHASE === "before-ready") {
+  process.stdout.write(`${process.env.FAKE_PI_MALFORMED_SECRET}\n`);
+}
 
 process.stdin.setEncoding("utf8");
 process.stdin.on("data", (chunk) => {
@@ -21,6 +25,11 @@ process.stdin.on("data", (chunk) => {
 function respond(command) {
   const base = { id: command.id, type: "response", command: command.type, success: true };
   if (command.type === "get_state") {
+    if (process.env.FAKE_PI_SECRET_ERROR) {
+      process.stderr.write(process.env.FAKE_PI_SECRET_ERROR);
+      emit({ ...base, success: false, error: process.env.FAKE_PI_SECRET_ERROR });
+      return;
+    }
     if (!splitStateResponse && process.env.FAKE_PI_WRITE_AUTH_BEFORE_READY === "1") writePrivateAuth();
     const response = {
       ...base,
@@ -57,13 +66,6 @@ function respond(command) {
     });
     return;
   }
-  if (command.type === "set_auto_retry" || command.type === "set_auto_compaction") {
-    const settingsPath = join(process.env.PI_CODING_AGENT_DIR, "settings.json");
-    const settings = JSON.parse(readFileSync(settingsPath, "utf8"));
-    const field = command.type === "set_auto_retry" ? "retry" : "compaction";
-    settings[field] = { ...(settings[field] ?? {}), enabled: command.enabled };
-    writeFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`);
-  }
   if (command.type === "set_auto_compaction") autoCompactionEnabled = command.enabled;
   if (command.type === "abort" && process.env.FAKE_PI_WAIT_FOR_ABORT === "1") {
     emit({ type: "agent_end", messages: [], willRetry: false });
@@ -96,12 +98,14 @@ function respond(command) {
   if (process.env.FAKE_PI_MALFORMED_AFTER_SETTLED === "1") {
     setTimeout(() => process.stdout.write("{malformed-after-settled\n"), 0);
   }
+  if (process.env.FAKE_PI_MALFORMED_SECRET_PHASE === "after-settled") {
+    setTimeout(() => process.stdout.write(`${process.env.FAKE_PI_MALFORMED_SECRET}\n`), 0);
+  }
 }
 
 function writePrivateAuth() {
   const path = join(process.env.PI_CODING_AGENT_DIR, "auth.json");
-  chmodSync(path, 0o600);
-  writeFileSync(path, '{"oauth":"persisted"}\n');
+  writeFileSync(path, '{"oauth":"persisted"}\n', { mode: 0o600 });
 }
 
 function emit(value) {

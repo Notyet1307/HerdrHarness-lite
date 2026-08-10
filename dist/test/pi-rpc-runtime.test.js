@@ -1,12 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { PiRpcRuntime } from "../src/adapters/pi-rpc-runtime.js";
 import { SyncCommandRunner } from "../src/adapters/command.js";
 import { digest } from "../src/model.js";
+import { executionResourceDigest } from "../src/attempt-plan.js";
 import { StrictJsonlDecoder } from "../src/pi-rpc-runner.js";
 import { readJson, rpcGeneration, writeAtomicJson, writeExclusiveJson, } from "../src/pi-rpc-spool.js";
 test("Pi RPC adapter persists one launch and one dispatch across Controller restarts", async () => {
@@ -24,14 +25,14 @@ test("Pi RPC adapter persists one launch and one dispatch across Controller rest
                     ok: true,
                     autoRetryDisableAccepted: true,
                     autoCompactionEnabled: false,
-                    ambientAuthExcluded: true,
+                    credentialMode: "canonical-oauth",
                     isolatedAgentDir: join(plan.runtimeRoot, "pi-agent"),
                 });
             },
         };
-        const runtime = new PiRpcRuntime(host, "/runner.js");
+        const runtime = new PiRpcRuntime(host);
         await runtime.startAgent({ handle: fixture.handle, attempt: fixture.attempt, cwd: fixture.root, argv: fixture.snapshot.argv });
-        await new PiRpcRuntime(host, "/runner.js").startAgent({
+        await new PiRpcRuntime(host).startAgent({
             handle: fixture.handle,
             attempt: fixture.attempt,
             cwd: fixture.root,
@@ -49,7 +50,7 @@ test("Pi RPC adapter persists one launch and one dispatch across Controller rest
             text: "implement",
         });
         const firstDispatch = readFileSync(join(plan.runtimeRoot, "dispatch.json"), "utf8");
-        await new PiRpcRuntime(host, "/runner.js").prompt({
+        await new PiRpcRuntime(host).prompt({
             handle: fixture.handle,
             attempt: fixture.attempt,
             dispatchId: fixture.attempt.id,
@@ -122,6 +123,25 @@ test("Pi RPC adapter rejects an unqualified Pi protocol version", async () => {
         rmSync(fixture.root, { recursive: true, force: true });
     }
 });
+test("Pi RPC adapter rejects a changed SDK host before pane launch", async () => {
+    const fixture = rpcFixture();
+    try {
+        const sdkHost = fixture.snapshot.resources.find((resource) => resource.kind === "runtime" && resource.path.endsWith("pi-rpc-sdk-entry.js"));
+        assert.ok(sdkHost);
+        sdkHost.digest = "0".repeat(64);
+        let launches = 0;
+        await assert.rejects(() => new PiRpcRuntime({ runInPane: async () => { launches += 1; } }).startAgent({
+            handle: fixture.handle,
+            attempt: fixture.attempt,
+            cwd: fixture.root,
+            argv: fixture.snapshot.argv,
+        }), /runtime resource changed/);
+        assert.equal(launches, 0);
+    }
+    finally {
+        rmSync(fixture.root, { recursive: true, force: true });
+    }
+});
 test("strict Pi RPC JSONL keeps Unicode separators inside one record", () => {
     const decoder = new StrictJsonlDecoder();
     const records = decoder.push('{"type":"message_end","text":"left\u2028right\u2029done"}\r\n');
@@ -177,6 +197,8 @@ test("durable runner disables retry and compaction before dispatch and settles t
         process.env.FAKE_PI_ATTEMPT_ID = fixture.attempt.id;
         const execution = new SyncCommandRunner().run(process.execPath, [
             resolve("dist/src/pi-rpc-runner.js"),
+            "--sdk-entry",
+            resolve("test/fixtures/pi-rpc-sdk-entry.js"),
             "--plan",
             join(plan.runtimeRoot, "plan.json"),
         ], { cwd: fixture.root, timeoutMs: 10_000 });
@@ -184,18 +206,13 @@ test("durable runner disables retry and compaction before dispatch and settles t
         assert.equal(readJson(join(plan.runtimeRoot, "ready.json")).ok, true);
         assert.equal(readJson(join(plan.runtimeRoot, "ready.json")).autoRetryDisableAccepted, true);
         assert.equal(readJson(join(plan.runtimeRoot, "ready.json")).autoCompactionEnabled, false);
-        assert.equal(readJson(join(plan.runtimeRoot, "ready.json")).ambientAuthExcluded, true);
+        assert.equal(readJson(join(plan.runtimeRoot, "ready.json")).credentialMode, "canonical-oauth");
         const isolatedAgentDir = join(plan.runtimeRoot, "pi-agent");
         assert.equal(readJson(join(plan.runtimeRoot, "ready.json")).isolatedAgentDir, isolatedAgentDir);
         assert.equal(readFileSync(join(sourceAgentDir, "settings.json"), "utf8"), sourceSettings);
-        assert.deepEqual(readJson(join(isolatedAgentDir, "settings.json")), {
-            retry: { enabled: false },
-            compaction: { enabled: false },
-        });
+        assert.equal(existsSync(join(isolatedAgentDir, "settings.json")), false);
         assert.equal(readFileSync(join(sourceAgentDir, "auth.json"), "utf8"), sourceAuth);
-        assert.equal(lstatSync(join(isolatedAgentDir, "auth.json")).isSymbolicLink(), false);
-        assert.equal(readFileSync(join(isolatedAgentDir, "auth.json"), "utf8").trim(), "{}");
-        assert.equal(lstatSync(join(isolatedAgentDir, "auth.json")).mode & 0o777, 0o400);
+        assert.equal(existsSync(join(isolatedAgentDir, "auth.json")), false);
         assert.equal(existsSync(join(isolatedAgentDir, "models.json")), false);
         assert.equal(readJson(join(plan.runtimeRoot, "accepted.json")).ok, true);
         assert.equal(readJson(join(plan.runtimeRoot, "terminal.json")).agentSettled, true);
@@ -252,6 +269,8 @@ test("durable runner rejects private auth writes before ready or after settlemen
             process.env[authWriteVariable] = "1";
             const execution = new SyncCommandRunner().run(process.execPath, [
                 resolve("dist/src/pi-rpc-runner.js"),
+                "--sdk-entry",
+                resolve("test/fixtures/pi-rpc-sdk-entry.js"),
                 "--plan",
                 join(plan.runtimeRoot, "plan.json"),
             ], { cwd: fixture.root, timeoutMs: 10_000 });
@@ -264,6 +283,92 @@ test("durable runner rejects private auth writes before ready or after settlemen
             restoreEnv("FAKE_PI_JOB_ID", previous.job);
             restoreEnv("FAKE_PI_ATTEMPT_ID", previous.attempt);
             restoreEnv(authWriteVariable, previous.authWrite);
+            rmSync(fixture.root, { recursive: true, force: true });
+        }
+    }
+});
+test("durable runner never persists child Provider diagnostics", () => {
+    const fixture = rpcFixture();
+    const sentinel = "access_token_SENTINEL";
+    const previous = process.env.FAKE_PI_SECRET_ERROR;
+    try {
+        const plan = fixture.plan({
+            executable: process.execPath,
+            argv: [
+                resolve("test/fixtures/fake-pi-rpc.js"),
+                "--no-session", "--no-context-files", "--no-prompt-templates", "--no-themes",
+                "--provider", "test", "--model", "model", "--mode", "rpc",
+            ],
+        });
+        writeExclusiveJson(join(plan.runtimeRoot, "plan.json"), plan);
+        process.env.FAKE_PI_SECRET_ERROR = sentinel;
+        const execution = new SyncCommandRunner().run(process.execPath, [
+            resolve("dist/src/pi-rpc-runner.js"),
+            "--sdk-entry", resolve("test/fixtures/pi-rpc-sdk-entry.js"),
+            "--plan", join(plan.runtimeRoot, "plan.json"),
+        ], { cwd: fixture.root, timeoutMs: 10_000 });
+        assert.equal(execution.ok, false);
+        for (const path of filesUnder(plan.runtimeRoot)) {
+            assert.equal(readFileSync(path, "utf8").includes(sentinel), false, path);
+        }
+    }
+    finally {
+        restoreEnv("FAKE_PI_SECRET_ERROR", previous);
+        rmSync(fixture.root, { recursive: true, force: true });
+    }
+});
+test("durable runner redacts malformed Provider output before ready or after settlement", () => {
+    const sentinel = "access_token_SENTINEL";
+    for (const phase of ["before-ready", "after-settled"]) {
+        const fixture = rpcFixture();
+        const previous = {
+            result: process.env.FAKE_PI_RESULT_PATH,
+            job: process.env.FAKE_PI_JOB_ID,
+            attempt: process.env.FAKE_PI_ATTEMPT_ID,
+            secret: process.env.FAKE_PI_MALFORMED_SECRET,
+            phase: process.env.FAKE_PI_MALFORMED_SECRET_PHASE,
+        };
+        try {
+            const plan = fixture.plan({
+                executable: process.execPath,
+                argv: [
+                    resolve("test/fixtures/fake-pi-rpc.js"),
+                    "--no-session", "--no-context-files", "--no-prompt-templates", "--no-themes",
+                    "--provider", "test", "--model", "model", "--mode", "rpc",
+                ],
+            });
+            writeExclusiveJson(join(plan.runtimeRoot, "plan.json"), plan);
+            writeExclusiveJson(join(plan.runtimeRoot, "dispatch.json"), {
+                version: 1,
+                attemptId: plan.attemptId,
+                generation: plan.generation,
+                planDigest: plan.planDigest,
+                dispatchId: plan.attemptId,
+                promptDigest: fixture.attempt.promptDigest,
+                message: "/skill:implement [harness-dispatch:worker-1]\nimplement",
+            });
+            process.env.FAKE_PI_RESULT_PATH = fixture.attempt.resultPath;
+            process.env.FAKE_PI_JOB_ID = "job-1";
+            process.env.FAKE_PI_ATTEMPT_ID = fixture.attempt.id;
+            process.env.FAKE_PI_MALFORMED_SECRET = sentinel;
+            process.env.FAKE_PI_MALFORMED_SECRET_PHASE = phase;
+            const execution = new SyncCommandRunner().run(process.execPath, [
+                resolve("dist/src/pi-rpc-runner.js"),
+                "--sdk-entry", resolve("test/fixtures/pi-rpc-sdk-entry.js"),
+                "--plan", join(plan.runtimeRoot, "plan.json"),
+            ], { cwd: fixture.root, timeoutMs: 10_000 });
+            assert.equal(execution.ok, false, phase);
+            assert.equal(execution.stderr, "FAIL: Pi RPC runner failed\n");
+            for (const path of filesUnder(plan.runtimeRoot)) {
+                assert.equal(readFileSync(path, "utf8").includes(sentinel), false, path);
+            }
+        }
+        finally {
+            restoreEnv("FAKE_PI_RESULT_PATH", previous.result);
+            restoreEnv("FAKE_PI_JOB_ID", previous.job);
+            restoreEnv("FAKE_PI_ATTEMPT_ID", previous.attempt);
+            restoreEnv("FAKE_PI_MALFORMED_SECRET", previous.secret);
+            restoreEnv("FAKE_PI_MALFORMED_SECRET_PHASE", previous.phase);
             rmSync(fixture.root, { recursive: true, force: true });
         }
     }
@@ -310,6 +415,8 @@ test("durable runner fails closed when RPC JSONL breaks before or after settleme
             process.env[malformedVariable] = "1";
             const execution = new SyncCommandRunner().run(process.execPath, [
                 resolve("dist/src/pi-rpc-runner.js"),
+                "--sdk-entry",
+                resolve("test/fixtures/pi-rpc-sdk-entry.js"),
                 "--plan",
                 join(plan.runtimeRoot, "plan.json"),
             ], { cwd: fixture.root, timeoutMs: 10_000 });
@@ -359,6 +466,8 @@ test("durable runner confirms child exit before acknowledging Controller termina
         });
         const child = spawn(process.execPath, [
             resolve("dist/src/pi-rpc-runner.js"),
+            "--sdk-entry",
+            resolve("test/fixtures/pi-rpc-sdk-entry.js"),
             "--plan",
             join(plan.runtimeRoot, "plan.json"),
         ], {
@@ -405,12 +514,17 @@ function rpcFixture() {
         sessionMode: "ephemeral",
         retryMode: "disabled",
         compactionMode: "disabled",
+        credentialMode: "canonical-oauth",
         dockerHost: null,
-        resources: ["implement", "tdd", "focused-self-check"].map((name) => ({
-            kind: "skill",
-            path: join("/skills", name),
-            digest: "e".repeat(64),
-        })),
+        resources: [
+            ...["implement", "tdd", "focused-self-check"].map((name) => ({
+                kind: "skill",
+                path: join("/skills", name),
+                digest: "e".repeat(64),
+            })),
+            runtimeResource(resolve("dist/src/pi-rpc-runner.js")),
+            runtimeResource(resolve("test/fixtures/pi-rpc-sdk-entry.js")),
+        ],
         context: {
             version: 1,
             mode: "explicit-v1",
@@ -462,6 +576,9 @@ function rpcFixture() {
 function receiptIdentity(plan) {
     return { version: 1, attemptId: plan.attemptId, generation: plan.generation, planDigest: plan.planDigest };
 }
+function runtimeResource(path) {
+    return { kind: "runtime", path, digest: executionResourceDigest(dirname(path)) };
+}
 function workerResult(attemptId) {
     return {
         version: 1,
@@ -487,5 +604,11 @@ async function waitForFile(path) {
             throw new Error(`timed out waiting for ${path}`);
         await new Promise((resolveDelay) => setTimeout(resolveDelay, 20));
     }
+}
+function filesUnder(root) {
+    return readdirSync(root).flatMap((name) => {
+        const path = join(root, name);
+        return lstatSync(path).isDirectory() ? filesUnder(path) : [path];
+    });
 }
 //# sourceMappingURL=pi-rpc-runtime.test.js.map

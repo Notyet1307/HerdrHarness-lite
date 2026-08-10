@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { digest } from "../model.js";
+import { executionResourceDigest } from "../attempt-plan.js";
 import { ensurePrivateDirectory, readJsonIfExists, rpcGeneration, rpcRuntimeRoot, sameJson, spoolPath, SUPPORTED_PI_RPC_VERSION, writeExclusiveJson, } from "../pi-rpc-spool.js";
 const READY_TIMEOUT_MS = 30_000;
 const ACCEPT_TIMEOUT_MS = 30_000;
@@ -8,13 +9,13 @@ const TERMINATE_TIMEOUT_MS = 30_000;
 const POLL_MS = 50;
 export class PiRpcRuntime {
     host;
-    runnerPath;
-    constructor(host, runnerPath) {
+    constructor(host) {
         this.host = host;
-        this.runnerPath = runnerPath ?? resolve(import.meta.dirname, "../pi-rpc-runner.js");
     }
     async startAgent(input) {
         const plan = this.plan(input);
+        const runnerPath = boundRuntimeResource(plan, "pi-rpc-runner.js");
+        const sdkEntryPath = boundRuntimeResource(plan, "pi-rpc-sdk-entry.js");
         ensurePrivateDirectory(plan.runtimeRoot);
         const planPath = spoolPath(plan.runtimeRoot, "plan.json");
         const existingPlan = readJsonIfExists(planPath);
@@ -38,7 +39,7 @@ export class PiRpcRuntime {
             await this.host.runInPane({
                 handle: input.handle,
                 command: process.execPath,
-                argv: [this.runnerPath, "--plan", planPath],
+                argv: [runnerPath, "--sdk-entry", sdkEntryPath, "--plan", planPath],
             });
         }
         const observed = waitForReceipt(plan, "ready.json", READY_TIMEOUT_MS);
@@ -215,9 +216,19 @@ function processAlive(pid) {
 function assertRuntimePolicy(receipt, plan) {
     if (receipt.autoRetryDisableAccepted !== true
         || receipt.autoCompactionEnabled !== false
-        || receipt.ambientAuthExcluded !== true
+        || receipt.credentialMode !== "canonical-oauth"
         || receipt.isolatedAgentDir !== join(plan.runtimeRoot, "pi-agent")) {
-        throw new Error("Pi RPC ready receipt did not prove retry, compaction, and ambient auth isolation");
+        throw new Error("Pi RPC ready receipt did not prove retry, compaction, and canonical OAuth isolation");
     }
+}
+function boundRuntimeResource(plan, name) {
+    const matches = plan.snapshot.resources.filter((resource) => resource.kind === "runtime" && basename(resource.path) === name);
+    if (matches.length !== 1)
+        throw new Error(`Pi RPC snapshot must bind exactly one ${name}`);
+    const resource = matches[0];
+    if (executionResourceDigest(dirname(resource.path)) !== resource.digest) {
+        throw new Error(`Pi RPC runtime resource changed after preparation: ${name}`);
+    }
+    return resource.path;
 }
 //# sourceMappingURL=pi-rpc-runtime.js.map

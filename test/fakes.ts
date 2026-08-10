@@ -70,6 +70,8 @@ export class FakeRuntimePreflight implements RuntimePreflightPort {
     roleArgv: string[];
     piBin: string;
     agentDir?: string;
+    oauthAgentDir?: string;
+    rpcHost?: ExecutionResource;
   }> = [];
   dockerCalls: string[] = [];
   providerFailure: Error | null = null;
@@ -96,6 +98,8 @@ export class FakeRuntimePreflight implements RuntimePreflightPort {
     roleArgv: string[];
     piBin: string;
     agentDir?: string;
+    oauthAgentDir?: string;
+    rpcHost?: ExecutionResource;
   }): Promise<void> {
     this.providerCalls.push({ ...input, roleArgv: [...input.roleArgv] });
     if (this.providerFailure) throw this.providerFailure;

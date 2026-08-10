@@ -12,7 +12,7 @@ export function buildExecutionSnapshot(input: {
   compactionMode?: ExecutionSnapshot["compactionMode"];
   dockerHost?: string | null;
   context?: ExecutionContext;
-  extraResources?: Array<{ kind: "agent"; path: string }>;
+  extraResources?: Array<{ kind: "agent" | "runtime"; path: string }>;
 }): ExecutionSnapshot {
   return {
     version: 1,
@@ -27,6 +27,7 @@ export function buildExecutionSnapshot(input: {
     sessionMode: input.argv.includes("--no-session") ? "ephemeral" : "fresh-persistent",
     retryMode: input.retryMode ?? "runtime-default",
     compactionMode: input.compactionMode ?? "runtime-default",
+    credentialMode: input.adapter === "pi-rpc" ? "canonical-oauth" : "runtime-default",
     dockerHost: input.dockerHost ?? null,
     resources: [
       ...flagValues(input.argv, "--skill").map((path) => resource("skill", path)),
@@ -76,7 +77,7 @@ function flagValues(argv: string[], flag: string): string[] {
 
 function resource(kind: ExecutionResource["kind"], path: string): ExecutionResource {
   const realPath = realpathSync(path);
-  const digestRoot = kind === "extension" && lstatSync(realPath).isFile() ? dirname(realPath) : realPath;
+  const digestRoot = (kind === "extension" || kind === "runtime") && lstatSync(realPath).isFile() ? dirname(realPath) : realPath;
   return { kind, path: realPath, digest: executionResourceDigest(digestRoot) };
 }
 

@@ -390,8 +390,42 @@ test("Pi RPC canary preflights and routes only Worker through its isolated runti
     assert.equal(store.state.activeJob?.attempts[0]?.executionSnapshot?.retryMode, "disabled");
     assert.equal(store.state.activeJob?.attempts[1]?.executionSnapshot?.adapter, "herdr-pi-cli");
     assert.deepEqual(store.state.activeJob?.attempts[0]?.executionSnapshot?.argv.slice(-2), ["--mode", "rpc"]);
-    const rpcProbe = preflight.providerCalls.find((call) => call.agentDir !== undefined);
-    assert.match(rpcProbe?.agentDir ?? "", /\/runtime\/pi-agent$/);
+    const rpcProbes = preflight.providerCalls.filter((call) => call.lane === "worker");
+    assert.equal(rpcProbes.length, 2);
+    assert.equal(rpcProbes[0]?.agentDir, "/state/preflight/pi-rpc-agent");
+    assert.equal(rpcProbes[0]?.oauthAgentDir, "/pi-agent");
+    assert.equal(rpcProbes[0]?.piBin, "/opt/pi");
+    assert.equal(rpcProbes[0]?.rpcHost?.kind, "runtime");
+    assert.match(rpcProbes[1]?.agentDir ?? "", /\/runtime\/pi-agent$/);
+    assert.equal(rpcProbes[1]?.rpcHost?.kind, "runtime");
+    assert.equal(preflight.providerCalls.some((call) => call.lane === "worker" && call.agentDir === undefined), false);
+});
+test("Pi RPC Worker admission failure makes no durable selection or claim", async () => {
+    const store = new MemoryStore();
+    const github = new FakeGitHub([issue({ number: 38, title: "RPC admission" })]);
+    const preflight = new FakeRuntimePreflight();
+    preflight.providerFailure = new Error("subscription OAuth unavailable");
+    const controller = new HarnessController({
+        config: { ...config, workerRuntime: "pi-rpc", workerArgv: rpcWorkerArgv },
+        store,
+        github,
+        git: new FakeGit(),
+        herdr: new FakeHerdr([]),
+        workerRpc: new FakeHerdr([]),
+        analyst: new FakeAnalyst(),
+        evidence: new FakeEvidence(),
+        clock: new FakeClock(),
+        ids: new SequenceIds(),
+        preflight,
+    });
+    const output = await controller.tick();
+    assert.equal(output.action, "preflight_failed");
+    assert.equal(store.state.activeJob, null);
+    assert.deepEqual(github.claims, []);
+    assert.equal(preflight.providerCalls.length, 1);
+    assert.equal(preflight.providerCalls[0]?.lane, "worker");
+    assert.equal(preflight.providerCalls[0]?.agentDir, "/state/preflight/pi-rpc-agent");
+    assert.equal(preflight.providerCalls[0]?.rpcHost?.kind, "runtime");
 });
 test("legacy running Attempts remain observable but legacy pre-start Attempts cannot launch", async () => {
     for (const phase of ["prepared", "running"]) {

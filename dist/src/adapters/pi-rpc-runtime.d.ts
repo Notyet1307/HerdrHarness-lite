@@ -2,8 +2,7 @@ import { type AgentHandle, type Attempt, type AttemptResult } from "../model.js"
 import type { AttemptRuntimePort, HerdrPort } from "../ports.js";
 export declare class PiRpcRuntime implements AttemptRuntimePort {
     private readonly host;
-    private readonly runnerPath;
-    constructor(host: Pick<HerdrPort, "runInPane">, runnerPath?: string);
+    constructor(host: Pick<HerdrPort, "runInPane">);
     startAgent(input: {
         handle: AgentHandle;
         attempt: Attempt;

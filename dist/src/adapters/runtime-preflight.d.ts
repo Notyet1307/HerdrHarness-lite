@@ -1,4 +1,5 @@
 import type { RuntimePreflightPort } from "../ports.js";
+import type { ExecutionResource } from "../model.js";
 import { type CommandRunner } from "./command.js";
 export declare class RuntimePreflightCli implements RuntimePreflightPort {
     private readonly runner;
@@ -22,6 +23,8 @@ export declare class RuntimePreflightCli implements RuntimePreflightPort {
         roleArgv: string[];
         piBin: string;
         agentDir?: string;
+        oauthAgentDir?: string;
+        rpcHost?: ExecutionResource;
     }): Promise<void>;
     probeDocker(input: {
         cwd: string;

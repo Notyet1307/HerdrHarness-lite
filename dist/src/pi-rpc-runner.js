@@ -1,16 +1,27 @@
 #!/usr/bin/env node
-import { appendFileSync, existsSync } from "node:fs";
+import { appendFileSync, existsSync, realpathSync } from "node:fs";
 import { spawn } from "node:child_process";
-import { basename, dirname } from "node:path";
+import { basename, dirname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { Buffer } from "node:buffer";
 import { digest } from "./model.js";
+import { executionResourceDigest } from "./attempt-plan.js";
 import { readJson, preparePiRpcAgentDir, spoolPath, SUPPORTED_PI_RPC_VERSION, writeAtomicJson, writeExclusiveJson, } from "./pi-rpc-spool.js";
 const MAX_RPC_LINE_BYTES = 1024 * 1024;
 const MAX_EVENT_LOG_BYTES = 512 * 1024;
 const COMMAND_TIMEOUT_MS = 30_000;
 const EXIT_TIMEOUT_MS = 10_000;
 const POLL_MS = 50;
+const KNOWN_EVENT_TYPES = new Set([
+    "agent_start", "agent_end", "agent_settled",
+    "message_start", "message_update", "message_end",
+    "tool_execution_start", "tool_execution_update", "tool_execution_end",
+    "bash_execution_update", "queue_update",
+    "auto_retry_start", "auto_retry_end",
+    "compaction_start", "compaction_end",
+    "summarization_retry_scheduled", "summarization_retry_attempt_start", "summarization_retry_finished",
+    "extension_ui_request", "extension_ui_response",
+]);
 export class StrictJsonlDecoder {
     buffer = "";
     push(chunk) {
@@ -31,7 +42,13 @@ export class StrictJsonlDecoder {
                 continue;
             if (Buffer.byteLength(line, "utf8") > MAX_RPC_LINE_BYTES)
                 throw new Error("Pi RPC line exceeded the maximum size");
-            const value = JSON.parse(line);
+            let value;
+            try {
+                value = JSON.parse(line);
+            }
+            catch {
+                throw new Error("Pi RPC stdout contained invalid JSON");
+            }
             if (!value || typeof value !== "object" || Array.isArray(value))
                 throw new Error("Pi RPC record is not an object");
             records.push(value);
@@ -118,7 +135,7 @@ class RpcClient {
             throw error;
         }
         if (record.success !== true) {
-            pending.reject(new Error(`Pi RPC ${command} failed: ${String(record.error ?? "unknown failure")}`));
+            pending.reject(new Error(`Pi RPC ${command} failed`));
             return;
         }
         pending.resolve(record);
@@ -136,8 +153,14 @@ async function main(argv) {
     const planPath = flag(argv, "--plan");
     if (!planPath)
         throw new Error("--plan is required");
+    const sdkEntryPath = flag(argv, "--sdk-entry") ?? resolve(import.meta.dirname, "pi-rpc-sdk-entry.js");
     const plan = readJson(planPath);
     validatePlan(plan);
+    const expectedRunner = boundRuntimeResource(plan, "pi-rpc-runner.js");
+    const expectedSdkEntry = boundRuntimeResource(plan, "pi-rpc-sdk-entry.js");
+    if (!process.argv[1] || realpathSync(process.argv[1]) !== expectedRunner || resolve(sdkEntryPath) !== expectedSdkEntry) {
+        throw new Error("Pi RPC runner or SDK host differs from the execution snapshot");
+    }
     const identity = receiptIdentity(plan);
     writeExclusiveJson(spoolPath(plan.runtimeRoot, "owner.json"), {
         ...identity,
@@ -147,26 +170,22 @@ async function main(argv) {
     });
     let child = null;
     let client = null;
-    let stderr = "";
     let settled = false;
     let policyViolation = null;
     let agentStarts = 0;
     let eventBytes = 0;
     let logTruncated = false;
     const persistEvent = (event) => {
-        const type = String(event.type);
+        const reportedType = typeof event.type === "string" ? event.type : "";
+        const type = KNOWN_EVENT_TYPES.has(reportedType) ? reportedType : "unknown";
         if (["message_update", "tool_execution_update", "bash_execution_update"].includes(type))
             return;
         const summary = { type, digest: digest(event) };
         if (type === "agent_end")
             summary.willRetry = event.willRetry === true;
         if (type === "tool_execution_start" || type === "tool_execution_end") {
-            summary.toolName = event.toolName;
-            summary.toolCallId = event.toolCallId;
             summary.isError = event.isError === true;
         }
-        if (type === "message_end")
-            summary.role = object(event.message).role;
         const line = `${JSON.stringify(summary)}\n`;
         if (eventBytes + Buffer.byteLength(line, "utf8") <= MAX_EVENT_LOG_BYTES) {
             appendFileSync(spoolPath(plan.runtimeRoot, "runtime-events.jsonl"), line, { encoding: "utf8", mode: 0o600 });
@@ -181,20 +200,34 @@ async function main(argv) {
             policyViolation = "multiple agent_start events";
         if (type === "agent_end" && event.willRetry === true)
             policyViolation = "agent_end requested an automatic retry";
-        if (["auto_retry_start", "compaction_start", "queue_update", "extension_ui_request"].includes(type) || type.startsWith("summarization_retry")) {
-            policyViolation = `forbidden Pi RPC event: ${type}`;
+        if (type === "unknown")
+            policyViolation = "unknown Pi RPC event";
+        if ([
+            "auto_retry_start", "auto_retry_end", "compaction_start", "compaction_end", "queue_update",
+            "extension_ui_request", "extension_ui_response",
+            "summarization_retry_scheduled", "summarization_retry_attempt_start", "summarization_retry_finished",
+        ].includes(type)) {
+            policyViolation = "forbidden Pi RPC control event";
         }
         if (type === "agent_settled")
             settled = true;
     };
     try {
         const isolatedAgentDir = preparePiRpcAgentDir(plan.snapshot);
-        child = spawn(plan.snapshot.executable, plan.snapshot.argv, {
+        child = spawn(process.execPath, [
+            sdkEntryPath,
+            "--pi-executable", plan.snapshot.executable,
+            "--expected-version", plan.snapshot.runtimeVersion,
+            "--oauth-agent-dir", plan.snapshot.context.agentDir,
+            "--private-agent-dir", isolatedAgentDir,
+            "--",
+            ...plan.snapshot.argv,
+        ], {
             cwd: plan.cwd,
             env: { ...process.env, PI_CODING_AGENT_DIR: isolatedAgentDir },
             stdio: ["pipe", "pipe", "pipe"],
         });
-        child.stderr.on("data", (chunk) => { stderr = `${stderr}${String(chunk)}`.slice(-4_000); });
+        child.stderr.on("data", () => { });
         client = new RpcClient(child, persistEvent);
         const initialState = requireResponse(await client.command("get_state"), "get_state");
         validateInitialState(initialState, plan);
@@ -212,7 +245,7 @@ async function main(argv) {
             piPid: child.pid,
             autoRetryDisableAccepted: true,
             autoCompactionEnabled: false,
-            ambientAuthExcluded: true,
+            credentialMode: "canonical-oauth",
             isolatedAgentDir,
             runtimeModel: object(controlledState.data).model ?? null,
             thinkingLevel: object(controlledState.data).thinkingLevel,
@@ -262,7 +295,6 @@ async function main(argv) {
             ok,
             ...(!ok ? { error: policyViolation ?? "runtime terminated by Controller" } : {}),
             agentSettled: settled,
-            stderr,
         });
         writeAtomicJson(spoolPath(plan.runtimeRoot, "terminated.json"), { ...identity, ok: true, reason: "settled and child exited" });
     }
@@ -279,18 +311,14 @@ async function main(argv) {
         else if (child) {
             terminationError = "Pi RPC child exists without a controllable client";
         }
-        const detail = [error instanceof Error ? error.message : String(error), stderr, terminationError]
-            .filter(Boolean)
-            .join("\n")
-            .slice(-4_000);
-        writeAtomicJson(spoolPath(plan.runtimeRoot, "terminal.json"), { ...identity, ok: false, error: detail });
+        writeAtomicJson(spoolPath(plan.runtimeRoot, "terminal.json"), { ...identity, ok: false, error: "Pi RPC runner failed" });
         writeAtomicJson(spoolPath(plan.runtimeRoot, "terminated.json"), {
             ...identity,
             ok: terminationError === null,
             reason: terminationError === null ? "runner failure child exit confirmed" : "runner failure child exit unconfirmed",
-            ...(terminationError ? { error: terminationError } : {}),
+            ...(terminationError ? { error: "Pi RPC child exit unconfirmed" } : {}),
         });
-        throw error;
+        throw new Error("Pi RPC runner failed");
     }
 }
 async function waitForDispatch(plan, client) {
@@ -361,12 +389,24 @@ function validatePlan(plan) {
         || plan.snapshot.runtimeVersion !== SUPPORTED_PI_RPC_VERSION
         || plan.snapshot.retryMode !== "disabled"
         || plan.snapshot.compactionMode !== "disabled"
+        || plan.snapshot.credentialMode !== "canonical-oauth"
         || !plan.snapshot.provider
         || !plan.snapshot.model
+        || !plan.snapshot.context?.agentDir
         || !plan.snapshot.argv.includes("--no-session")
         || !plan.snapshot.argv.includes("--mode")
         || !plan.snapshot.argv.includes("rpc"))
         throw new Error("invalid Pi RPC runtime plan");
+}
+function boundRuntimeResource(plan, name) {
+    const matches = plan.snapshot.resources.filter((resource) => resource.kind === "runtime" && basename(resource.path) === name);
+    if (matches.length !== 1)
+        throw new Error(`Pi RPC plan must bind exactly one ${name}`);
+    const resource = matches[0];
+    if (executionResourceDigest(dirname(resource.path)) !== resource.digest) {
+        throw new Error(`Pi RPC runtime resource changed after preparation: ${name}`);
+    }
+    return resource.path;
 }
 function requireResponse(response, command) {
     if (response.type !== "response" || response.command !== command || response.success !== true) {
@@ -423,8 +463,8 @@ async function withTimeout(promise, timeoutMs, label) {
     });
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-    main(process.argv.slice(2)).catch((error) => {
-        process.stderr.write(`FAIL: ${error instanceof Error ? error.message : String(error)}\n`);
+    main(process.argv.slice(2)).catch(() => {
+        process.stderr.write("FAIL: Pi RPC runner failed\n");
         process.exitCode = 1;
     });
 }

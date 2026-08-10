@@ -49,24 +49,8 @@ export function piRpcAgentDir(snapshot: ExecutionSnapshot): string {
 export function preparePiRpcAgentDirAt(isolated: string): string {
   ensurePrivateDirectory(dirname(isolated));
   ensurePrivateDirectory(isolated);
-  const settingsPath = join(isolated, "settings.json");
-  if (!existsSync(settingsPath)) writeFileSync(settingsPath, "{}\n", { flag: "wx", mode: 0o600, flush: true });
-  const settings = lstatSync(settingsPath);
-  if (!settings.isFile() || settings.isSymbolicLink() || (settings.mode & 0o077)) {
-    throw new Error("Pi RPC isolated settings must be a private regular file");
-  }
-
-  const authPath = join(isolated, "auth.json");
-  if (!existsSync(authPath)) {
-    writeFileSync(authPath, "{}\n", { flag: "wx", mode: 0o400, flush: true });
-    chmodSync(authPath, 0o400);
-  }
-  const auth = lstatSync(authPath);
-  if (!auth.isFile() || auth.isSymbolicLink() || (auth.mode & 0o777) !== 0o400) {
-    throw new Error("Pi RPC isolated auth must remain empty, private, and read-only");
-  }
-  if (readFileSync(authPath, "utf8").trim() !== "{}") throw new Error("Pi RPC isolated auth must not contain copied credentials");
-
+  if (pathExists(join(isolated, "settings.json"))) throw new Error("Pi RPC uses in-memory settings and must not persist settings.json");
+  if (pathExists(join(isolated, "auth.json"))) throw new Error("Pi RPC private agent directory must not contain auth.json");
   if (pathExists(join(isolated, "models.json"))) throw new Error("Pi RPC canary must not mount or create models.json");
   return isolated;
 }

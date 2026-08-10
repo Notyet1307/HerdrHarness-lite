@@ -24,6 +24,9 @@ interface ImportMeta {
 declare function setTimeout(callback: () => void, milliseconds: number): unknown;
 declare function clearTimeout(timer: unknown): void;
 
+interface AbortSignal {}
+declare const AbortSignal: { timeout(milliseconds: number): AbortSignal };
+
 declare module "node:crypto" {
   export function randomUUID(): string;
   export function createHash(name: string): {
@@ -98,6 +101,7 @@ declare module "node:fs" {
   export function readdirSync(path: string): string[];
   export function lstatSync(path: string): {
     mode: number;
+    nlink: number;
     isDirectory(): boolean;
     isFile(): boolean;
     isSymbolicLink(): boolean;

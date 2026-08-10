@@ -32,6 +32,8 @@ export declare class FakeRuntimePreflight implements RuntimePreflightPort {
         roleArgv: string[];
         piBin: string;
         agentDir?: string;
+        oauthAgentDir?: string;
+        rpcHost?: ExecutionResource;
     }>;
     dockerCalls: string[];
     providerFailure: Error | null;
@@ -57,6 +59,8 @@ export declare class FakeRuntimePreflight implements RuntimePreflightPort {
         roleArgv: string[];
         piBin: string;
         agentDir?: string;
+        oauthAgentDir?: string;
+        rpcHost?: ExecutionResource;
     }): Promise<void>;
     probeDocker(input: {
         cwd: string;

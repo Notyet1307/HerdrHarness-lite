@@ -16,6 +16,7 @@ export function buildExecutionSnapshot(input) {
         sessionMode: input.argv.includes("--no-session") ? "ephemeral" : "fresh-persistent",
         retryMode: input.retryMode ?? "runtime-default",
         compactionMode: input.compactionMode ?? "runtime-default",
+        credentialMode: input.adapter === "pi-rpc" ? "canonical-oauth" : "runtime-default",
         dockerHost: input.dockerHost ?? null,
         resources: [
             ...flagValues(input.argv, "--skill").map((path) => resource("skill", path)),
@@ -61,7 +62,7 @@ function flagValues(argv, flag) {
 }
 function resource(kind, path) {
     const realPath = realpathSync(path);
-    const digestRoot = kind === "extension" && lstatSync(realPath).isFile() ? dirname(realPath) : realPath;
+    const digestRoot = (kind === "extension" || kind === "runtime") && lstatSync(realPath).isFile() ? dirname(realPath) : realPath;
     return { kind, path: realPath, digest: executionResourceDigest(digestRoot) };
 }
 export function executionResourceDigest(path) {

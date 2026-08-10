@@ -1,10 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { RuntimePreflightCli } from "../src/adapters/runtime-preflight.js";
 import type { CommandResult, CommandRunner } from "../src/adapters/command.js";
+import { executionResourceDigest } from "../src/attempt-plan.js";
+import type { ExecutionResource } from "../src/model.js";
 
 class RecordingRunner implements CommandRunner {
   calls: Array<{
@@ -53,29 +55,35 @@ test("ambient Pi SYSTEM prompts fail closed while an empty bound agent directory
   mkdirSync(cwd);
   mkdirSync(agentDir);
   const preflight = new RuntimePreflightCli(new RecordingRunner([]), { PI_CODING_AGENT_DIR: agentDir });
-  assert.deepEqual(await preflight.assertNoAmbientSystemPrompt({ cwd }), { agentDir: realpathSync(agentDir) });
+  assert.deepEqual(await preflight.assertNoAmbientSystemPrompt({ cwd }), { agentDir: resolve(agentDir) });
 
   writeFileSync(join(agentDir, "SYSTEM.md"), "ambient\n");
   await assert.rejects(() => preflight.assertNoAmbientSystemPrompt({ cwd }), /ambient Pi system prompt is not allowed/);
+  await assert.rejects(
+    () => new RuntimePreflightCli(new RecordingRunner([]), { PI_CODING_AGENT_DIR: "relative-agent" }).assertNoAmbientSystemPrompt({ cwd }),
+    /absolute lock identity/,
+  );
 });
 
-test("RPC Provider preflight excludes ambient auth and uses the Attempt-private agent directory", async () => {
+test("RPC Provider preflight uses canonical OAuth with an Attempt-private settings directory", async () => {
   const root = mkdtempSync(join(tmpdir(), "harness-pi-rpc-preflight-"));
   const sourceAgentDir = join(root, "source-agent");
   const isolatedAgentDir = join(root, "runtime", "pi-agent");
+  const rpcHost = createRpcHost(root);
   mkdirSync(sourceAgentDir);
   writeFileSync(join(sourceAgentDir, "auth.json"), '{"oauth":"must-not-share"}\n', { mode: 0o600 });
   writeFileSync(join(sourceAgentDir, "models.json"), "{}\n", { mode: 0o600 });
   const runner = new RecordingRunner([ok("HERDR_HARNESS_PROVIDER_OK\n")]);
   try {
     await new RuntimePreflightCli(runner, {
-      STATIC_API_KEY: "available",
       PI_CODING_AGENT_DIR: sourceAgentDir,
     }).probeProvider({
       lane: "worker",
       cwd: "/repo",
       piBin: "/opt/pi",
       agentDir: isolatedAgentDir,
+      oauthAgentDir: sourceAgentDir,
+      rpcHost,
       roleArgv: [
         "--no-approve",
         "--skill", "/private/implement",
@@ -87,20 +95,25 @@ test("RPC Provider preflight excludes ambient auth and uses the Attempt-private 
     });
 
     assert.deepEqual(runner.calls, [{
-      command: "/opt/pi",
+      command: process.execPath,
       args: [
+        rpcHost.path,
+        "--pi-executable", "/opt/pi",
+        "--expected-version", "0.84.0",
+        "--oauth-agent-dir", sourceAgentDir,
+        "--private-agent-dir", isolatedAgentDir,
+        "--probe-message", "Reply with exactly HERDR_HARNESS_PROVIDER_OK",
+        "--",
         "--no-session", "--no-approve", "--no-skills", "--no-extensions",
         "--no-context-files", "--no-prompt-templates", "--no-themes", "--no-tools",
         "--provider", "provider-a", "--model", "model-a", "--thinking", "max",
-        "-p", "Reply with exactly HERDR_HARNESS_PROVIDER_OK",
       ],
       cwd: "/repo",
       timeoutMs: 120_000,
-      env: { STATIC_API_KEY: "available", PI_CODING_AGENT_DIR: isolatedAgentDir },
+      env: { PI_CODING_AGENT_DIR: isolatedAgentDir },
     }]);
     assert.equal(readFileSync(join(sourceAgentDir, "auth.json"), "utf8"), '{"oauth":"must-not-share"}\n');
-    assert.equal(lstatSync(join(isolatedAgentDir, "auth.json")).isSymbolicLink(), false);
-    assert.equal(readFileSync(join(isolatedAgentDir, "auth.json"), "utf8").trim(), "{}");
+    assert.equal(existsSync(join(isolatedAgentDir, "auth.json")), false);
     assert.equal(existsSync(join(isolatedAgentDir, "models.json")), false);
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -119,11 +132,14 @@ test("Provider preflight rejects a successful process with no model marker", asy
 
 test("RPC Provider preflight rejects credentials persisted into private auth", async () => {
   const root = mkdtempSync(join(tmpdir(), "harness-pi-rpc-auth-write-"));
+  const sourceAgentDir = join(root, "source-agent");
   const isolatedAgentDir = join(root, "runtime", "pi-agent");
+  const rpcHost = createRpcHost(root);
+  mkdirSync(sourceAgentDir);
+  writeFileSync(join(sourceAgentDir, "auth.json"), "{}\n", { mode: 0o600 });
   const runner = new RecordingRunner([ok("HERDR_HARNESS_PROVIDER_OK\n")], () => {
     const authPath = join(isolatedAgentDir, "auth.json");
-    chmodSync(authPath, 0o600);
-    writeFileSync(authPath, '{"oauth":"persisted"}\n');
+    writeFileSync(authPath, '{"oauth":"persisted"}\n', { mode: 0o600 });
   });
   try {
     await assert.rejects(() => new RuntimePreflightCli(runner, {}).probeProvider({
@@ -131,8 +147,10 @@ test("RPC Provider preflight rejects credentials persisted into private auth", a
       cwd: "/repo",
       piBin: "/opt/pi",
       agentDir: isolatedAgentDir,
-      roleArgv: ["--provider", "provider-a", "--model", "model-a"],
-    }), /isolated auth must remain empty/);
+      oauthAgentDir: sourceAgentDir,
+      rpcHost,
+      roleArgv: ["--provider", "provider-a", "--model", "model-a", "--thinking", "max"],
+    }), /must not contain auth\.json/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -167,4 +185,12 @@ test("Docker preflight refuses remote contexts that would need unbound credentia
 
 function ok(stdout: string): CommandResult {
   return { ok: true, code: 0, stdout, stderr: "", error: null };
+}
+
+function createRpcHost(root: string): ExecutionResource {
+  const directory = join(root, "sdk-host");
+  const path = join(directory, "pi-rpc-sdk-entry.js");
+  mkdirSync(directory);
+  writeFileSync(path, "export {};\n");
+  return { kind: "runtime", path, digest: executionResourceDigest(directory) };
 }

@@ -41,7 +41,7 @@ export type AgentHandle = {
 };
 export type AttemptRuntimeAdapter = "herdr-pi-cli" | "pi-rpc";
 export type ExecutionResource = {
-    kind: "skill" | "extension" | "agent";
+    kind: "skill" | "extension" | "agent" | "runtime";
     path: string;
     digest: string;
 };
@@ -77,6 +77,7 @@ export type ExecutionSnapshot = {
     sessionMode: "ephemeral" | "fresh-persistent";
     retryMode: "runtime-default" | "disabled";
     compactionMode: "runtime-default" | "disabled";
+    credentialMode: "runtime-default" | "canonical-oauth";
     dockerHost: string | null;
     resources: ExecutionResource[];
     /** Missing only on snapshots prepared before explicit context closure. */

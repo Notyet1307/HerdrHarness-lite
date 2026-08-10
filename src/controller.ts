@@ -1,7 +1,7 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { Buffer } from "node:buffer";
 import { basename, dirname, isAbsolute, resolve } from "node:path";
-import { attemptPlanDigest, buildExecutionSnapshot, executionPlanMatches } from "./attempt-plan.js";
+import { attemptPlanDigest, buildExecutionSnapshot, executionPlanMatches, executionResourceDigest } from "./attempt-plan.js";
 import { selectNextTask } from "./eligibility.js";
 import {
   assertJobInvariant,
@@ -17,6 +17,7 @@ import {
   type AttemptResult,
   type CiFailure,
   type EvidenceItem,
+  type ExecutionResource,
   type ExecutionSnapshot,
   type HarnessState,
   type Incident,
@@ -50,6 +51,8 @@ const BUNDLED_WORKER_TOOLS_EXTENSION = resolve(import.meta.dirname, "../../pi/ex
 const BUNDLED_REVIEW_SUBAGENT_CONFIG_EXTENSION = resolve(import.meta.dirname, "../../pi/extensions/reviewer-subagent-config.js");
 const BUNDLED_REVIEWER_TOOLS_EXTENSION = resolve(import.meta.dirname, "../../pi/extensions/reviewer-tools.js");
 const BUNDLED_REVIEW_AXIS_AGENT = resolve(import.meta.dirname, "../../pi/agents/herdr-harness-review-axis.md");
+const PI_RPC_RUNNER = resolve(import.meta.dirname, "pi-rpc-runner.js");
+const PI_RPC_SDK_ENTRY = resolve(import.meta.dirname, "pi-rpc-sdk-entry.js");
 const WORKER_DESCRIPTOR_ENV = "HERDR_HARNESS_WORKER_DESCRIPTOR";
 const REVIEW_DESCRIPTOR_ENV = "HERDR_HARNESS_REVIEW_DESCRIPTOR";
 const PI_AGENT_DIR_ENV = "PI_CODING_AGENT_DIR";
@@ -394,7 +397,13 @@ export class HarnessController {
         retryMode: lane === "worker" && this.deps.config.workerRuntime === "pi-rpc" ? "disabled" : "runtime-default",
         compactionMode: lane === "worker" && this.deps.config.workerRuntime === "pi-rpc" ? "disabled" : "runtime-default",
         dockerHost,
-        extraResources: lane === "reviewer" ? [{ kind: "agent", path: BUNDLED_REVIEW_AXIS_AGENT }] : [],
+        extraResources: [
+          ...(lane === "reviewer" ? [{ kind: "agent" as const, path: BUNDLED_REVIEW_AXIS_AGENT }] : []),
+          ...(lane === "worker" && this.deps.config.workerRuntime === "pi-rpc" ? [
+            { kind: "runtime" as const, path: PI_RPC_RUNNER },
+            { kind: "runtime" as const, path: PI_RPC_SDK_ENTRY },
+          ] : []),
+        ],
       });
     } catch (error) {
       return result(false, "preflight_failed", job.id, message(error));
@@ -686,13 +695,30 @@ export class HarnessController {
       const rpcAgentDir = executionSnapshot?.adapter === "pi-rpc"
         ? piRpcAgentDir(executionSnapshot)
         : undefined;
+      const rpcHost = executionSnapshot?.resources.find((resource) => resource.kind === "runtime" && basename(resource.path) === "pi-rpc-sdk-entry.js");
+      const preclaimRpc = !executionSnapshot && this.deps.config.workerRuntime === "pi-rpc"
+        ? {
+            runtime: await this.deps.preflight.inspectPi({
+              cwd: this.deps.config.localPath,
+              piBin: this.deps.config.preflight?.piBin ?? "pi",
+            }),
+            oauthAgentDir: (await this.deps.preflight.assertNoAmbientSystemPrompt({ cwd: this.deps.config.localPath })).agentDir,
+            agentDir: resolve(this.deps.config.stateDir, "preflight", "pi-rpc-agent"),
+            rpcHost: runtimeResource(PI_RPC_SDK_ENTRY),
+          }
+        : null;
       for (const lane of lanes) {
+        const admission = lane === "worker" ? preclaimRpc : null;
         await this.deps.preflight.probeProvider({
           lane,
           cwd: this.deps.config.localPath,
           roleArgv: executionSnapshot?.argv ?? (lane === "worker" ? this.deps.config.workerArgv : this.deps.config.reviewerArgv),
-          piBin: executionSnapshot?.executable ?? this.deps.config.preflight?.piBin ?? "pi",
-          ...(rpcAgentDir ? { agentDir: rpcAgentDir } : {}),
+          piBin: executionSnapshot?.executable ?? admission?.runtime.executable ?? this.deps.config.preflight?.piBin ?? "pi",
+          ...(rpcAgentDir || admission ? { agentDir: rpcAgentDir ?? admission!.agentDir } : {}),
+          ...(rpcAgentDir && executionSnapshot?.context ? { oauthAgentDir: executionSnapshot.context.agentDir } : {}),
+          ...(admission ? { oauthAgentDir: admission.oauthAgentDir } : {}),
+          ...(rpcAgentDir && rpcHost ? { rpcHost } : {}),
+          ...(admission ? { rpcHost: admission.rpcHost } : {}),
         });
       }
       return { ok: true, dockerHost };
@@ -731,8 +757,8 @@ export class HarnessController {
         dockerHost: expected.dockerHost,
         context: expected.context,
         extraResources: expected.resources
-          .filter((resource) => resource.kind === "agent")
-          .map((resource) => ({ kind: "agent" as const, path: resource.path })),
+          .filter((resource) => resource.kind === "agent" || resource.kind === "runtime")
+          .map((resource) => ({ kind: resource.kind as "agent" | "runtime", path: resource.path })),
       });
       if (digest(observed) === digest(expected)) return null;
     } catch (error) {
@@ -1604,6 +1630,11 @@ export class HarnessController {
     assertJobInvariant(next);
     await this.deps.store.save({ ...state, activeJob: next }, current.revision);
   }
+}
+
+function runtimeResource(path: string): ExecutionResource {
+  const realPath = realpathSync(path);
+  return { kind: "runtime", path: realPath, digest: executionResourceDigest(dirname(realPath)) };
 }
 
 function settleAttempt(attempt: Attempt, resultValue: AttemptResult | null, now: string): Attempt {

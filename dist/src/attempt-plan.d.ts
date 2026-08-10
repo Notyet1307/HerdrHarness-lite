@@ -9,7 +9,7 @@ export declare function buildExecutionSnapshot(input: {
     dockerHost?: string | null;
     context?: ExecutionContext;
     extraResources?: Array<{
-        kind: "agent";
+        kind: "agent" | "runtime";
         path: string;
     }>;
 }): ExecutionSnapshot;

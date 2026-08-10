@@ -4,7 +4,7 @@
 
 ## Task 1 — 不可变 ExecutionSnapshot
 
-**主要结果：** `attempt_prepared` 一次性绑定预检到的 Pi executable/version、完整 role argv、配置的 provider/model selector、thinking、tools、session/retry/compaction 模式、extension 本地模块闭包、Docker host 及 `planDigest`；后续生命周期不再读取可变配置启动同一 Attempt。RPC runner 会直接执行该精确路径，并要求显式 provider/model 后从 `get_state` 精确核对；Herdr 交互路径仍只能证明预检身份与 selector 可用，不能证明 Herdr 内部最终解析出的 binary/effective model。
+**主要结果：** `attempt_prepared` 一次性绑定预检到的 Pi executable/version、完整 role argv、配置的 provider/model selector、thinking、tools、session/retry/compaction/credential 模式、extension 本地模块闭包、Docker host 及 `planDigest`；后续生命周期不再读取可变配置启动同一 Attempt。RPC runner 从该 executable 的同一安装闭包加载公开 SDK、核验版本，并要求显式 provider/model 后从 `get_state` 精确核对；Herdr 交互路径仍只能证明预检身份与 selector 可用，不能证明 Herdr 内部最终解析出的 binary/effective model。
 
 **主要验收入口：** Controller 定向测试证明配置或 runtime 漂移会 fail closed，重启后仍按原快照执行。
 
@@ -44,12 +44,13 @@
 验收断言：
 
 1. RPC 子进程不归短命 Controller 所有，由 Herdr 持久 pane 托管。
-2. Controller 与 runner 通过 Attempt 私有、原子落盘的 command/state spool 重连；Pi 的可写 settings 也隔离在 Attempt 内，不挂载或复制全局 auth/models，因此 canary 只允许内建模型注册表并必须通过环境变量完成私有 Provider 预检。
+2. Controller 与 runner 通过 Attempt 私有、原子落盘的 command/state spool 重连；SDK host 只共享 canonical subscription OAuth 的原生 pathname lock，settings/session 保持内存化，且不挂载或复制全局 auth/models。
 3. prompt 只有一个持久 dispatch intent；不确定结果只观察，不重放。
 4. runner 只接受已核验的 Pi 0.84.0，启动后立即关闭 auto-retry 与 auto-compaction，再接受 prompt。
 5. Pi event 只用于运行观察；完成仍由 Harness result 与 Git 验证决定。
 6. Worker CLI 路径保留为第二个真实 adapter，并与 RPC 共用同一 ExecutionSnapshot 合约。
-7. Reviewer 继续使用现有 CLI 路径。
+7. SDK host 只把 canonical subscription OAuth 交给 `ModelRuntime`，继续用 Pi 原生 pathname lock 完成 refresh；settings/session 内存化，Attempt 私有目录禁止出现凭据或模型配置文件。
+8. Reviewer 继续使用现有 CLI 路径。
 
 ## 明确延后 — Reviewer runtime 迁移
 

@@ -1,8 +1,9 @@
 import { SyncCommandRunner } from "./command.js";
 import { accessSync, constants, existsSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import { delimiter, isAbsolute, join, resolve } from "node:path";
-import { preparePiRpcAgentDirAt } from "../pi-rpc-spool.js";
+import { basename, delimiter, dirname, isAbsolute, join, resolve } from "node:path";
+import { preparePiRpcAgentDirAt, SUPPORTED_PI_RPC_VERSION } from "../pi-rpc-spool.js";
+import { executionResourceDigest } from "../attempt-plan.js";
 const PROVIDER_MARKER = "HERDR_HARNESS_PROVIDER_OK";
 const PROVIDER_TIMEOUT_MS = 120_000;
 const DOCKER_TIMEOUT_MS = 15_000;
@@ -22,8 +23,14 @@ export class RuntimePreflightCli {
     }
     async assertNoAmbientSystemPrompt(input) {
         const configured = this.environment.PI_CODING_AGENT_DIR?.trim();
-        const unresolvedAgentDir = configured || join(homedir(), ".pi", "agent");
-        const agentDir = existsSync(unresolvedAgentDir) ? realpathSync(unresolvedAgentDir) : resolve(unresolvedAgentDir);
+        const unresolvedAgentDir = configured === "~"
+            ? homedir()
+            : configured?.startsWith("~/")
+                ? join(homedir(), configured.slice(2))
+                : configured || join(homedir(), ".pi", "agent");
+        if (!isAbsolute(unresolvedAgentDir))
+            throw new Error("PI_CODING_AGENT_DIR must resolve to an absolute lock identity");
+        const agentDir = resolve(unresolvedAgentDir);
         for (const path of [join(agentDir, "SYSTEM.md"), join(resolve(input.cwd), ".pi", "SYSTEM.md")]) {
             if (existsSync(path))
                 throw new Error(`ambient Pi system prompt is not allowed: ${path}`);
@@ -34,7 +41,13 @@ export class RuntimePreflightCli {
         const agentDir = input.agentDir === undefined
             ? undefined
             : preparePiRpcAgentDirAt(input.agentDir);
-        const result = this.runner.run(input.piBin, [
+        if (agentDir && !input.oauthAgentDir)
+            throw new Error("RPC Provider probe requires the canonical OAuth agent directory");
+        if (agentDir && (input.rpcHost?.kind !== "runtime"
+            || basename(input.rpcHost.path) !== "pi-rpc-sdk-entry.js"
+            || executionResourceDigest(dirname(input.rpcHost.path)) !== input.rpcHost.digest))
+            throw new Error("RPC Provider probe requires the bound Pi SDK host");
+        const probeArgs = [
             "--no-session",
             "--no-approve",
             "--no-skills",
@@ -44,6 +57,18 @@ export class RuntimePreflightCli {
             "--no-themes",
             "--no-tools",
             ...runtimeSelectors(input.roleArgv),
+        ];
+        const result = this.runner.run(agentDir ? process.execPath : input.piBin, agentDir ? [
+            input.rpcHost.path,
+            "--pi-executable", input.piBin,
+            "--expected-version", SUPPORTED_PI_RPC_VERSION,
+            "--oauth-agent-dir", input.oauthAgentDir,
+            "--private-agent-dir", agentDir,
+            "--probe-message", `Reply with exactly ${PROVIDER_MARKER}`,
+            "--",
+            ...probeArgs,
+        ] : [
+            ...probeArgs,
             "-p",
             `Reply with exactly ${PROVIDER_MARKER}`,
         ], {

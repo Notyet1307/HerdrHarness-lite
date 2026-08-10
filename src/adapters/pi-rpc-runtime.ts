@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { digest, type AgentHandle, type Attempt, type AttemptResult } from "../model.js";
+import { executionResourceDigest } from "../attempt-plan.js";
 import type { AttemptRuntimePort, HerdrPort } from "../ports.js";
 import {
   ensurePrivateDirectory,
@@ -33,19 +34,17 @@ type OwnerReceipt = RuntimeReceipt & { runnerPid: number };
 type ReadyReceipt = RuntimeReceipt & {
   autoRetryDisableAccepted: true;
   autoCompactionEnabled: false;
-  ambientAuthExcluded: true;
+  credentialMode: "canonical-oauth";
   isolatedAgentDir: string;
 };
 
 export class PiRpcRuntime implements AttemptRuntimePort {
-  private readonly runnerPath: string;
-
-  constructor(private readonly host: Pick<HerdrPort, "runInPane">, runnerPath?: string) {
-    this.runnerPath = runnerPath ?? resolve(import.meta.dirname, "../pi-rpc-runner.js");
-  }
+  constructor(private readonly host: Pick<HerdrPort, "runInPane">) {}
 
   async startAgent(input: { handle: AgentHandle; attempt: Attempt; cwd: string; argv: string[] }): Promise<void> {
     const plan = this.plan(input);
+    const runnerPath = boundRuntimeResource(plan, "pi-rpc-runner.js");
+    const sdkEntryPath = boundRuntimeResource(plan, "pi-rpc-sdk-entry.js");
     ensurePrivateDirectory(plan.runtimeRoot);
     const planPath = spoolPath(plan.runtimeRoot, "plan.json");
     const existingPlan = readJsonIfExists<PiRpcPlan>(planPath);
@@ -67,7 +66,7 @@ export class PiRpcRuntime implements AttemptRuntimePort {
       await this.host.runInPane({
         handle: input.handle,
         command: process.execPath,
-        argv: [this.runnerPath, "--plan", planPath],
+        argv: [runnerPath, "--sdk-entry", sdkEntryPath, "--plan", planPath],
       });
     }
     const observed = waitForReceipt(plan, "ready.json", READY_TIMEOUT_MS) as ReadyReceipt;
@@ -257,9 +256,19 @@ function assertRuntimePolicy(receipt: ReadyReceipt, plan: PiRpcPlan): void {
   if (
     receipt.autoRetryDisableAccepted !== true
     || receipt.autoCompactionEnabled !== false
-    || receipt.ambientAuthExcluded !== true
+    || receipt.credentialMode !== "canonical-oauth"
     || receipt.isolatedAgentDir !== join(plan.runtimeRoot, "pi-agent")
   ) {
-    throw new Error("Pi RPC ready receipt did not prove retry, compaction, and ambient auth isolation");
+    throw new Error("Pi RPC ready receipt did not prove retry, compaction, and canonical OAuth isolation");
   }
+}
+
+function boundRuntimeResource(plan: PiRpcPlan, name: string): string {
+  const matches = plan.snapshot.resources.filter((resource) => resource.kind === "runtime" && basename(resource.path) === name);
+  if (matches.length !== 1) throw new Error(`Pi RPC snapshot must bind exactly one ${name}`);
+  const resource = matches[0]!;
+  if (executionResourceDigest(dirname(resource.path)) !== resource.digest) {
+    throw new Error(`Pi RPC runtime resource changed after preparation: ${name}`);
+  }
+  return resource.path;
 }

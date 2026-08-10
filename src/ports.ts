@@ -55,6 +55,8 @@ export interface RuntimePreflightPort {
     roleArgv: string[];
     piBin: string;
     agentDir?: string;
+    oauthAgentDir?: string;
+    rpcHost?: ExecutionResource;
   }): Promise<void>;
   probeDocker(input: { cwd: string }): Promise<{ host: string }>;
 }
