@@ -42,6 +42,43 @@ Harness Core is the only workflow authority. The Controller performs automatic t
 | [Harness Telegram Bridge](https://github.com/Notyet1307/harness-telegram-bridge) | Sends cards, polls `/harness` and callbacks, and invokes existing status/approval CLIs | Transport only; stores Telegram offset and never edits the ledger directly |
 | Telegram user | Reads status and accepts or declines an exact approval challenge | Human intent is still revalidated by the Harness policy and ledger CAS |
 
+### Attempt contracts after the refactor
+
+This refactor does not add a second orchestrator. The Controller, ledger, Git verification, and Reviewer gates remain the workflow truth. The change is that every Worker/Reviewer Attempt now consists of three explicit, verifiable data contracts:
+
+| Contract | Bound data | Control gained |
+| --- | --- | --- |
+| `ExecutionSnapshot` | Runtime adapter, Pi executable/exact qualified version, complete argv, resource/context digests, credential mode, Docker host, and result channel | A restarted Controller consumes the same plan; configuration, version, or resource drift fails closed before a new side effect |
+| `AttemptContextEnvelope` | Attempt identity, trusted policy digests, untrusted issue/handoff/evidence, exact Git target, runtime view, and writeback contract | Each role receives only the context needed for this Attempt; global or candidate instructions cannot gain authority through ambient discovery |
+| `TypedHandoff` | Reviewer findings or approved recovery/CI rework, bound to source revision/digests and the next lane/base/HEAD | Continuation is no longer a free-form brief; stale, wrong-lane, or wrong-HEAD handoffs cannot be consumed |
+
+Data for one Attempt flows as follows:
+
+```text
+current config + live preflight
+        -> ExecutionSnapshot
+trusted baseSha root policy + untrusted issue / evidence / TypedHandoff
+        -> role-scoped AttemptContextEnvelope
+Snapshot + Envelope + rendered prompt
+        -> planDigest
+        -> AttemptRuntimePort
+             |-> herdr-pi-cli -> interactive Pi
+             `-> pi-rpc -> foreground runner in Herdr pane -> Pi SDK host
+        -> atomic durable result
+        -> Harness result / Git / Reviewer gates
+        -> ledger transition
+```
+
+On the RPC path the Controller never owns Pi stdin/stdout. The pane runner owns the pipes, while the Controller writes one intent and reads atomic receipts. A Controller restart therefore observes the same Attempt instead of replaying its prompt. Credential contents never enter the envelope, prompt, or spool: Worker RPC lets Pi share subscription OAuth through the canonical pathname and native lock; Reviewer RPC binds the canonical `models.json` digest and parses only the supported custom provider in memory.
+
+| Lane | `herdr-pi-cli` | `pi-rpc` | Unchanged completion gate |
+| --- | --- | --- | --- |
+| Worker | Herdr interactive agent | Durable runner + SDK host + canonical subscription OAuth | `worker_submit` durable result + Git provenance |
+| Top-level Reviewer | Herdr interactive agent | Durable runner + SDK host + digest-bound custom model config | `review_submit` + exact HEAD + isolated validation |
+| Reviewer axis children | Started in the foreground by the top-level Reviewer | Still use the immutable child wrapper and are not migrated to RPC | Both Standards and Spec axes must return substantive results |
+
+Pi `agent_settled`, a runner terminal, pane `done`, and child completion are runtime facts only. They never bypass the durable result, Git fixed point, Reviewer decision, or GitHub merge. See **Attempt execution plan and context trust** for the full trust boundary.
+
 ### Notifications and Telegram operations
 
 The recommended deployment runs three independent long-lived processes: Controller, Observer, and the standalone Bridge. Notification failure does not stop the Controller; Controller failure is reported by Observer heartbeat monitoring.
@@ -153,7 +190,7 @@ Each successful `tick` writes at most one durable transition. Continue from its 
 
 For any other `ok:false`, run `status` first and correct the exact condition in the message. Repeating a command does not grant recovery authority.
 
-Interactive dispatch calls Herdr `agent prompt --wait`. An RPC Worker persists one `dispatch.json`; its pane runner sends the prompt once and waits for a terminal receipt. Either path may remain attached for a long run. Silence does not mean the prompt was lost and never authorizes a concurrent replay.
+Interactive dispatch calls Herdr `agent prompt --wait`. An RPC Attempt persists one `dispatch.json`; its pane runner sends the prompt once and waits for a terminal receipt. Either path may remain attached for a long run. Silence does not mean the prompt was lost and never authorizes a concurrent replay.
 
 A manual step is complete when the ledger advanced exactly once or is intentionally waiting on an agent/external condition, with no concurrent Controller.
 
@@ -176,7 +213,7 @@ herdr --session SESSION_NAME agent read AGENT_NAME \
 
 The Pi footer shows the effective `(provider) model • thinking`. Configuration expresses intent; the live footer and a real probe establish the selected runtime.
 
-An RPC Worker has no Herdr interactive-agent record. Inspect its ledger ExecutionSnapshot and the Attempt's `runtime/ready.json`, `accepted.json`, `terminal.json`, and `terminated.json` receipts. Never try to reconnect or recreate the runner-owned stdin/stdout pipes.
+An RPC Worker/Reviewer has no Herdr interactive-agent record. Inspect its ledger ExecutionSnapshot and the Attempt's `runtime/ready.json`, `accepted.json`, `terminal.json`, and `terminated.json` receipts. Never try to reconnect or recreate the runner-owned stdin/stdout pipes.
 
 Plain `status` returns the complete ledger. `status --operator` returns the stable operator projection: current mode/phase and only the actions that are valid for the exact revision, incident, analysis, Attempt, and HEAD bindings.
 
@@ -192,7 +229,7 @@ node dist/src/cli.js run \
   --poll-ms 15000
 ```
 
-Use `--max-cycles N` for a bounded trial. Without it, `run` is a foreground long-running process; this repository does not install a daemon.
+Use `--max-cycles N` for a bounded trial. Without it, `run` is a foreground long-running process; this repository does not install a daemon. Closing the terminal that owns the process stops the Controller, so unattended deployments must use a service manager such as launchd or systemd. A durable Herdr pane does not replace the Controller service.
 
 `run` and `tick` use the same Controller. A later cycle claims another eligible issue only after GitHub reports the PR merged and the job is archived. A blocked job holds the single active slot; `run` cannot bypass an Analyst hold or human approval.
 

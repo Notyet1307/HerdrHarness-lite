@@ -42,6 +42,43 @@ Harness Core 是唯一的工作流权威。Controller 负责自动迁移；opera
 | [Harness Telegram Bridge](https://github.com/Notyet1307/harness-telegram-bridge) | 发送卡片，轮询 `/harness` 与 callback，调用已有 status/approval CLI | 只负责传输；仅保存 Telegram offset，不直接编辑 ledger |
 | Telegram 用户 | 查看状态，接受或拒绝精确审批 challenge | 人类意图仍由 Harness policy 与 ledger CAS 重新校验 |
 
+### 重构后的 Attempt 契约
+
+本次重构没有增加第二套编排器：Controller、ledger、Git 验证与 Reviewer gate 仍是原来的工作流真值。变化是把每个 Worker/Reviewer Attempt 拆成三份显式、可校验的数据契约：
+
+| 契约 | 固定的数据 | 获得的控制能力 |
+| --- | --- | --- |
+| `ExecutionSnapshot` | runtime adapter、Pi executable/精确已验收版本、完整 argv、resource/context digest、credential mode、Docker host 与 result channel | Controller 重启后仍消费同一份计划；配置、版本或资源漂移在新副作用前 fail closed |
+| `AttemptContextEnvelope` | Attempt 身份、可信 policy digest、不可信 Issue/handoff/evidence、精确 Git 目标、runtime view 与 writeback contract | 每个角色只获得本轮必需上下文；全局或 candidate 指令不能通过 ambient discovery 升格为权威 |
+| `TypedHandoff` | Reviewer findings、获批 recovery 或 CI rework 的来源 revision/digest 与下一 lane/base/HEAD | 不再用自由文本续跑；过期、错 lane 或错 HEAD 的 handoff 不能被消费 |
+
+单个 Attempt 的数据流是：
+
+```text
+当前配置 + 真实 preflight
+        -> ExecutionSnapshot
+可信 baseSha 根 policy + 不可信 Issue / evidence / TypedHandoff
+        -> 按角色裁剪的 AttemptContextEnvelope
+Snapshot + Envelope + 渲染后 prompt
+        -> planDigest
+        -> AttemptRuntimePort
+             |-> herdr-pi-cli -> interactive Pi
+             `-> pi-rpc -> Herdr pane 前台 runner -> Pi SDK host
+        -> 原子 durable result
+        -> Harness result / Git / Reviewer gate
+        -> ledger 状态迁移
+```
+
+RPC 路径中 Controller 不持有 Pi stdin/stdout；pane 内 runner 独占管道，Controller 只写入唯一 intent 并读取原子 receipt。因此 Controller 重启后只会继续观察同一 Attempt，不会重放 prompt。凭据内容不进入 Envelope、prompt 或 spool：Worker RPC 让 Pi 通过 canonical pathname 共用订阅 OAuth 的原生锁；Reviewer RPC 绑定 canonical `models.json` 的 digest，只在内存中解析当前支持的 custom provider。
+
+| Lane | `herdr-pi-cli` | `pi-rpc` | 不变的完成 gate |
+| --- | --- | --- | --- |
+| Worker | Herdr interactive agent | durable runner + SDK host + canonical subscription OAuth | `worker_submit` durable result + Git provenance |
+| 顶层 Reviewer | Herdr interactive agent | durable runner + SDK host + digest-bound custom model config | `review_submit` + exact HEAD + 隔离 validation |
+| Reviewer 双轴 child | 由顶层 Reviewer 前台启动 | 仍使用不可变 child wrapper，不迁移到 RPC | Standards 与 Spec 两轴都必须有实质结果 |
+
+Pi `agent_settled`、runner terminal、pane `done` 和 child completed 都只是运行时事实。它们不能跳过 durable result、Git fixed point、Reviewer 结论或 GitHub merge。详细信任边界见“Attempt 执行计划与上下文信任”。
+
 ### 通知与 Telegram 操作
 
 推荐部署包含三个相互独立的常驻进程：Controller、Observer 和独立 Bridge。通知故障不会停止 Controller；Controller 故障则由 Observer 的 heartbeat 监测报告。
@@ -153,7 +190,7 @@ node dist/src/cli.js tick --config /ABSOLUTE/PATH/harness.config.json
 
 其他 `ok:false` 都先运行 `status` 并修复消息中的具体条件。重复同一命令不会自动授予恢复权限。
 
-Interactive dispatch 会调用 Herdr `agent prompt --wait`；RPC Worker 则先持久化唯一 `dispatch.json`，由 pane 内 runner 发送一次 prompt，并等待 terminal receipt。两者都可能长时间不返回；命令没有输出不等于 prompt 丢失，也不得并发重发。
+Interactive dispatch 会调用 Herdr `agent prompt --wait`；RPC Attempt 则先持久化唯一 `dispatch.json`，由 pane 内 runner 发送一次 prompt，并等待 terminal receipt。两者都可能长时间不返回；命令没有输出不等于 prompt 丢失，也不得并发重发。
 
 单步完成条件：账本只推进了一次，或明确停在等待外部条件/agent 的状态；没有并行 Controller。
 
@@ -176,7 +213,7 @@ herdr --session SESSION_NAME agent read AGENT_NAME \
 
 Pi 底部显示实际 `(provider) model • thinking`。配置文件只能表达意图；运行时 footer 和真实探测才证明实际选择。
 
-RPC Worker 没有 Herdr interactive agent 记录；读取账本中的 ExecutionSnapshot，以及对应 attempt `runtime/ready.json`、`accepted.json`、`terminal.json`、`terminated.json`。不要尝试连接或重建 runner 持有的 stdin/stdout。
+RPC Worker/Reviewer 没有 Herdr interactive agent 记录；读取账本中的 ExecutionSnapshot，以及对应 attempt `runtime/ready.json`、`accepted.json`、`terminal.json`、`terminated.json`。不要尝试连接或重建 runner 持有的 stdin/stdout。
 
 普通 `status` 返回完整账本；`status --operator` 返回稳定的操作投影：当前 mode/phase，以及只对精确 revision、incident、analysis、Attempt 和 HEAD 绑定有效的操作。
 
@@ -192,7 +229,7 @@ node dist/src/cli.js run \
   --poll-ms 15000
 ```
 
-可用 `--max-cycles N` 做有界试跑。不设置时它是前台常驻进程；仓库不会自行安装 daemon。
+可用 `--max-cycles N` 做有界试跑。不设置时它是前台常驻进程；仓库不会自行安装 daemon。关闭承载该进程的终端会停止 Controller，无人值守部署必须由 launchd/systemd 等 service manager 管理；Herdr pane 持久化不会替代 Controller service。
 
 `run` 与 `tick` 使用同一个状态机。PR merge 被 GitHub 确认并归档后，下一轮才会领取下一个符合条件的 Issue。Blocked job 会占住唯一 active slot，`run` 不能跳过 Analyst hold 或人工审批。
 
