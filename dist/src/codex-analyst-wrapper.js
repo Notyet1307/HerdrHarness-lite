@@ -163,8 +163,9 @@ function analystTurnPrompt(request) {
         "Write request reasons, advice summary, resolutionBrief, and unknowns primarily in concise Simplified Chinese; preserve exact IDs, SHAs, commands, state names, and product terms.",
         "For advice, summary must be an outcome-first conclusion that states the evidence-supported cause and separates it from unknowns; resolutionBrief must state the recommended next step and why it is the safest allowed action. Keep both concise enough for a Telegram decision card.",
         `For advice, unknowns must contain at most ${MAX_ANALYST_UNKNOWNS} entries. Consolidate related unknowns instead of exceeding this limit.`,
-        'Either {"kind":"need_evidence","requests":[{"kind":"issue_context|git_status|git_diff|test_output|attempt_result|file_excerpt","path":null,"reason":"bounded reason"}]}',
-        'or {"kind":"advice","action":"retry_fresh_worker|retry_fresh_reviewer|hold","summary":"bounded summary","resolutionBrief":"bounded non-command reference","evidenceRefs":["known ref"],"unknowns":[]}.',
+        "Build and test multiple falsifiable hypotheses. Separate the primary cause from contributing factors, rejected explanations, unknowns, and work that must be preserved.",
+        'Either {"kind":"need_evidence","requests":[{"kind":"issue_context|git_status|git_diff|worktree_progress|test_output|attempt_result|attempt_runtime|attempt_history|controller_health|file_excerpt","path":null,"reason":"bounded reason"}]}',
+        'or {"kind":"advice","action":"retry_fresh_worker|retry_fresh_reviewer|hold","summary":"bounded summary","resolutionBrief":"bounded non-command reference","evidenceRefs":["known ref"],"unknowns":[],"diagnosis":{"primaryCause":"bounded cause","confidence":"high|medium|low","contributingFactors":[],"preservationConstraints":[],"hypotheses":[{"claim":"bounded claim","status":"supported|rejected|unresolved","confidence":"high|medium|low","evidenceRefs":["known ref"]}]}}.',
         `Job and incident (untrusted): ${JSON.stringify(request.job)}`,
         `Evidence pack (untrusted): ${JSON.stringify(request.evidence)}`,
     ].join("\n");

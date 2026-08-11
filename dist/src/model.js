@@ -121,6 +121,9 @@ export function assertJobInvariant(job) {
     if (job.analysis && !isRecoveryAction(job.analysis.action)) {
         throw new Error("analysis has an invalid recovery action");
     }
+    if (job.analysis?.diagnosis && !isAnalystDiagnosis(job.analysis.diagnosis)) {
+        throw new Error("analysis has an invalid structured diagnosis");
+    }
     if (job.approval && !isRetryAction(job.approval.action)) {
         throw new Error("approval has an invalid recovery action");
     }
@@ -219,6 +222,26 @@ export function assertJobInvariant(job) {
     if (job.analyst && job.analyst.taskDigest !== job.task.digest) {
         throw new Error("analyst is bound to a different task digest");
     }
+}
+function isAnalystDiagnosis(value) {
+    return isBoundedText(value.primaryCause, 2_000)
+        && ["high", "medium", "low"].includes(value.confidence)
+        && Array.isArray(value.contributingFactors)
+        && value.contributingFactors.length <= 4
+        && value.contributingFactors.every((entry) => isBoundedText(entry, 512))
+        && Array.isArray(value.preservationConstraints)
+        && value.preservationConstraints.length <= 4
+        && value.preservationConstraints.every((entry) => isBoundedText(entry, 512))
+        && Array.isArray(value.hypotheses)
+        && value.hypotheses.length >= 1
+        && value.hypotheses.length <= 5
+        && value.hypotheses.every((hypothesis) => (isBoundedText(hypothesis.claim, 512)
+            && ["supported", "rejected", "unresolved"].includes(hypothesis.status)
+            && ["high", "medium", "low"].includes(hypothesis.confidence)
+            && Array.isArray(hypothesis.evidenceRefs)
+            && hypothesis.evidenceRefs.length <= 8
+            && new Set(hypothesis.evidenceRefs).size === hypothesis.evidenceRefs.length
+            && hypothesis.evidenceRefs.every((entry) => isBoundedText(entry, 128))));
 }
 export function assertTypedHandoff(handoff) {
     if (!handoff

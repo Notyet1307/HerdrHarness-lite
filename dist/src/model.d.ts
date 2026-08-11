@@ -245,7 +245,7 @@ export type AnalystSession = {
     startedAt: string;
     taskDigest: string;
 };
-export type EvidenceRequestKind = "issue_context" | "git_status" | "git_diff" | "test_output" | "attempt_result" | "file_excerpt";
+export type EvidenceRequestKind = "issue_context" | "git_status" | "git_diff" | "worktree_progress" | "test_output" | "attempt_result" | "attempt_runtime" | "attempt_history" | "controller_health" | "file_excerpt";
 export type EvidenceRequest = {
     kind: EvidenceRequestKind;
     path: string | null;
@@ -297,7 +297,21 @@ export type AnalystAdvice = {
     resolutionBrief: string;
     evidenceRefs: string[];
     unknowns: string[];
+    diagnosis?: AnalystDiagnosis;
     createdAt: string;
+};
+export type AnalystHypothesis = {
+    claim: string;
+    status: "supported" | "rejected" | "unresolved";
+    confidence: "high" | "medium" | "low";
+    evidenceRefs: string[];
+};
+export type AnalystDiagnosis = {
+    primaryCause: string;
+    confidence: "high" | "medium" | "low";
+    contributingFactors: string[];
+    preservationConstraints: string[];
+    hypotheses: AnalystHypothesis[];
 };
 export type AnalystTurn = {
     kind: "need_evidence";
@@ -309,6 +323,7 @@ export type AnalystTurn = {
     resolutionBrief: string;
     evidenceRefs: string[];
     unknowns: string[];
+    diagnosis?: AnalystDiagnosis;
 };
 export type Approval = {
     id: string;

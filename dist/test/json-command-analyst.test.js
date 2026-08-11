@@ -71,6 +71,48 @@ test("JSON Analyst protocol accepts a bounded fresh Reviewer retry", () => {
         unknowns: [],
     });
 });
+test("JSON Analyst protocol accepts structured hypotheses and advanced evidence", () => {
+    const evidence = parseAnalystTurn({
+        kind: "need_evidence",
+        requests: [
+            { kind: "worktree_progress", path: null, reason: "Separate staged and unstaged work." },
+            { kind: "attempt_runtime", path: null, reason: "Inspect bounded runtime receipts." },
+            { kind: "controller_health", path: null, reason: "Reject a Controller crash hypothesis." },
+        ],
+    });
+    assert.equal(evidence.kind, "need_evidence");
+    const advice = parseAnalystTurn({
+        kind: "advice",
+        action: "retry_fresh_worker",
+        summary: "Provider failed after useful work was produced.",
+        resolutionBrief: "Preserve the dirty worktree and start one fresh Worker.",
+        evidenceRefs: ["runtime-diagnostic", "worktree-progress"],
+        unknowns: ["The exact upstream network failure is not persisted."],
+        diagnosis: {
+            primaryCause: "A retryable Provider network failure ended the Worker before durable submission.",
+            confidence: "high",
+            contributingFactors: ["The attempt had entered tool error recovery."],
+            preservationConstraints: ["Keep staged and unstaged worktree changes."],
+            hypotheses: [
+                {
+                    claim: "The Controller crashed.",
+                    status: "rejected",
+                    confidence: "high",
+                    evidenceRefs: ["controller-health"],
+                },
+                {
+                    claim: "The Provider connection failed.",
+                    status: "supported",
+                    confidence: "high",
+                    evidenceRefs: ["runtime-diagnostic"],
+                },
+            ],
+        },
+    });
+    if (advice.kind !== "advice")
+        throw new Error("expected advice");
+    assert.equal(advice.diagnosis?.hypotheses[0]?.status, "rejected");
+});
 test("JSON Analyst protocol rejects malformed evidence paths", () => {
     assert.throws(() => parseAnalystTurn({
         kind: "need_evidence",

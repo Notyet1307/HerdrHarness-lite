@@ -98,11 +98,22 @@ Single-lane commands:
 /harness
 /harness status
 /harness incident
-/harness approve
-/harness approve CHALLENGE
+/harness why
+/harness evidence
+/harness actions
+/harness retry
+/harness retry CHALLENGE
+/harness reassess bounded reason
+/harness resolve bounded maintainer decision
+/harness cancel bounded cancellation reason
 ```
 
-For multiple lanes, use `/harness <lane> [status|incident|approve [challenge]]`. Inline approval buttons call the same exact-bound approval CLI. **Keep blocked** consumes that challenge without creating recovery approval.
+For multiple lanes, put the lane after `/harness`. The legacy `/harness approve`
+form remains an alias for `retry`. Every mutating command first creates a
+ten-minute challenge; confirmation calls the Core-owned `decide --option`
+interface and revalidates the exact revision, incident, analysis, Attempt, and
+HEAD. Inline buttons use the same challenge. Abandoning a challenge changes no
+ledger state.
 
 Transport choices:
 

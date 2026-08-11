@@ -1485,7 +1485,8 @@ export class HarnessController {
         action = "hold";
       }
       const knownRefs = new Set(pack.items.map((item) => item.ref));
-      if (output.evidenceRefs.some((ref) => !knownRefs.has(ref))) {
+      const diagnosisRefs = output.diagnosis?.hypotheses.flatMap((hypothesis) => hypothesis.evidenceRefs) ?? [];
+      if ([...output.evidenceRefs, ...diagnosisRefs].some((ref) => !knownRefs.has(ref))) {
         unknowns.push("Analyst cited evidence outside the bounded pack");
         action = "hold";
       }
@@ -1499,6 +1500,17 @@ export class HarnessController {
         resolutionBrief: action === "hold" ? "" : output.resolutionBrief,
         evidenceRefs: output.evidenceRefs.filter((ref) => knownRefs.has(ref)),
         unknowns,
+        ...(output.diagnosis
+          ? {
+              diagnosis: {
+                ...output.diagnosis,
+                hypotheses: output.diagnosis.hypotheses.map((hypothesis) => ({
+                  ...hypothesis,
+                  evidenceRefs: hypothesis.evidenceRefs.filter((ref) => knownRefs.has(ref)),
+                })),
+              },
+            }
+          : {}),
         createdAt,
       };
     }

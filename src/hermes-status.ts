@@ -36,8 +36,8 @@ type HarnessStatusConfig = {
 
 async function main(argv: string[]): Promise<number> {
   const command = argv[2] || "status";
-  if (command !== "status" && command !== "incident" && command !== "summary" && command !== "notification") {
-    throw new Error("command must be status, incident, summary, or notification");
+  if (!["status", "incident", "why", "evidence", "actions", "summary", "notification"].includes(command)) {
+    throw new Error("command must be status, incident, why, evidence, actions, summary, or notification");
   }
   const bridgePath = requiredFlag(argv, "--config");
   const bridge = loadBridgeConfig(bridgePath);
@@ -47,11 +47,83 @@ async function main(argv: string[]): Promise<number> {
     ? renderStatus(state, harness)
     : command === "incident"
       ? renderIncident(state, bridge.laneId)
+      : command === "why"
+        ? renderWhy(state)
+        : command === "evidence"
+          ? renderEvidence(state)
+          : command === "actions"
+            ? renderActions(state, bridge.laneId)
       : command === "notification"
         ? renderNotification(state)
         : renderSummary(state, harness);
   process.stdout.write(`${bounded(message)}\n`);
   return 0;
+}
+
+function renderWhy(state: HarnessState): string {
+  const job = state.activeJob;
+  if (!job?.incident) return "当前没有可解释的 blocked incident。";
+  const analysis = job.analysis?.incidentId === job.incident.id ? job.analysis : null;
+  if (!analysis) return `当前 incident ${clean(job.incident.id, 160)} 尚无精确绑定的 durable analysis。`;
+  const diagnosis = analysis.diagnosis;
+  const lines = [
+    `任务：${clean(job.task.repo, 160)}#${job.task.issueNumber} · revision ${job.revision}`,
+    `结论：${clean(analysis.summary, 800)}`,
+    `主要原因：${clean(diagnosis?.primaryCause ?? analysis.summary, 900)}`,
+    `置信度：${diagnosis?.confidence ?? "未结构化"}`,
+  ];
+  if (diagnosis?.hypotheses.length) {
+    lines.push("假设检验：", ...diagnosis.hypotheses.map((hypothesis) => (
+      `- ${hypothesis.status}/${hypothesis.confidence}：${clean(hypothesis.claim, 420)} [${hypothesis.evidenceRefs.join(", ") || "无引用"}]`
+    )));
+  }
+  if (diagnosis?.contributingFactors.length) {
+    lines.push(`促成因素：${diagnosis.contributingFactors.map((value) => clean(value, 280)).join("；")}`);
+  }
+  if (diagnosis?.preservationConstraints.length) {
+    lines.push(`必须保留：${diagnosis.preservationConstraints.map((value) => clean(value, 280)).join("；")}`);
+  }
+  if (analysis.unknowns.length) lines.push(`仍未知：${analysis.unknowns.map((value) => clean(value, 280)).join("；")}`);
+  lines.push(`建议：${clean(analysis.resolutionBrief || "保持 blocked，等待新的精确 operator action。", 900)}`);
+  return lines.join("\n");
+}
+
+function renderEvidence(state: HarnessState): string {
+  const job = state.activeJob;
+  if (!job?.incident) return "当前没有 blocked incident 的证据索引。";
+  const analysis = job.analysis?.incidentId === job.incident.id ? job.analysis : null;
+  if (!analysis) return "当前 incident 尚无精确绑定的 durable analysis。";
+  return [
+    `任务：${clean(job.task.repo, 160)}#${job.task.issueNumber} · revision ${job.revision}`,
+    `Incident：${clean(job.incident.id, 160)}`,
+    `Analysis：${clean(analysis.id, 160)}`,
+    `Evidence digest：${analysis.evidenceDigest}`,
+    "证据引用：",
+    ...analysis.evidenceRefs.map((ref) => `- ${clean(ref, 128)}`),
+    ...(analysis.unknowns.length ? ["未决信息：", ...analysis.unknowns.map((value) => `- ${clean(value, 300)}`)] : []),
+  ].join("\n");
+}
+
+function renderActions(state: HarnessState, laneId?: string): string {
+  const projection = projectOperatorState(state);
+  if (!projection.jobId) return "当前没有活跃任务。";
+  if (projection.actions.length === 0) return `当前 revision ${projection.revision} 没有可执行 operator action。`;
+  const prefix = `/harness${laneId ? ` ${laneId}` : ""}`;
+  return [
+    `任务：${projection.jobId} · revision ${projection.revision}`,
+    "精确绑定操作：",
+    ...projection.actions.map((action) => (
+      `- ${operatorActionLabel(action)}\n  命令：${prefix} ${operatorActionCommand(action.kind)}`
+    )),
+    "所有写操作都会先创建 10 分钟单次 challenge，并在确认时重新校验 revision、incident、analysis、attempt 与 HEAD。",
+  ].join("\n");
+}
+
+function operatorActionCommand(kind: OperatorAction["kind"]): string {
+  if (kind === "approve_retry") return "retry";
+  if (kind === "resolve_decision") return "resolve <reason>";
+  if (kind === "reassess") return "reassess <reason>";
+  return "cancel <reason>";
 }
 
 function renderStatus(state: HarnessState, config: HarnessStatusConfig): string {

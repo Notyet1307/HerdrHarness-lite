@@ -267,8 +267,12 @@ export type EvidenceRequestKind =
   | "issue_context"
   | "git_status"
   | "git_diff"
+  | "worktree_progress"
   | "test_output"
   | "attempt_result"
+  | "attempt_runtime"
+  | "attempt_history"
+  | "controller_health"
   | "file_excerpt";
 
 export type EvidenceRequest = {
@@ -345,7 +349,23 @@ export type AnalystAdvice = {
   resolutionBrief: string;
   evidenceRefs: string[];
   unknowns: string[];
+  diagnosis?: AnalystDiagnosis;
   createdAt: string;
+};
+
+export type AnalystHypothesis = {
+  claim: string;
+  status: "supported" | "rejected" | "unresolved";
+  confidence: "high" | "medium" | "low";
+  evidenceRefs: string[];
+};
+
+export type AnalystDiagnosis = {
+  primaryCause: string;
+  confidence: "high" | "medium" | "low";
+  contributingFactors: string[];
+  preservationConstraints: string[];
+  hypotheses: AnalystHypothesis[];
 };
 
 export type AnalystTurn =
@@ -357,6 +377,7 @@ export type AnalystTurn =
       resolutionBrief: string;
       evidenceRefs: string[];
       unknowns: string[];
+      diagnosis?: AnalystDiagnosis;
     };
 
 export type Approval = {
@@ -614,6 +635,9 @@ export function assertJobInvariant(job: Job): void {
   if (job.analysis && !isRecoveryAction(job.analysis.action)) {
     throw new Error("analysis has an invalid recovery action");
   }
+  if (job.analysis?.diagnosis && !isAnalystDiagnosis(job.analysis.diagnosis)) {
+    throw new Error("analysis has an invalid structured diagnosis");
+  }
   if (job.approval && !isRetryAction(job.approval.action)) {
     throw new Error("approval has an invalid recovery action");
   }
@@ -733,6 +757,29 @@ export function assertJobInvariant(job: Job): void {
   if (job.analyst && job.analyst.taskDigest !== job.task.digest) {
     throw new Error("analyst is bound to a different task digest");
   }
+}
+
+function isAnalystDiagnosis(value: AnalystDiagnosis): boolean {
+  return isBoundedText(value.primaryCause, 2_000)
+    && ["high", "medium", "low"].includes(value.confidence)
+    && Array.isArray(value.contributingFactors)
+    && value.contributingFactors.length <= 4
+    && value.contributingFactors.every((entry) => isBoundedText(entry, 512))
+    && Array.isArray(value.preservationConstraints)
+    && value.preservationConstraints.length <= 4
+    && value.preservationConstraints.every((entry) => isBoundedText(entry, 512))
+    && Array.isArray(value.hypotheses)
+    && value.hypotheses.length >= 1
+    && value.hypotheses.length <= 5
+    && value.hypotheses.every((hypothesis) => (
+      isBoundedText(hypothesis.claim, 512)
+      && ["supported", "rejected", "unresolved"].includes(hypothesis.status)
+      && ["high", "medium", "low"].includes(hypothesis.confidence)
+      && Array.isArray(hypothesis.evidenceRefs)
+      && hypothesis.evidenceRefs.length <= 8
+      && new Set(hypothesis.evidenceRefs).size === hypothesis.evidenceRefs.length
+      && hypothesis.evidenceRefs.every((entry) => isBoundedText(entry, 128))
+    ));
 }
 
 export function assertTypedHandoff(handoff: TypedHandoff): void {
