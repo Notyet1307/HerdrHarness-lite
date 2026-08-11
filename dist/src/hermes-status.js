@@ -50,6 +50,8 @@ function renderWhy(state) {
     const analysis = job.analysis?.incidentId === job.incident.id ? job.analysis : null;
     if (!analysis)
         return `当前 incident ${clean(job.incident.id, 160)} 尚无精确绑定的 durable analysis。`;
+    if (isFailedClosedAnalysis(analysis))
+        return renderFailedClosedWhy(job);
     const diagnosis = analysis.diagnosis;
     const lines = [
         "🧭 为什么卡住了",
@@ -70,6 +72,40 @@ function renderWhy(state) {
     if (analysis.unknowns.length)
         lines.push("", "仍需确认", ...mobileBullets(analysis.unknowns));
     lines.push("", "下一步", clean(analysis.resolutionBrief || "保持 blocked，等待新的精确 operator action。", 260), "发送 /harness_actions 查看当前允许的操作。");
+    return lines.join("\n");
+}
+function isFailedClosedAnalysis(analysis) {
+    return analysis.summary.startsWith("Analyst diagnosis failed closed:");
+}
+function renderFailedClosedWhy(job) {
+    const incident = job.incident;
+    const attempt = job.activeAttempt;
+    const reviewerResult = attempt?.result?.lane === "reviewer" ? attempt.result : null;
+    const blockingFindings = reviewerResult?.findings.filter((finding) => (finding.severity === "critical" || finding.severity === "major")) ?? [];
+    const displayedFindings = (blockingFindings.length > 0 ? blockingFindings : reviewerResult?.findings ?? []).slice(0, 4);
+    const reviewExhausted = incident.class === "review_uncertain" && incident.summary.startsWith("review rounds exhausted");
+    const conclusion = reviewerResult?.status === "changes" && attempt
+        ? `Reviewer 在第 ${attempt.round} 轮仍要求修改${blockingFindings.length > 0 ? `，共 ${blockingFindings.length} 个阻断问题` : ""}${reviewExhausted ? "；已达到审查上限" : ""}，任务安全暂停。`
+        : `任务因 ${clean(incident.class, 80)} 安全暂停；自动诊断未形成可采用的结构化结论。`;
+    const eventSummary = reviewExhausted && reviewerResult?.status === "changes"
+        ? "Reviewer 已完成本轮审查，但仍有阻断问题；Harness 因达到审查上限转为人工决策。"
+        : clean(incident.summary, 320);
+    const lines = [
+        "🧭 为什么卡住了",
+        `${mobileTask(job)} · rev ${job.revision}`,
+        "",
+        "结论",
+        conclusion,
+        "",
+        "发生了什么",
+        eventSummary,
+    ];
+    if (displayedFindings.length > 0) {
+        lines.push("", "关键依据", ...displayedFindings.map((finding) => `• ${finding.severity} · ${clean(finding.summary, 230)}`), ...(reviewerResult && reviewerResult.findings.length > displayedFindings.length
+            ? [`• …另 ${reviewerResult.findings.length - displayedFindings.length} 项见 Reviewer 结果`]
+            : []));
+    }
+    lines.push("", "运行诊断", "Analyst 输出未通过结构校验，Harness 未采用该诊断；原始 blocked 事实仍然有效。", "", "下一步", "发送 /harness_actions 查看当前允许的操作；不要仅因诊断失败直接重试。");
     return lines.join("\n");
 }
 function renderEvidence(state) {
