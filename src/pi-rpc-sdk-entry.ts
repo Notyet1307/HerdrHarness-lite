@@ -298,7 +298,8 @@ export function projectPiRpcEvent(event: PiRpcEvent): PiRpcEvent {
     };
   }
   if (type === "tool_execution_start" || type === "tool_execution_end") {
-    return { type, isError: event.isError === true, ...metadata };
+    const toolName = safeToolName(event.toolName);
+    return { type, ...(toolName ? { toolName } : {}), isError: event.isError === true, ...metadata };
   }
   return { type, ...metadata };
 }
@@ -328,6 +329,10 @@ function boundedUtf8(value: string, maxBytes: number): string {
 
 function record(value: unknown): PiRpcEvent {
   return value && typeof value === "object" && !Array.isArray(value) ? value as PiRpcEvent : {};
+}
+
+function safeToolName(value: unknown): string | null {
+  return typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/u.test(value) ? value : null;
 }
 
 async function runProbe(runtime: RuntimeHost, prompt: string): Promise<void> {

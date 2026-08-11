@@ -257,6 +257,8 @@ async function main(argv: string[]): Promise<void> {
     }
     if (type === "agent_end") summary.willRetry = event.willRetry === true;
     if (type === "tool_execution_start" || type === "tool_execution_end") {
+      const toolName = safeToolName(event.toolName);
+      if (toolName) summary.toolName = toolName;
       summary.isError = event.isError === true;
     }
     const line = `${JSON.stringify(summary)}\n`;
@@ -445,6 +447,10 @@ function observedPayloadBytes(event: JsonObject): number {
 function observedPayloadDigest(event: JsonObject): string {
   const projected = event.payloadDigest;
   return typeof projected === "string" && /^[0-9a-f]{64}$/u.test(projected) ? projected : digest(event);
+}
+
+function safeToolName(value: unknown): string | null {
+  return typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/u.test(value) ? value : null;
 }
 
 async function waitForDispatch(plan: PiRpcPlan, client: RpcClient): Promise<{ dispatchId: string; message: string } | null> {
