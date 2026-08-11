@@ -4,6 +4,7 @@ import { isAbsolute } from "node:path";
 import { JsonStateStore } from "./adapters/json-store.js";
 import { MAX_CI_REWORKS, type AnalystAdvice, type HarnessState, type Job } from "./model.js";
 import { projectOperatorState, type OperatorAction, type OperatorProjection } from "./policy.js";
+import { formatSafePiRpcDiagnostic } from "./pi-rpc-diagnostics.js";
 
 const MAX_MESSAGE_LENGTH = 3_500;
 const LANE_ID = /^[a-z0-9][a-z0-9-]{0,31}$/;
@@ -113,6 +114,9 @@ function renderNotification(state: HarnessState): string {
     `任务：${clean(job.task.repo, 160)}#${job.task.issueNumber} ${clean(job.task.title, 240)}`,
     `结论：${clean(conclusion, 700)}`,
     `原因：${clean(incident.summary, 700)}`,
+    ...(incident.runtimeDiagnostic
+      ? [`运行诊断：${clean(formatSafePiRpcDiagnostic(incident.runtimeDiagnostic), 700)}`]
+      : []),
     "影响：任务暂停；Harness 未执行自动恢复。",
     `建议：${clean(recommendation, 900)}`,
   ].join("\n");
@@ -145,6 +149,9 @@ function renderIncident(state: HarnessState, laneId?: string): string {
     `Incident：${clean(incident.id, 512)}`,
     `分类：${incident.class} · lane ${incident.lane}`,
     `摘要：${clean(incident.summary, 700)}`,
+    ...(incident.runtimeDiagnostic
+      ? [`运行诊断：${clean(formatSafePiRpcDiagnostic(incident.runtimeDiagnostic), 700)}`]
+      : []),
     `可执行操作：${actions.length > 0 ? actions.map(operatorActionLabel).join("；") : "无"}`,
   ];
 

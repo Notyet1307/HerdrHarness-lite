@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { isSafePiRpcDiagnostic } from "./pi-rpc-diagnostics.js";
 export function isRecoveryAction(value) {
     return value === "retry_fresh_worker" || value === "retry_fresh_reviewer" || value === "hold";
 }
@@ -114,6 +115,9 @@ export function assertJobInvariant(job) {
     if (job.incident?.automaticRecovery && (!["worker_pre_dispatch_infrastructure", "reviewer_same_head_infrastructure"].includes(job.incident.automaticRecovery.rule)
         || !/^[0-9a-f]{64}$/i.test(job.incident.automaticRecovery.fingerprint)))
         throw new Error("incident has an invalid automatic recovery candidate");
+    if (job.incident?.runtimeDiagnostic !== undefined && !isSafePiRpcDiagnostic(job.incident.runtimeDiagnostic)) {
+        throw new Error("incident has an invalid runtime diagnostic");
+    }
     if (job.analysis && !isRecoveryAction(job.analysis.action)) {
         throw new Error("analysis has an invalid recovery action");
     }

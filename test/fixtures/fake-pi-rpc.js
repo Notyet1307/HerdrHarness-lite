@@ -38,6 +38,7 @@ function respond(command) {
         model: {
           provider: "test",
           id: "model",
+          api: process.env.FAKE_PI_API ?? "unknown",
           ...(process.env.FAKE_PI_MODEL_SECRET ? { headers: { Authorization: process.env.FAKE_PI_MODEL_SECRET } } : {}),
         },
         unicodeBoundary: "中",
@@ -84,6 +85,16 @@ function respond(command) {
   emit({ type: "agent_start" });
   emit({ type: "turn_start" });
   if (process.env.FAKE_PI_WAIT_FOR_ABORT === "1") return;
+  if (["success", "error"].includes(process.env.FAKE_PI_TOOL_BEFORE_FAILURE)) {
+    emit({ type: "tool_execution_start", toolCallId: "tool-1", toolName: "read", args: {} });
+    emit({
+      type: "tool_execution_end",
+      toolCallId: "tool-1",
+      toolName: "read",
+      result: { content: "fixed fixture result" },
+      isError: process.env.FAKE_PI_TOOL_BEFORE_FAILURE === "error",
+    });
+  }
   if (["error", "aborted"].includes(process.env.FAKE_PI_ASSISTANT_STOP_REASON)) {
     const failureMessage = {
       role: "assistant",

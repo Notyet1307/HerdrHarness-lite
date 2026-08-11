@@ -19,6 +19,7 @@ import { JsonStateStore } from "./adapters/json-store.js";
 import { type AutomaticRecovery, type HarnessState, type Job, type JobState } from "./model.js";
 import { isControllerAnalystFailure, operatorActionsFor } from "./policy.js";
 import { controllerHeartbeatPath } from "./controller-heartbeat.js";
+import { formatSafePiRpcDiagnostic } from "./pi-rpc-diagnostics.js";
 
 const MAX_MESSAGE_LENGTH = 3_900;
 const MAX_OUTBOX = 512;
@@ -533,6 +534,9 @@ function analysisCard(job: Job, heading: string): string {
     "",
     `<b>结论：</b>${html(clean(conclusion, 420), 340)}`,
     `<b>原因：</b>${html(clean(incident.summary, 540), 440)}`,
+    ...(incident.runtimeDiagnostic
+      ? [`<b>运行诊断：</b><code>${html(clean(formatSafePiRpcDiagnostic(incident.runtimeDiagnostic), 540), 440)}</code>`]
+      : []),
     "<b>影响：</b>自动流程保持暂停；Harness 未启动恢复 agent。",
     `<b>建议：</b>${html(recommendation, 300)}`,
     `<b>建议原因：</b>${html(rationale, 300)}`,
