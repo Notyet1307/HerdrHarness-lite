@@ -676,6 +676,10 @@ test("durable runner rejects a settled assistant failure without persisting Prov
       assert.equal(terminal.agentSettled, true);
       const events = readFileSync(join(plan.runtimeRoot, "runtime-events.jsonl"), "utf8");
       assert.match(events, new RegExp(`"type":"message_end".*"role":"assistant".*"stopReason":"${stopReason}"`));
+      if (scenario.tool) {
+        assert.match(events, /"type":"tool_execution_end".*"toolName":"read"/);
+        assert.equal(events.includes("fixed fixture result"), false);
+      }
       assert.equal(existsSync(fixture.attempt.resultPath), false);
       for (const path of filesUnder(plan.runtimeRoot)) assert.equal(readFileSync(path, "utf8").includes(sentinel), false, path);
     } finally {

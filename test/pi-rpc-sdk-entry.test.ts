@@ -78,6 +78,28 @@ test("Pi RPC event adapter projects only the RPC subscriber and preserves diagno
   assert.deepEqual(event.message.content, [{ type: "text", text: "untrusted provider response" }]);
 });
 
+test("Pi RPC event adapter preserves only a bounded tool name", () => {
+  const event = {
+    type: "tool_execution_end",
+    toolName: "review_preflight",
+    args: { secret: "TOOL_ARGUMENT_SENTINEL" },
+    result: { content: "TOOL_RESULT_SENTINEL" },
+    isError: false,
+  };
+
+  const projected = projectPiRpcEvent(event);
+
+  assert.equal(projected.type, "tool_execution_end");
+  assert.equal(projected.toolName, "review_preflight");
+  assert.equal(projected.isError, false);
+  assert.equal(JSON.stringify(projected).includes("TOOL_ARGUMENT_SENTINEL"), false);
+  assert.equal(JSON.stringify(projected).includes("TOOL_RESULT_SENTINEL"), false);
+  assert.match(String(projected.payloadDigest), /^[0-9a-f]{64}$/);
+
+  const invalid = projectPiRpcEvent({ ...event, toolName: `read\n${"x".repeat(256)}` });
+  assert.equal(invalid.toolName, undefined);
+});
+
 test("Pi RPC SDK host shares only canonical subscription OAuth and keeps settings in memory", () => {
   const root = mkdtempSync(join(tmpdir(), "harness-pi-sdk-"));
   const dist = join(root, "pi", "dist");
