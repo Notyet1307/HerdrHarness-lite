@@ -16,8 +16,13 @@ import {
 } from "./pi-rpc-spool.js";
 import { isQualifiedPiRpcVersion } from "./pi-rpc-compat.js";
 import {
+  classifyProviderFailure,
   classifyPiRpcRunnerFailure,
+  failurePhase,
   piRpcRunnerError,
+  providerApi,
+  type PiRpcProviderApi,
+  type SafePiRpcDiagnostic,
 } from "./pi-rpc-diagnostics.js";
 
 const MAX_RPC_LINE_BYTES = 1024 * 1024;
@@ -41,7 +46,7 @@ const KNOWN_EVENT_TYPES = new Set([
 type JsonObject = Record<string, unknown>;
 type Child = ReturnType<typeof spawn>;
 type ChildExit = { code: number | null; signal: string | null };
-type AssistantFailure = { error: string; failureClass: string; retryable: boolean };
+type AssistantFailure = { error: string; diagnostic: SafePiRpcDiagnostic };
 
 export class StrictJsonlDecoder {
   private buffer = "";
@@ -209,6 +214,12 @@ async function main(argv: string[]): Promise<void> {
   let eventCount = 0;
   let lastEventType: string | null = null;
   let agentEndObserved = false;
+  let effectiveProviderApi: PiRpcProviderApi = "unknown";
+  let turnCount = 0;
+  let assistantMessageCount = 0;
+  let toolExecutionCount = 0;
+  let toolErrorCount = 0;
+  let transcriptBytes = 0;
 
   const persistEvent = (event: JsonObject): void => {
     const reportedType = typeof event.type === "string" ? event.type : "";
@@ -216,13 +227,33 @@ async function main(argv: string[]): Promise<void> {
     eventCount += 1;
     lastEventType = type;
     if (type === "agent_end") agentEndObserved = true;
+    if (type === "turn_start") turnCount += 1;
+    if (["message_end", "tool_execution_end", "turn_end"].includes(type)) {
+      transcriptBytes = Math.min(4 * 1024 * 1024, transcriptBytes + Buffer.byteLength(JSON.stringify(event), "utf8"));
+    }
     if (["message_update", "tool_execution_update", "bash_execution_update"].includes(type)) return;
     const summary: JsonObject = { type, digest: digest(event) };
     const message = type === "message_end" ? object(event.message) : {};
+    if (message.role === "assistant") assistantMessageCount += 1;
+    if (type === "tool_execution_end") {
+      toolExecutionCount += 1;
+      if (event.isError === true) toolErrorCount += 1;
+    }
     if (message.role === "assistant" && (message.stopReason === "error" || message.stopReason === "aborted")) {
       summary.role = "assistant";
       summary.stopReason = message.stopReason;
-      assistantFailure = classifyAssistantFailure(message.stopReason, message.errorMessage);
+      assistantFailure = {
+        error: `Pi RPC assistant ended with ${message.stopReason}`,
+        diagnostic: classifyProviderFailure(message.stopReason, message.errorMessage, {
+          providerApi: effectiveProviderApi,
+          phase: failurePhase(toolExecutionCount, toolErrorCount),
+          turnCount,
+          assistantMessageCount,
+          toolExecutionCount,
+          toolErrorCount,
+          transcriptBytes,
+        }),
+      };
     }
     if (type === "agent_end") summary.willRetry = event.willRetry === true;
     if (type === "tool_execution_start" || type === "tool_execution_end") {
@@ -279,7 +310,7 @@ async function main(argv: string[]): Promise<void> {
 
     failureStage = "handshake";
     const initialState = requireResponse(await client.command("get_state"), "get_state");
-    validateInitialState(initialState, plan);
+    effectiveProviderApi = validateInitialState(initialState, plan);
     const commands = requireResponse(await client.command("get_commands"), "get_commands");
     validateCommands(commands, plan);
     requireResponse(await client.command("set_auto_retry", { enabled: false }), "set_auto_retry");
@@ -353,8 +384,7 @@ async function main(argv: string[]): Promise<void> {
       ...(!ok ? { error: terminalError ?? "runtime terminated by Controller" } : {}),
       ...(!policyViolation && assistantTerminalFailure ? {
         failureStage: "agent-run",
-        failureClass: assistantTerminalFailure.failureClass,
-        retryable: assistantTerminalFailure.retryable,
+        ...assistantTerminalFailure.diagnostic,
         childExit,
       } : {}),
       agentSettled: settled,
@@ -405,32 +435,6 @@ async function main(argv: string[]): Promise<void> {
   }
 }
 
-function classifyAssistantFailure(stopReason: "error" | "aborted", errorMessage: unknown): AssistantFailure {
-  if (stopReason === "aborted") {
-    return { error: "Pi RPC assistant ended with aborted", failureClass: "assistant_aborted", retryable: false };
-  }
-  const message = typeof errorMessage === "string" ? errorMessage.toLowerCase() : "";
-  if (/\b429\b|rate[ -]?limit|too many requests/.test(message)) {
-    return { error: "Pi RPC assistant ended with error", failureClass: "rate_limit", retryable: true };
-  }
-  if (/\b(?:401|403)\b|unauthori[sz]ed|authentication|invalid api key|token expired/.test(message)) {
-    return { error: "Pi RPC assistant ended with error", failureClass: "authentication", retryable: false };
-  }
-  if (/context (?:length|window)|maximum context|token limit/.test(message)) {
-    return { error: "Pi RPC assistant ended with error", failureClass: "context_limit", retryable: false };
-  }
-  if (/\b(?:408|504)\b|timed? out|timeout/.test(message)) {
-    return { error: "Pi RPC assistant ended with error", failureClass: "timeout", retryable: true };
-  }
-  if (/\b5\d\d\b|bad gateway|service unavailable/.test(message)) {
-    return { error: "Pi RPC assistant ended with error", failureClass: "upstream_5xx", retryable: true };
-  }
-  if (/econn|enotfound|socket hang up|fetch failed|network|\beof\b/.test(message)) {
-    return { error: "Pi RPC assistant ended with error", failureClass: "network", retryable: true };
-  }
-  return { error: "Pi RPC assistant ended with error", failureClass: "unknown", retryable: false };
-}
-
 async function waitForDispatch(plan: PiRpcPlan, client: RpcClient): Promise<{ dispatchId: string; message: string } | null> {
   for (;;) {
     if (existsSync(spoolPath(plan.runtimeRoot, "terminate.json"))) return null;
@@ -458,7 +462,7 @@ async function waitForDispatch(plan: PiRpcPlan, client: RpcClient): Promise<{ di
   }
 }
 
-export function validateInitialState(response: JsonObject, plan: PiRpcPlan): void {
+export function validateInitialState(response: JsonObject, plan: PiRpcPlan): PiRpcProviderApi {
   const state = object(response.data);
   if (state.isStreaming !== false || state.isCompacting === true || Number(state.messageCount) !== 0 || Number(state.pendingMessageCount) !== 0) {
     throw new Error("Pi RPC did not start as a fresh idle session");
@@ -468,6 +472,7 @@ export function validateInitialState(response: JsonObject, plan: PiRpcPlan): voi
   const model = object(state.model);
   if (model.provider !== plan.snapshot.provider) throw new Error("Pi RPC provider differs from the execution snapshot");
   if (model.id !== plan.snapshot.model) throw new Error("Pi RPC model differs from the execution snapshot");
+  return providerApi(model.api);
 }
 
 function validateCommands(response: JsonObject, plan: PiRpcPlan): void {

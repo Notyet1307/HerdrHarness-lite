@@ -468,10 +468,17 @@ test("durable runner never persists child Provider diagnostics", () => {
     }
 });
 test("durable runner rejects a settled assistant failure without persisting Provider diagnostics", () => {
-    for (const stopReason of ["error", "aborted"]) {
+    const cases = [
+        { stopReason: "error", providerError: "HTTP 429 rate limit", tool: undefined, code: "provider_rate_limited", phase: "initial_generation", retryable: true },
+        { stopReason: "error", providerError: "HTTP 529 overloaded_error", tool: "success", code: "provider_overloaded", phase: "tool_continuation", retryable: true },
+        { stopReason: "error", providerError: "HTTP 413 request_too_large", tool: "error", code: "provider_request_too_large", phase: "tool_error_recovery", retryable: false },
+        { stopReason: "aborted", providerError: "cancelled", tool: undefined, code: "assistant_aborted", phase: "initial_generation", retryable: false },
+    ];
+    for (const scenario of cases) {
+        const { stopReason } = scenario;
         const fixture = rpcFixture();
         const sentinel = `access_token_${stopReason}_SENTINEL`;
-        const providerError = stopReason === "error" ? `HTTP 429 rate limit: ${sentinel}` : sentinel;
+        const providerError = `${scenario.providerError}: ${sentinel}`;
         try {
             const plan = fixture.plan({
                 executable: process.execPath,
@@ -502,19 +509,28 @@ test("durable runner rejects a settled assistant failure without persisting Prov
                     ...process.env,
                     FAKE_PI_ASSISTANT_STOP_REASON: stopReason,
                     FAKE_PI_ASSISTANT_ERROR: providerError,
+                    FAKE_PI_API: "anthropic-messages",
+                    ...(scenario.tool ? { FAKE_PI_TOOL_BEFORE_FAILURE: scenario.tool } : {}),
                 },
             });
             assert.equal(execution.ok, true, execution.stderr);
-            assert.deepEqual(readJson(join(plan.runtimeRoot, "terminal.json")), {
-                ...receiptIdentity(plan),
-                ok: false,
-                error: `Pi RPC assistant ended with ${stopReason}`,
-                failureStage: "agent-run",
-                failureClass: stopReason === "error" ? "rate_limit" : "assistant_aborted",
-                retryable: stopReason === "error",
-                childExit: { code: 0, signal: null },
-                agentSettled: true,
-            });
+            const terminal = readJson(join(plan.runtimeRoot, "terminal.json"));
+            assert.equal(terminal.ok, false);
+            assert.equal(terminal.error, `Pi RPC assistant ended with ${stopReason}`);
+            assert.equal(terminal.failureStage, "agent-run");
+            assert.equal(terminal.failureDomain, stopReason === "error" ? "provider" : "runner_internal");
+            assert.equal(terminal.failureCode, scenario.code);
+            assert.equal(terminal.retryable, scenario.retryable);
+            assert.equal(terminal.providerApi, "anthropic-messages");
+            assert.equal(terminal.phase, scenario.phase);
+            assert.equal(terminal.turnCount, 1);
+            assert.equal(terminal.assistantMessageCount, 1);
+            assert.equal(terminal.toolExecutionCount, scenario.tool ? 1 : 0);
+            assert.equal(terminal.toolErrorCount, scenario.tool === "error" ? 1 : 0);
+            assert.equal(terminal.transcriptSizeBucket, "lt64k");
+            assert.match(String(terminal.diagnosticFingerprint), /^[0-9a-f]{64}$/);
+            assert.deepEqual(terminal.childExit, { code: 0, signal: null });
+            assert.equal(terminal.agentSettled, true);
             const events = readFileSync(join(plan.runtimeRoot, "runtime-events.jsonl"), "utf8");
             assert.match(events, new RegExp(`"type":"message_end".*"role":"assistant".*"stopReason":"${stopReason}"`));
             assert.equal(existsSync(fixture.attempt.resultPath), false);
