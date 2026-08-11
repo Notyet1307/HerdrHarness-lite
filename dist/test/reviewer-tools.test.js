@@ -206,14 +206,34 @@ test("Reviewer tools isolate validation and write one identity-bound result", as
             findings: [],
         }), /completed Standards and Spec/);
         const workflowResult = await subagent.execute("axes", defaultedScopeReviewCall);
-        await toolResultHook({
+        const oversizedDetails = {
+            ...workflowResult.details,
+            results: workflowResult.details.results.map((result, index) => ({
+                ...result,
+                finalOutput: `${index === 0 ? "S" : "P"}`.repeat(100_000) + `_AXIS_${index}_END`,
+            })),
+        };
+        const projectedAxes = await toolResultHook({
             toolCallId: "axes",
             toolName: "subagent",
             input: defaultedScopeReviewCall,
-            content: workflowResult.content,
+            content: [{ type: "text", text: "unbounded child transcript".repeat(20_000) }],
             isError: workflowResult.isError === true,
-            details: workflowResult.details,
+            details: oversizedDetails,
         });
+        assert.ok(projectedAxes);
+        assert.equal(projectedAxes.isError, false);
+        assert.ok(Buffer.byteLength(projectedAxes.content?.[0]?.text ?? "") <= 32 * 1024);
+        const projectedDetails = projectedAxes.details;
+        assert.equal(projectedDetails.mode, "workflow");
+        assert.equal(projectedDetails.results.length, 2);
+        for (const [index, projected] of projectedDetails.results.entries()) {
+            assert.deepEqual(Object.keys(projected).sort(), ["axis", "exitCode", "finalOutput", "outputBytes", "outputDigest"]);
+            assert.ok(Buffer.byteLength(String(projected.finalOutput)) <= 12 * 1024);
+            assert.match(String(projected.finalOutput), new RegExp(`_AXIS_${index}_END$`));
+            assert.equal(projected.outputBytes, 100_011);
+            assert.match(String(projected.outputDigest), /^[0-9a-f]{64}$/);
+        }
         await assert.rejects(() => submit.execute("submit-before-validation", {
             status: "pass",
             summary: "premature",

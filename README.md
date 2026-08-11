@@ -362,6 +362,7 @@ With `workerRuntime=pi-rpc` or `reviewerRuntime=pi-rpc`, the Controller never ow
 
 Tool lifecycle diagnostics retain only a bounded tool name; tool arguments and results remain content-private behind their payload size and digest.
 Reviewer validation exposes at most 8 KiB from each output stream to the model and retains the original byte counts and SHA-256 digests, preventing a successful validation tail from inflating the next Provider continuation.
+Completed review-axis results likewise expose at most 12 KiB of each child's final report plus its original byte count and SHA-256 digest; verbose child transcripts and extension details do not enter the parent Reviewer context.
 
 For Anthropic Messages models that require adaptive thinking, the bound model config may opt into Pi's public `forceAdaptiveThinking` compatibility flag; its value is type-checked and remains covered by the Attempt resource digest.
 
