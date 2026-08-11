@@ -315,8 +315,8 @@ function nextStep(job: Job, projection: OperatorProjection): string {
     case "publish_ready": return "Controller 将推送分支并创建 PR。";
     case "awaiting_merge": return "等待 required checks、auto-merge 或新的 CI incident。";
     case "blocked": return projection.actions.length > 0
-      ? `查看 /harness incident；当前有 ${projection.actions.length} 个精确绑定的可执行操作。`
-      : "查看 /harness incident；当前没有可执行恢复操作。";
+      ? `先看 /harness_why，再用 /harness_actions；当前有 ${projection.actions.length} 个精确绑定操作。`
+      : "先看 /harness_why；当前没有可执行恢复操作。";
     case "recovery_approved": return job.approval?.basis === "policy_rule"
       ? "Controller 将重新校验并消费一次精确策略自动恢复。"
       : "Controller 将重新校验并消费已批准恢复。";

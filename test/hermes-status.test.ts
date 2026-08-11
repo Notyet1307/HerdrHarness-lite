@@ -136,6 +136,7 @@ test("Hermes status stays read-only and renders bounded ledger facts", () => {
     assert.match(status.stdout, /^🚨 Harness · BLOCKED/m);
     assert.match(status.stdout, /\n\n进度\n/);
     assert.match(status.stdout, /\n\n下一步\n/);
+    assert.match(status.stdout, /先看 \/harness_why，再用 \/harness_actions；当前有 1 个精确绑定操作。/);
     assert.match(status.stdout, /owner\/repo#48/);
     assert.match(status.stdout, /provider=openai-codex · model=gpt-test · effort=max/);
     assert.match(status.stdout, /• Reviewer：provider=openai-codex · model=gpt-5\.6-sol · effort=max/);
