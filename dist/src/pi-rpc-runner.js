@@ -242,9 +242,6 @@ async function main(argv) {
         if (type === "agent_end")
             summary.willRetry = event.willRetry === true;
         if (type === "tool_execution_start" || type === "tool_execution_end") {
-            const toolName = safeToolName(event.toolName);
-            if (toolName)
-                summary.toolName = toolName;
             summary.isError = event.isError === true;
         }
         const line = `${JSON.stringify(summary)}\n`;
@@ -439,9 +436,6 @@ function observedPayloadBytes(event) {
 function observedPayloadDigest(event) {
     const projected = event.payloadDigest;
     return typeof projected === "string" && /^[0-9a-f]{64}$/u.test(projected) ? projected : digest(event);
-}
-function safeToolName(value) {
-    return typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/u.test(value) ? value : null;
 }
 async function waitForDispatch(plan, client) {
     for (;;) {

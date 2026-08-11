@@ -29,7 +29,6 @@ function workerPrompt(attempt: Attempt, context: AttemptContextEnvelope): string
 function reviewerPrompt(attempt: Attempt, context: AttemptContextEnvelope): string {
   return [
     "You are a fresh, read-only Pi reviewer in an exact-HEAD source snapshot. Do not modify product files, commit, push, or reuse the worker's conclusion.",
-    "The code-review skill is already loaded. Tool names are case-sensitive; use only read, grep, find, ls, subagent, review_preflight, review_validate, and review_submit. Never call Skill, PowerShell, Read, or Glob, and never invent or capitalize a tool name.",
     envelopeIdentity(attempt, context),
     `Repository: ${context.task.repo}`,
     `Issue: #${context.task.issueNumber}`,
@@ -42,7 +41,6 @@ function reviewerPrompt(attempt: Attempt, context: AttemptContextEnvelope): stri
     `Objective:\n${context.task.objective}`,
     handoffInstruction(context.handoff?.value ?? null),
     "Call review_preflight before reading the full review evidence or launching review axes. If it fails, submit status=blocked with the concrete environment failure and do not launch subagents.",
-    "After successful preflight, read the fixed review evidence and only the minimum policy and specification material needed to construct the two self-contained axis briefs. Do not independently re-review the candidate implementation in the parent; launch both axes before any broad source inspection.",
     "After a successful preflight, follow the loaded code-review skill with Base SHA as the fixed point and independently review the exact Head SHA. Generic shell and file-writing tools are intentionally unavailable.",
     "Call review_validate exactly once for the configured validation command; it runs only in a disposable writable copy.",
     "Use status=changes only with actionable findings; use status=blocked when either review axis or required evidence is incomplete.",

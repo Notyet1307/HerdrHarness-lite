@@ -71,24 +71,6 @@ test("Pi RPC event adapter projects only the RPC subscriber and preserves diagno
     assert.equal(JSON.stringify(received[0]).includes("untrusted provider response"), false);
     assert.deepEqual(event.message.content, [{ type: "text", text: "untrusted provider response" }]);
 });
-test("Pi RPC event adapter preserves only a bounded tool name", () => {
-    const event = {
-        type: "tool_execution_end",
-        toolName: "review_preflight",
-        args: { secret: "TOOL_ARGUMENT_SENTINEL" },
-        result: { content: "TOOL_RESULT_SENTINEL" },
-        isError: false,
-    };
-    const projected = projectPiRpcEvent(event);
-    assert.equal(projected.type, "tool_execution_end");
-    assert.equal(projected.toolName, "review_preflight");
-    assert.equal(projected.isError, false);
-    assert.equal(JSON.stringify(projected).includes("TOOL_ARGUMENT_SENTINEL"), false);
-    assert.equal(JSON.stringify(projected).includes("TOOL_RESULT_SENTINEL"), false);
-    assert.match(String(projected.payloadDigest), /^[0-9a-f]{64}$/);
-    const invalid = projectPiRpcEvent({ ...event, toolName: `read\n${"x".repeat(256)}` });
-    assert.equal(invalid.toolName, undefined);
-});
 test("Pi RPC SDK host shares only canonical subscription OAuth and keeps settings in memory", () => {
     const root = mkdtempSync(join(tmpdir(), "harness-pi-sdk-"));
     const dist = join(root, "pi", "dist");
@@ -171,7 +153,7 @@ test("Pi RPC SDK host reads one bound custom models.json without copying its API
     const modelsPath = join(credentialAgentDir, "models.json");
     const secret = "CUSTOM_API_KEY_SENTINEL";
     const trustedBaseUrl = "https://trusted.invalid/v1";
-    const modelsContent = `{"providers":{"custom":{"api":"openai-completions","apiKey":"${secret}","baseUrl":"${trustedBaseUrl}","compat":{"supportsStore":false},"models":[{"id":"custom-model","api":"anthropic-messages","reasoning":true,"compat":{"forceAdaptiveThinking":true}},{"id":"openai-model"}],"modelOverrides":{"custom-model":{"contextWindow":64000,"compat":{"supportsDeveloperRole":false}}}}}}\n`;
+    const modelsContent = `{"providers":{"custom":{"api":"openai-completions","apiKey":"${secret}","baseUrl":"${trustedBaseUrl}","compat":{"supportsStore":false},"models":[{"id":"custom-model"}],"modelOverrides":{"custom-model":{"contextWindow":64000,"compat":{"supportsDeveloperRole":false}}}}}}\n`;
     writeFileSync(modelsPath, modelsContent, { mode: 0o600 });
     const modelDigest = executionResourceDigest(modelsPath);
     const commandArgs = [
@@ -207,28 +189,15 @@ test("Pi RPC SDK host reads one bound custom models.json without copying its API
         assert.deepEqual(capture.registeredModel, {
             id: "custom-model",
             name: "custom-model",
-            api: "anthropic-messages",
-            provider: "custom",
-            baseUrl: trustedBaseUrl,
-            reasoning: true,
-            input: ["text"],
-            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-            contextWindow: 64000,
-            maxTokens: 16384,
-            compat: { supportsStore: false, forceAdaptiveThinking: true, supportsDeveloperRole: false },
-        });
-        assert.deepEqual(capture.registeredModels[1], {
-            id: "openai-model",
-            name: "openai-model",
             api: "openai-completions",
             provider: "custom",
             baseUrl: trustedBaseUrl,
             reasoning: false,
             input: ["text"],
             cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-            contextWindow: 128000,
+            contextWindow: 64000,
             maxTokens: 16384,
-            compat: { supportsStore: false },
+            compat: { supportsStore: false, supportsDeveloperRole: false },
         });
         assert.equal(result.stdout.includes(secret) || result.stderr.includes(secret), false);
         assert.equal(existsSync(join(privateAgentDir, "models.json")), false);
@@ -250,11 +219,7 @@ test("Pi RPC SDK host reads one bound custom models.json without copying its API
         const unsupported = runner.run(process.execPath, unsupportedArgs, options);
         assert.equal(unsupported.ok, false);
         assert.equal(unsupported.stderr.includes(secret), false);
-        for (const compat of [
-            { unknownFlag: true },
-            { supportsDeveloperRole: "yes" },
-            { forceAdaptiveThinking: "yes" },
-        ]) {
+        for (const compat of [{ unknownFlag: true }, { supportsDeveloperRole: "yes" }]) {
             writeFileSync(modelsPath, `${JSON.stringify({
                 providers: { custom: {
                         api: "openai-completions", apiKey: secret, baseUrl: trustedBaseUrl,
@@ -312,7 +277,6 @@ export const ModelRuntime = {
         registeredModels = config.models.map((model) => ({ ...model, provider }));
         state.registeredProvider = provider;
         state.registeredBaseUrl = config.baseUrl;
-        state.registeredModels = registeredModels;
         state.registeredModel = registeredModels[0];
       },
     };

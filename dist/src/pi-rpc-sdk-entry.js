@@ -238,8 +238,7 @@ export function projectPiRpcEvent(event) {
         };
     }
     if (type === "tool_execution_start" || type === "tool_execution_end") {
-        const toolName = safeToolName(event.toolName);
-        return { type, ...(toolName ? { toolName } : {}), isError: event.isError === true, ...metadata };
+        return { type, isError: event.isError === true, ...metadata };
     }
     return { type, ...metadata };
 }
@@ -269,9 +268,6 @@ function boundedUtf8(value, maxBytes) {
 }
 function record(value) {
     return value && typeof value === "object" && !Array.isArray(value) ? value : {};
-}
-function safeToolName(value) {
-    return typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/u.test(value) ? value : null;
 }
 async function runProbe(runtime, prompt) {
     const marker = /^Reply with exactly ([A-Z0-9_]{1,100})$/u.exec(prompt)?.[1];
@@ -595,12 +591,9 @@ function mergeRecord(base, override) {
 }
 function compatObject(value, label) {
     const record = exactObject(value, [
-        "supportsStore", "supportsDeveloperRole", "requiresReasoningContentOnAssistantMessages", "forceAdaptiveThinking",
-        "thinkingFormat",
+        "supportsStore", "supportsDeveloperRole", "requiresReasoningContentOnAssistantMessages", "thinkingFormat",
     ], label);
-    for (const key of [
-        "supportsStore", "supportsDeveloperRole", "requiresReasoningContentOnAssistantMessages", "forceAdaptiveThinking",
-    ]) {
+    for (const key of ["supportsStore", "supportsDeveloperRole", "requiresReasoningContentOnAssistantMessages"]) {
         if (record[key] !== undefined)
             requiredBoolean(record, key);
     }

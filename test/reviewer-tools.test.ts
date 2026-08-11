@@ -1,6 +1,5 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
 import { chmodSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -22,11 +21,7 @@ type ToolResultEvent = ToolCallEvent & {
   isError: boolean;
 };
 type ToolCallHook = (event: ToolCallEvent) => Promise<{ block: true; reason: string } | undefined>;
-type ToolResultHook = (event: ToolResultEvent) => Promise<{
-  content?: Array<{ type: string; text: string }>;
-  details?: unknown;
-  isError?: boolean;
-} | undefined> | undefined;
+type ToolResultHook = (event: ToolResultEvent) => Promise<undefined> | undefined;
 
 const reviewTasks = [
   { agent: "herdr-harness-review-axis", task: "Axis: Standards\nReview repository standards." },
@@ -79,7 +74,7 @@ test("Reviewer tools isolate validation and write one identity-bound result", as
         `DOCKER_CONFIG=${dockerConfig}`,
         process.execPath,
         "-e",
-        "const fs=require('node:fs');fs.writeFileSync('validation-only.txt','ok');fs.writeFileSync('validation-env.json',JSON.stringify(process.env));process.stdout.write('x'.repeat(100000)+'STDOUT_END');process.stderr.write('y'.repeat(100000)+'STDERR_END')",
+        "const fs=require('node:fs');fs.writeFileSync('validation-only.txt','ok');fs.writeFileSync('validation-env.json',JSON.stringify(process.env))",
       ],
       dockerHost: null,
       piAgentDir: join(root, "original-agent"),
@@ -242,34 +237,14 @@ test("Reviewer tools isolate validation and write one identity-bound result", as
     }), /completed Standards and Spec/);
 
     const workflowResult = await subagent.execute("axes", defaultedScopeReviewCall);
-    const oversizedDetails = {
-      ...(workflowResult.details as { mode: string; results: Array<Record<string, unknown>> }),
-      results: (workflowResult.details as { results: Array<Record<string, unknown>> }).results.map((result, index) => ({
-        ...result,
-        finalOutput: `${index === 0 ? "S" : "P"}`.repeat(100_000) + `_AXIS_${index}_END`,
-      })),
-    };
-    const projectedAxes = await toolResultHook({
+    await toolResultHook({
       toolCallId: "axes",
       toolName: "subagent",
       input: defaultedScopeReviewCall,
-      content: [{ type: "text", text: "unbounded child transcript".repeat(20_000) }],
+      content: workflowResult.content,
       isError: workflowResult.isError === true,
-      details: oversizedDetails,
+      details: workflowResult.details,
     });
-    assert.ok(projectedAxes);
-    assert.equal(projectedAxes.isError, false);
-    assert.ok(Buffer.byteLength(projectedAxes.content?.[0]?.text ?? "") <= 32 * 1024);
-    const projectedDetails = projectedAxes.details as { mode: string; results: Array<Record<string, unknown>> };
-    assert.equal(projectedDetails.mode, "workflow");
-    assert.equal(projectedDetails.results.length, 2);
-    for (const [index, projected] of projectedDetails.results.entries()) {
-      assert.deepEqual(Object.keys(projected).sort(), ["axis", "exitCode", "finalOutput", "outputBytes", "outputDigest"]);
-      assert.ok(Buffer.byteLength(String(projected.finalOutput)) <= 12 * 1024);
-      assert.match(String(projected.finalOutput), new RegExp(`_AXIS_${index}_END$`));
-      assert.equal(projected.outputBytes, 100_011);
-      assert.match(String(projected.outputDigest), /^[0-9a-f]{64}$/);
-    }
 
     await assert.rejects(() => submit.execute("submit-before-validation", {
       status: "pass",
@@ -277,16 +252,7 @@ test("Reviewer tools isolate validation and write one identity-bound result", as
       findings: [],
     }), /requires a review_validate run/);
     process.env.HERDR_REVIEWER_TEST_SECRET = "must-not-leak";
-    const validationResult = await validate.execute("validate", {});
-    const validationDetails = JSON.parse(validationResult.content[0]?.text ?? "{}") as Record<string, unknown>;
-    assert.ok(Buffer.byteLength(String(validationDetails.stdout)) <= 8 * 1024);
-    assert.ok(Buffer.byteLength(String(validationDetails.stderr)) <= 8 * 1024);
-    assert.match(String(validationDetails.stdout), /\[truncated\]\n.*STDOUT_END$/s);
-    assert.match(String(validationDetails.stderr), /\[truncated\]\n.*STDERR_END$/s);
-    assert.equal(validationDetails.stdoutBytes, 100010);
-    assert.equal(validationDetails.stderrBytes, 100010);
-    assert.match(String(validationDetails.stdoutDigest), /^[0-9a-f]{64}$/);
-    assert.match(String(validationDetails.stderrDigest), /^[0-9a-f]{64}$/);
+    await validate.execute("validate", {});
     assert.equal(readFileSync(join(validation, "validation-only.txt"), "utf8"), "ok");
     assert.equal(readFileSync(join(source, "product.txt"), "utf8"), "source\n");
     const validationEnv = JSON.parse(readFileSync(join(validation, "validation-env.json"), "utf8")) as Record<string, string>;

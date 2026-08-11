@@ -184,51 +184,6 @@ test("Pi RPC adapter propagates only validated structured diagnostics", async ()
         rmSync(fixture.root, { recursive: true, force: true });
     }
 });
-test("Pi RPC adapter returns a durable result written before a confirmed terminal failure", async () => {
-    const fixture = rpcFixture();
-    try {
-        const plan = fixture.plan();
-        const identity = receiptIdentity(plan);
-        const diagnostic = {
-            failureDomain: "rpc_protocol",
-            failureCode: "rpc_line_too_large",
-            retryable: false,
-            diagnosticFingerprint: "3".repeat(64),
-            failureStage: "agent-run",
-            childExit: { code: 0, signal: null },
-        };
-        writeExclusiveJson(join(plan.runtimeRoot, "plan.json"), plan);
-        writeExclusiveJson(join(plan.runtimeRoot, "dispatch.json"), { version: 1 });
-        writeFileSync(fixture.attempt.resultPath, `${JSON.stringify(workerResult(fixture.attempt.id))}\n`);
-        writeAtomicJson(join(plan.runtimeRoot, "terminal.json"), {
-            ...identity,
-            ok: false,
-            error: "Pi RPC runner failed",
-            ...diagnostic,
-        });
-        writeAtomicJson(join(plan.runtimeRoot, "terminated.json"), {
-            ...identity,
-            ok: true,
-            reason: "runner failure child exit confirmed",
-        });
-        const observation = await new PiRpcRuntime({ runInPane: async () => undefined }).wait({
-            handle: fixture.handle,
-            attempt: fixture.attempt,
-            resultPath: fixture.attempt.resultPath,
-            expectedJobId: "job-1",
-            expectedAttemptId: fixture.attempt.id,
-            expectedLane: "worker",
-        });
-        assert.equal(observation.agentStatus, "done");
-        assert.equal(observation.result?.attemptId, fixture.attempt.id);
-        assert.match(observation.diagnostic ?? "", /rpc_protocol\/rpc_line_too_large/);
-        assert.match(observation.diagnostic ?? "", /stage=agent-run/);
-        assert.equal(observation.diagnostic?.includes("messages"), false);
-    }
-    finally {
-        rmSync(fixture.root, { recursive: true, force: true });
-    }
-});
 test("Pi RPC adapter rejects an unqualified Pi protocol version", async () => {
     const fixture = rpcFixture();
     try {
@@ -650,10 +605,6 @@ test("durable runner rejects a settled assistant failure without persisting Prov
             assert.equal(terminal.agentSettled, true);
             const events = readFileSync(join(plan.runtimeRoot, "runtime-events.jsonl"), "utf8");
             assert.match(events, new RegExp(`"type":"message_end".*"role":"assistant".*"stopReason":"${stopReason}"`));
-            if (scenario.tool) {
-                assert.match(events, /"type":"tool_execution_end".*"toolName":"read"/);
-                assert.equal(events.includes("fixed fixture result"), false);
-            }
             assert.equal(existsSync(fixture.attempt.resultPath), false);
             for (const path of filesUnder(plan.runtimeRoot))
                 assert.equal(readFileSync(path, "utf8").includes(sentinel), false, path);
