@@ -663,9 +663,12 @@ function mergeRecord(base: Record<string, unknown> | undefined, override: Record
 
 function compatObject(value: unknown, label: string): Record<string, unknown> {
   const record = exactObject(value, [
-    "supportsStore", "supportsDeveloperRole", "requiresReasoningContentOnAssistantMessages", "thinkingFormat",
+    "supportsStore", "supportsDeveloperRole", "requiresReasoningContentOnAssistantMessages", "forceAdaptiveThinking",
+    "thinkingFormat",
   ], label);
-  for (const key of ["supportsStore", "supportsDeveloperRole", "requiresReasoningContentOnAssistantMessages"]) {
+  for (const key of [
+    "supportsStore", "supportsDeveloperRole", "requiresReasoningContentOnAssistantMessages", "forceAdaptiveThinking",
+  ]) {
     if (record[key] !== undefined) requiredBoolean(record, key);
   }
   if (record.thinkingFormat !== undefined) {
