@@ -129,14 +129,18 @@ test("Hermes status stays read-only and renders bounded ledger facts", () => {
         writeFileSync(join(stateDir, "state.json"), `${JSON.stringify(state)}\n`, { encoding: "utf8", mode: 0o600 });
         const status = run("status", bridgeConfig);
         assert.equal(status.status, 0);
+        assert.match(status.stdout, /^🚨 Harness · BLOCKED/m);
+        assert.match(status.stdout, /\n\n进度\n/);
+        assert.match(status.stdout, /\n\n下一步\n/);
         assert.match(status.stdout, /owner\/repo#48/);
         assert.match(status.stdout, /provider=openai-codex · model=gpt-test · effort=max/);
-        assert.match(status.stdout, /Reviewer 配置：provider=openai-codex · model=gpt-5\.6-sol · effort=max/);
-        assert.match(status.stdout, /本轮运行：尚未记录运行信息，暂时无法确认模型。/);
+        assert.match(status.stdout, /• Reviewer：provider=openai-codex · model=gpt-5\.6-sol · effort=max/);
+        assert.match(status.stdout, /• 本轮：尚未记录运行信息，暂时无法确认模型。/);
         assert.ok(!status.stdout.includes("ledger 未持久化"));
-        assert.match(status.stdout, /更新时间：08-07 08:02:00 GMT\+8/);
+        assert.match(status.stdout, /• 更新：08-07 08:02:00 GMT\+8/);
         assert.ok(!status.stdout.includes("2026-08-07T00:02:00.000Z"));
         assert.ok(!status.stdout.includes("THIS OBJECTIVE MUST NOT BE EXPOSED"));
+        assertMobileReadable(status.stdout);
         attempt.executionSnapshot = {
             version: 1,
             adapter: "pi-rpc",
@@ -158,25 +162,35 @@ test("Hermes status stays read-only and renders bounded ledger facts", () => {
         writeFileSync(join(stateDir, "state.json"), `${JSON.stringify(state)}\n`, { encoding: "utf8", mode: 0o600 });
         const boundStatus = run("status", bridgeConfig);
         assert.equal(boundStatus.status, 0);
-        assert.match(boundStatus.stdout, /本轮运行：Reviewer · pi-rpc · provider=review-provider · model=review-model · effort=max/);
+        assert.match(boundStatus.stdout, /• 本轮：Reviewer · pi-rpc · provider=review-provider · model=review-model · effort=max/);
         const blocked = run("incident", bridgeConfig);
         assert.equal(blocked.status, 0);
-        assert.match(blocked.stdout, /Analyst 建议：retry_fresh_reviewer/);
-        assert.match(blocked.stdout, /可执行操作：批准 fresh retry \(decision-[0-9a-f]{16}\)/);
-        assert.match(blocked.stdout, /Telegram 决策卡/);
+        assert.match(blocked.stdout, /^🚨 阻塞详情/m);
+        assert.match(blocked.stdout, /\n\n发生了什么\n/);
+        assert.match(blocked.stdout, /\n\n可做什么\n/);
+        assert.match(blocked.stdout, /建议动作：retry_fresh_reviewer/);
+        assert.match(blocked.stdout, /• 批准 fresh retry \(decision-[0-9a-f]{16}\)/);
+        assert.match(blocked.stdout, /发送：\/harness retry/);
         const why = run("why", bridgeConfig);
         assert.equal(why.status, 0);
-        assert.match(why.stdout, /主要原因：The Reviewer Provider failed/);
-        assert.match(why.stdout, /rejected\/high：The candidate HEAD changed/);
-        assert.match(why.stdout, /必须保留：Keep the reviewed HEAD unchanged/);
+        assert.match(why.stdout, /^🧭 为什么卡住了/m);
+        assert.match(why.stdout, /\n\n结论\n/);
+        assert.match(why.stdout, /主要原因 · high\nThe Reviewer Provider failed/);
+        assert.match(why.stdout, /• rejected · The candidate HEAD changed/);
+        assert.match(why.stdout, /必须保留\n• Keep the reviewed HEAD unchanged/);
+        assert.match(why.stdout, /\n\n下一步\n/);
+        assertMobileReadable(why.stdout);
         const evidence = run("evidence", bridgeConfig);
         assert.equal(evidence.status, 0);
-        assert.match(evidence.stdout, /Evidence digest：/);
-        assert.match(evidence.stdout, /- attempt_result/);
+        assert.match(evidence.stdout, /^🔎 证据索引/m);
+        assert.match(evidence.stdout, /• Digest /);
+        assert.match(evidence.stdout, /• attempt_result/);
         const actions = run("actions", bridgeConfig);
         assert.equal(actions.status, 0);
-        assert.match(actions.stdout, /精确绑定操作/);
-        assert.match(actions.stdout, /命令：\/harness retry/);
+        assert.match(actions.stdout, /^🎛️ 当前可操作/m);
+        assert.match(actions.stdout, /发送：\/harness retry/);
+        assert.match(actions.stdout, /\n\n安全校验\n/);
+        assertMobileReadable(actions.stdout);
         const notification = run("notification", bridgeConfig);
         assert.equal(notification.status, 0);
         assert.match(notification.stdout, /^⚠️ 需要关注 · #48/m);
@@ -249,5 +263,11 @@ function run(command, config) {
         env: { ...process.env, TZ: "UTC" },
         timeout: 5_000,
     });
+}
+function assertMobileReadable(value) {
+    assert.ok(value.length <= 2_400, `Telegram operator output is too long: ${value.length}`);
+    for (const line of value.trimEnd().split("\n")) {
+        assert.ok(line.length <= 280, `Telegram operator line is too long: ${line.length}`);
+    }
 }
 //# sourceMappingURL=hermes-status.test.js.map

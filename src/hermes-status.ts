@@ -67,24 +67,30 @@ function renderWhy(state: HarnessState): string {
   if (!analysis) return `当前 incident ${clean(job.incident.id, 160)} 尚无精确绑定的 durable analysis。`;
   const diagnosis = analysis.diagnosis;
   const lines = [
-    `任务：${clean(job.task.repo, 160)}#${job.task.issueNumber} · revision ${job.revision}`,
-    `结论：${clean(analysis.summary, 800)}`,
-    `主要原因：${clean(diagnosis?.primaryCause ?? analysis.summary, 900)}`,
-    `置信度：${diagnosis?.confidence ?? "未结构化"}`,
+    "🧭 为什么卡住了",
+    `${mobileTask(job)} · rev ${job.revision}`,
+    "",
+    "结论",
+    clean(presentedAnalysisSummary(analysis), 260),
+    "",
+    `主要原因 · ${diagnosis?.confidence ?? "未结构化"}`,
+    clean(diagnosis?.primaryCause ?? analysis.summary, 260),
   ];
   if (diagnosis?.hypotheses.length) {
-    lines.push("假设检验：", ...diagnosis.hypotheses.map((hypothesis) => (
-      `- ${hypothesis.status}/${hypothesis.confidence}：${clean(hypothesis.claim, 420)} [${hypothesis.evidenceRefs.join(", ") || "无引用"}]`
-    )));
-  }
-  if (diagnosis?.contributingFactors.length) {
-    lines.push(`促成因素：${diagnosis.contributingFactors.map((value) => clean(value, 280)).join("；")}`);
+    lines.push("", "关键依据", ...diagnosis.hypotheses.slice(0, 2).map((hypothesis) => (
+      `• ${hypothesis.status} · ${clean(hypothesis.claim, 230)}`
+    )), ...(diagnosis.hypotheses.length > 2 ? [`• …另 ${diagnosis.hypotheses.length - 2} 项见证据索引`] : []));
   }
   if (diagnosis?.preservationConstraints.length) {
-    lines.push(`必须保留：${diagnosis.preservationConstraints.map((value) => clean(value, 280)).join("；")}`);
+    lines.push("", "必须保留", ...mobileBullets(diagnosis.preservationConstraints));
   }
-  if (analysis.unknowns.length) lines.push(`仍未知：${analysis.unknowns.map((value) => clean(value, 280)).join("；")}`);
-  lines.push(`建议：${clean(analysis.resolutionBrief || "保持 blocked，等待新的精确 operator action。", 900)}`);
+  if (analysis.unknowns.length) lines.push("", "仍需确认", ...mobileBullets(analysis.unknowns));
+  lines.push(
+    "",
+    "下一步",
+    clean(analysis.resolutionBrief || "保持 blocked，等待新的精确 operator action。", 260),
+    "发送 /harness_actions 查看当前允许的操作。",
+  );
   return lines.join("\n");
 }
 
@@ -94,13 +100,17 @@ function renderEvidence(state: HarnessState): string {
   const analysis = job.analysis?.incidentId === job.incident.id ? job.analysis : null;
   if (!analysis) return "当前 incident 尚无精确绑定的 durable analysis。";
   return [
-    `任务：${clean(job.task.repo, 160)}#${job.task.issueNumber} · revision ${job.revision}`,
-    `Incident：${clean(job.incident.id, 160)}`,
-    `Analysis：${clean(analysis.id, 160)}`,
-    `Evidence digest：${analysis.evidenceDigest}`,
-    "证据引用：",
-    ...analysis.evidenceRefs.map((ref) => `- ${clean(ref, 128)}`),
-    ...(analysis.unknowns.length ? ["未决信息：", ...analysis.unknowns.map((value) => `- ${clean(value, 300)}`)] : []),
+    "🔎 证据索引",
+    `${mobileTask(job)} · rev ${job.revision}`,
+    "",
+    "绑定",
+    `• Incident ${clean(job.incident.id, 120)}`,
+    `• Analysis ${clean(analysis.id, 120)}`,
+    `• Digest ${analysis.evidenceDigest}`,
+    "",
+    "证据引用",
+    ...mobileBullets(analysis.evidenceRefs, 8, 128),
+    ...(analysis.unknowns.length ? ["", "仍需确认", ...mobileBullets(analysis.unknowns)] : []),
   ].join("\n");
 }
 
@@ -110,12 +120,16 @@ function renderActions(state: HarnessState, laneId?: string): string {
   if (projection.actions.length === 0) return `当前 revision ${projection.revision} 没有可执行 operator action。`;
   const prefix = `/harness${laneId ? ` ${laneId}` : ""}`;
   return [
-    `任务：${projection.jobId} · revision ${projection.revision}`,
-    "精确绑定操作：",
-    ...projection.actions.map((action) => (
-      `- ${operatorActionLabel(action)}\n  命令：${prefix} ${operatorActionCommand(action.kind)}`
-    )),
-    "所有写操作都会先创建 10 分钟单次 challenge，并在确认时重新校验 revision、incident、analysis、attempt 与 HEAD。",
+    "🎛️ 当前可操作",
+    `${clean(projection.jobId, 100)} · rev ${projection.revision}`,
+    "",
+    ...projection.actions.flatMap((action, index) => [
+      `${index + 1}. ${operatorActionLabel(action)}`,
+      `   发送：${prefix} ${operatorActionCommand(action.kind)}`,
+    ]),
+    "",
+    "安全校验",
+    "命令先创建 10 分钟单次 challenge；确认时会重新核对 revision、incident、analysis、attempt 与 HEAD。",
   ].join("\n");
 }
 
@@ -130,33 +144,43 @@ function renderStatus(state: HarnessState, config: HarnessStatusConfig): string 
   const job = state.activeJob;
   if (!job) {
     return [
-      "Herdr Harness Lite",
-      `仓库：${clean(config.repo, 160)}`,
-      "状态：空闲（ledger 无活跃任务）",
-      `历史终态任务：${state.terminalJobs.length}`,
-      "下一步：是否继续领取由正在运行的 Controller 和 GitHub eligibility 决定。",
+      "🟢 Harness · IDLE",
+      clean(config.repo, 180),
+      "",
+      "概况",
+      "• 状态：空闲（ledger 无活跃任务）",
+      `• 历史终态任务：${state.terminalJobs.length}`,
+      "",
+      "下一步",
+      "是否继续领取由正在运行的 Controller 和 GitHub eligibility 决定。",
     ].join("\n");
   }
 
   const projection = projectOperatorState(state);
   const lines = [
-    "Herdr Harness Lite",
-    `任务：${clean(job.task.repo, 160)}#${job.task.issueNumber} ${clean(job.task.title, 240)}`,
-    `状态：${job.state} · revision ${job.revision}`,
-    `Review：${job.reviewRound}/${job.maxReviewRounds}`,
-    `CI rework：${job.ciReworkCount ?? 0}/${MAX_CI_REWORKS}`,
+    `${stateIcon(job.state)} Harness · ${job.state.toUpperCase()}`,
+    `${mobileTask(job)} · rev ${job.revision}`,
+    clean(job.task.title, 180),
+    "",
+    "进度",
+    `• Review ${job.reviewRound}/${job.maxReviewRounds}`,
+    `• CI rework ${job.ciReworkCount ?? 0}/${MAX_CI_REWORKS}`,
   ];
   if (job.activeAttempt) {
-    lines.push(`当前尝试：${job.activeAttempt.lane} · ${job.activeAttempt.phase} · round ${job.activeAttempt.round}`);
+    lines.push(`• 当前：${job.activeAttempt.lane} · ${job.activeAttempt.phase} · round ${job.activeAttempt.round}`);
   }
-  if (job.headSha) lines.push(`HEAD：${shortSha(job.headSha)}`);
-  if (job.pullRequest) lines.push(`PR：#${job.pullRequest.number} ${clean(job.pullRequest.url, 500)}`);
+  if (job.headSha) lines.push(`• HEAD ${shortSha(job.headSha)}`);
+  if (job.pullRequest) lines.push(`• PR #${job.pullRequest.number} ${clean(job.pullRequest.url, 220)}`);
   lines.push(
-    `Worker 配置：${runtimeSelection(config.workerArgv)}`,
-    `Reviewer 配置：${runtimeSelection(resolveReviewerProviderProfile(config.reviewerArgv, config.reviewerProviderProfiles).argv)}`,
-    `本轮运行：${activeRuntime(job)}`,
-    `更新时间：${displayTime(job.updatedAt)}`,
-    `下一步：${nextStep(job, projection)}`,
+    "",
+    "运行信息",
+    `• Worker：${clean(runtimeSelection(config.workerArgv), 230)}`,
+    `• Reviewer：${clean(runtimeSelection(resolveReviewerProviderProfile(config.reviewerArgv, config.reviewerProviderProfiles).argv), 230)}`,
+    `• 本轮：${clean(activeRuntime(job), 230)}`,
+    `• 更新：${displayTime(job.updatedAt)}`,
+    "",
+    "下一步",
+    clean(nextStep(job, projection), 260),
   );
   return lines.join("\n");
 }
@@ -219,42 +243,53 @@ function renderIncident(state: HarnessState, laneId?: string): string {
   const actions = projectOperatorState(state).actions;
 
   const lines = [
-    `任务：${clean(job.task.repo, 160)}#${job.task.issueNumber} ${clean(job.task.title, 240)}`,
-    `状态：${job.state} · revision ${job.revision}`,
-    `Incident：${clean(incident.id, 512)}`,
-    `分类：${incident.class} · lane ${incident.lane}`,
-    `摘要：${clean(incident.summary, 700)}`,
+    "🚨 阻塞详情",
+    `${mobileTask(job)} · rev ${job.revision}`,
+    `${incident.class} · ${incident.lane}`,
+    "",
+    "发生了什么",
+    clean(incident.summary, 260),
     ...(incident.runtimeDiagnostic
-      ? [`运行诊断：${clean(formatSafePiRpcDiagnostic(incident.runtimeDiagnostic), 700)}`]
+      ? ["", "运行诊断", clean(formatSafePiRpcDiagnostic(incident.runtimeDiagnostic), 260)]
       : []),
-    `可执行操作：${actions.length > 0 ? actions.map(operatorActionLabel).join("；") : "无"}`,
   ];
 
   const analysis = job.analysis?.incidentId === incident.id ? job.analysis : null;
   if (!analysis) {
-    lines.push("Analyst：尚无与当前 incident 精确绑定的 durable analysis。", "下一步：等待 Controller 调用 Analyst；不要手工恢复。");
+    lines.push("", "Analyst 判断", "尚无与当前 incident 精确绑定的 durable analysis。", "", "下一步", "等待 Controller 调用 Analyst；不要手工恢复。");
     return lines.join("\n");
   }
 
   lines.push(
-    `Analysis：${clean(analysis.id, 512)}`,
-    `Analyst 建议：${analysis.action}`,
-    `判断：${clean(presentedAnalysisSummary(analysis), 700)}`,
-    `恢复说明：${clean(analysis.resolutionBrief, 900)}`,
+    "",
+    "Analyst 判断",
+    clean(presentedAnalysisSummary(analysis), 260),
+    `建议动作：${analysis.action}`,
   );
   if (analysis.unknowns.length > 0) {
-    lines.push(`未决信息：${analysis.unknowns.slice(0, 3).map((value) => clean(value, 240)).join("；")}`);
+    lines.push("", "仍需确认", ...mobileBullets(analysis.unknowns));
   }
-  if (job.state === "recovery_approved" && job.approval?.basis === "policy_rule") {
-    lines.push("下一步：低风险恢复已由精确策略授权；Controller 将重新校验后启动 fresh retry，无需人工批准。");
-  } else if (actions.some((action) => action.kind === "approve_retry")) {
-    lines.push(`下一步：使用当前 Telegram 决策卡批准 fresh retry，或发送 ${approvalCommand(laneId)} 获取新的 10 分钟挑战。`);
-  } else if (actions.length > 0) {
-    lines.push("下一步：选择上面的精确操作 ID；Harness 会在执行时重新校验全部绑定。");
-  } else if (analysis.action === "hold") {
-    lines.push("下一步：Analyst 建议 hold；没有可批准的 fresh retry。");
+  lines.push("", "可做什么");
+  if (actions.length > 0) {
+    const prefix = `/harness${laneId ? ` ${laneId}` : ""}`;
+    lines.push(...actions.flatMap((action) => [
+      `• ${operatorActionLabel(action)}`,
+      `  发送：${prefix} ${operatorActionCommand(action.kind)}`,
+    ]));
   } else {
-    lines.push("下一步：当前建议已失效或不符合策略；不要手工恢复。");
+    lines.push("• 当前没有可执行操作");
+  }
+  lines.push("", "下一步");
+  if (job.state === "recovery_approved" && job.approval?.basis === "policy_rule") {
+    lines.push("低风险恢复已由精确策略授权；Controller 将重新校验后启动 fresh retry，无需人工批准。");
+  } else if (actions.some((action) => action.kind === "approve_retry")) {
+    lines.push(`发送 ${approvalCommand(laneId)} 获取新的 10 分钟 challenge。`);
+  } else if (actions.length > 0) {
+    lines.push("选择上面的精确操作；Harness 会在执行时重新校验全部绑定。");
+  } else if (analysis.action === "hold") {
+    lines.push("Analyst 建议 hold；没有可批准的 fresh retry。");
+  } else {
+    lines.push("当前建议已失效或不符合策略；不要手工恢复。");
   }
   return lines.join("\n");
 }
@@ -337,7 +372,25 @@ function loadBridgeConfig(path: string): BridgeConfig {
 }
 
 function approvalCommand(laneId?: string): string {
-  return laneId ? `/harness ${laneId} approve` : "/harness approve";
+  return laneId ? `/harness ${laneId} retry` : "/harness_retry";
+}
+
+function mobileTask(job: Job): string {
+  return clean(`${job.task.repo}#${job.task.issueNumber}`, 220);
+}
+
+function mobileBullets(values: string[], limit = 2, max = 200): string[] {
+  const shown = values.slice(0, limit).map((value) => `• ${clean(value, max)}`);
+  if (values.length > limit) shown.push(`• …另 ${values.length - limit} 项`);
+  return shown;
+}
+
+function stateIcon(state: Job["state"]): string {
+  if (state === "blocked") return "🚨";
+  if (state === "done") return "✅";
+  if (state === "cancelled") return "⛔";
+  if (state.endsWith("_running")) return "⚙️";
+  return "🟡";
 }
 
 function loadHarnessConfig(path: string): HarnessStatusConfig {
