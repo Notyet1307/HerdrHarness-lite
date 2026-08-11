@@ -152,7 +152,10 @@ test("strict Pi RPC JSONL keeps Unicode separators inside one record", () => {
     decoder.finish();
     assert.equal(records.length, 1);
     assert.equal(records[0]?.text, "left\u2028right\u2029done");
-    assert.throws(() => new StrictJsonlDecoder().push(`${"x".repeat(1024 * 1024 + 1)}`), /maximum size/);
+    assert.throws(() => new StrictJsonlDecoder().push(`${"x".repeat(1024 * 1024 + 1)}`), /rpc_line_too_large/);
+    const accepted = [];
+    assert.throws(() => new StrictJsonlDecoder().push('{"type":"agent_settled"}\n{malformed\n', (record) => accepted.push(record)), /rpc_invalid_json/);
+    assert.deepEqual(accepted, [{ type: "agent_settled" }]);
 });
 test("durable runner disables retry and compaction before dispatch and settles through result", () => {
     const fixture = rpcFixture();
@@ -580,7 +583,11 @@ test("durable runner redacts malformed Provider output before ready or after set
     }
 });
 test("durable runner fails closed when RPC JSONL breaks before or after settlement", () => {
-    for (const malformedVariable of ["FAKE_PI_MALFORMED_AFTER_PROMPT", "FAKE_PI_MALFORMED_AFTER_SETTLED"]) {
+    for (const [malformedVariable, expectedCode] of [
+        ["FAKE_PI_MALFORMED_AFTER_PROMPT", "rpc_invalid_json"],
+        ["FAKE_PI_MALFORMED_AFTER_SETTLED", "rpc_invalid_json"],
+        ["FAKE_PI_INCOMPLETE_AFTER_SETTLED", "rpc_incomplete_jsonl"],
+    ]) {
         const fixture = rpcFixture();
         const previous = {
             result: process.env.FAKE_PI_RESULT_PATH,
@@ -629,7 +636,21 @@ test("durable runner fails closed when RPC JSONL breaks before or after settleme
             assert.equal(execution.ok, false, malformedVariable);
             // A later malformed record may share the stdout chunk with the prompt ack;
             // the durable dispatch intent, not an invented acceptance, prevents replay.
-            assert.equal(readJson(join(plan.runtimeRoot, "terminal.json")).ok, false);
+            const terminal = readJson(join(plan.runtimeRoot, "terminal.json"));
+            assert.equal(terminal.ok, false);
+            assert.equal(terminal.failureDomain, "rpc_protocol");
+            assert.equal(terminal.failureCode, expectedCode);
+            assert.equal(terminal.retryable, false);
+            if (malformedVariable === "FAKE_PI_MALFORMED_AFTER_PROMPT") {
+                assert.equal(terminal.failureStage, "agent-run");
+            }
+            else {
+                assert.match(String(terminal.failureStage), /^(?:agent-run|rpc-output)$/);
+            }
+            assert.equal(terminal.agentSettled, malformedVariable !== "FAKE_PI_MALFORMED_AFTER_PROMPT");
+            assert.equal(terminal.agentEndObserved, malformedVariable !== "FAKE_PI_MALFORMED_AFTER_PROMPT");
+            assert.equal(terminal.lastEventType, malformedVariable === "FAKE_PI_MALFORMED_AFTER_PROMPT" ? "turn_start" : "agent_settled");
+            assert.match(String(terminal.diagnosticFingerprint), /^[0-9a-f]{64}$/);
             assert.equal(readJson(join(plan.runtimeRoot, "terminated.json")).ok, true);
         }
         finally {
@@ -690,13 +711,17 @@ test("durable runner handles child exit races and records sanitized failures", a
                 assert.deepEqual(terminal, { ...receiptIdentity(plan), ok: true, agentSettled: true });
             }
             else {
-                assert.deepEqual(terminal, {
-                    ...receiptIdentity(plan),
-                    ok: false,
-                    error: "Pi RPC runner failed",
-                    failureStage: "child-exit",
-                    childExit: expected,
-                });
+                assert.equal(terminal.ok, false);
+                assert.equal(terminal.error, "Pi RPC runner failed");
+                assert.equal(terminal.failureStage, "child-exit");
+                assert.equal(terminal.failureDomain, "child_process");
+                assert.equal(terminal.failureCode, "child_exit_after_settled");
+                assert.equal(terminal.retryable, false);
+                assert.equal(terminal.agentSettled, true);
+                assert.equal(terminal.agentEndObserved, true);
+                assert.equal(terminal.lastEventType, "agent_settled");
+                assert.deepEqual(terminal.childExit, expected);
+                assert.match(String(terminal.diagnosticFingerprint), /^[0-9a-f]{64}$/);
                 await assert.rejects(() => new PiRpcRuntime({ runInPane: async () => undefined }).wait({
                     handle: fixture.handle,
                     attempt: fixture.attempt,
@@ -704,7 +729,7 @@ test("durable runner handles child exit races and records sanitized failures", a
                     expectedJobId: "job-1",
                     expectedAttemptId: fixture.attempt.id,
                     expectedLane: "worker",
-                }), new RegExp(`Pi RPC runner failed \\(stage=child-exit, child=${mode === "code" ? "exit:23" : "signal:SIGTERM"}\\)`));
+                }), new RegExp(`Pi RPC runner failed \\(domain=child_process, code=child_exit_after_settled, retryable=no, stage=child-exit, child=${mode === "code" ? "exit:23" : "signal:SIGTERM"}, fingerprint=[0-9a-f]{12}\\)`));
             }
             for (const path of filesUnder(plan.runtimeRoot))
                 assert.equal(readFileSync(path, "utf8").includes(sentinel), false, path);

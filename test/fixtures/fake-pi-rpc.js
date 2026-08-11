@@ -140,6 +140,9 @@ function respond(command) {
   if (process.env.FAKE_PI_MALFORMED_AFTER_SETTLED === "1") {
     setTimeout(() => process.stdout.write("{malformed-after-settled\n"), 0);
   }
+  if (process.env.FAKE_PI_INCOMPLETE_AFTER_SETTLED === "1") {
+    setTimeout(() => process.stdout.write('{"type":"incomplete"'), 0);
+  }
   if (process.env.FAKE_PI_MALFORMED_SECRET_PHASE === "after-settled") {
     setTimeout(() => process.stdout.write(`${process.env.FAKE_PI_MALFORMED_SECRET}\n`), 0);
   }
