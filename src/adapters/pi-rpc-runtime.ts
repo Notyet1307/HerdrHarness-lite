@@ -15,7 +15,11 @@ import {
   writeExclusiveJson,
 } from "../pi-rpc-spool.js";
 import { assertQualifiedPiRpcVersion } from "../pi-rpc-compat.js";
-import { isPiRpcFailureCode, isPiRpcFailureDomain } from "../pi-rpc-diagnostics.js";
+import {
+  formatSafePiRpcDiagnostic,
+  PiRpcRuntimeFailure,
+  safePiRpcDiagnosticFrom,
+} from "../pi-rpc-diagnostics.js";
 
 const READY_TIMEOUT_MS = 30_000;
 const ACCEPT_TIMEOUT_MS = 30_000;
@@ -43,6 +47,14 @@ type RuntimeReceipt = {
   failureCode?: string;
   retryable?: boolean;
   diagnosticFingerprint?: string;
+  httpStatus?: number;
+  providerApi?: string;
+  phase?: string;
+  turnCount?: number;
+  assistantMessageCount?: number;
+  toolExecutionCount?: number;
+  toolErrorCount?: number;
+  transcriptSizeBucket?: string;
   childExit?: { code: number | null; signal: string | null } | null;
 };
 
@@ -71,12 +83,12 @@ export class PiRpcRuntime implements AttemptRuntimePort {
     const ready = readJsonIfExists<ReadyReceipt>(readyPath);
     if (ready) {
       assertReceipt(ready, plan, "ready");
-      if (!ready.ok) throw new Error(`Pi RPC runner is not ready: ${ready.error ?? "unknown failure"}`);
+      if (!ready.ok) throw runtimeFailure(ready, "Pi RPC runner is not ready");
       assertRuntimePolicy(ready, plan);
       return;
     }
     const terminal = readJsonIfExists<RuntimeReceipt>(spoolPath(plan.runtimeRoot, "terminal.json"));
-    if (terminal) throw new Error(`Pi RPC runner terminated before ready: ${terminal.error ?? "unknown failure"}`);
+    if (terminal) throw runtimeFailure(terminal, "Pi RPC runner terminated before ready");
 
     if (!existsSync(spoolPath(plan.runtimeRoot, "owner.json"))) {
       await this.host.runInPane({
@@ -87,7 +99,7 @@ export class PiRpcRuntime implements AttemptRuntimePort {
     }
     const observed = waitForReceipt(plan, "ready.json", READY_TIMEOUT_MS) as ReadyReceipt;
     assertReceipt(observed, plan, "ready");
-    if (!observed.ok) throw new Error(`Pi RPC runner is not ready: ${observed.error ?? "unknown failure"}`);
+    if (!observed.ok) throw runtimeFailure(observed, "Pi RPC runner is not ready");
     assertRuntimePolicy(observed, plan);
   }
 
@@ -148,7 +160,7 @@ export class PiRpcRuntime implements AttemptRuntimePort {
     }
     const terminal = waitForReceipt(plan, "terminal.json", null);
     assertReceipt(terminal, plan, "terminal");
-    if (!terminal.ok) throw new Error(`Pi RPC policy/runtime failure: ${runtimeFailure(terminal)}`);
+    if (!terminal.ok) throw runtimeFailure(terminal, "Pi RPC policy/runtime failure");
     const terminated = waitForReceipt(plan, "terminated.json", TERMINATE_TIMEOUT_MS);
     assertReceipt(terminated, plan, "terminated");
     if (!terminated.ok) throw new Error(`Pi RPC termination is not confirmed: ${terminated.error ?? "unknown failure"}`);
@@ -255,16 +267,24 @@ function assertReceipt(receipt: RuntimeReceipt, plan: PiRpcPlan, label: string):
     || receipt.generation !== plan.generation
     || receipt.planDigest !== plan.planDigest
   ) throw new Error(`Pi RPC ${label} receipt has a different identity`);
+  try {
+    safePiRpcDiagnosticFrom(receipt);
+  } catch {
+    throw new Error(`Pi RPC ${label} receipt has an invalid runtime diagnostic`);
+  }
 }
 
-function runtimeFailure(receipt: RuntimeReceipt): string {
+function runtimeFailure(receipt: RuntimeReceipt, prefix: string): Error {
+  const diagnostic = safePiRpcDiagnosticFrom(receipt);
+  const safeError = safeReceiptError(receipt.error);
+  if (diagnostic) {
+    return new PiRpcRuntimeFailure(
+      `${prefix}: ${safeError} (${formatSafePiRpcDiagnostic(diagnostic)})`,
+      diagnostic,
+    );
+  }
   const details: string[] = [];
-  const structuredRunnerFailure = isPiRpcFailureDomain(receipt.failureDomain) && isPiRpcFailureCode(receipt.failureCode);
-  if (structuredRunnerFailure) {
-    details.push(`domain=${receipt.failureDomain}`);
-    details.push(`code=${receipt.failureCode}`);
-    if (typeof receipt.retryable === "boolean") details.push(`retryable=${receipt.retryable ? "yes" : "no"}`);
-  } else if (receipt.failureClass && RUNNER_FAILURE_CLASSES.has(receipt.failureClass)) {
+  if (receipt.failureClass && RUNNER_FAILURE_CLASSES.has(receipt.failureClass)) {
     details.push(`class=${receipt.failureClass}`);
     if (typeof receipt.retryable === "boolean") details.push(`retryable=${receipt.retryable ? "yes" : "no"}`);
   }
@@ -280,7 +300,13 @@ function runtimeFailure(receipt: RuntimeReceipt): string {
   if (typeof receipt.diagnosticFingerprint === "string" && /^[0-9a-f]{64}$/.test(receipt.diagnosticFingerprint)) {
     details.push(`fingerprint=${receipt.diagnosticFingerprint.slice(0, 12)}`);
   }
-  return `${receipt.error ?? "unknown failure"}${details.length ? ` (${details.join(", ")})` : ""}`;
+  return new Error(`${prefix}: ${safeError}${details.length ? ` (${details.join(", ")})` : ""}`);
+}
+
+function safeReceiptError(value: unknown): string {
+  if (value === "Pi RPC assistant ended with error" || value === "Pi RPC assistant ended with aborted") return value;
+  if (value === "Pi RPC runner failed") return value;
+  return "Pi RPC runtime failed";
 }
 
 function processAlive(pid: number): boolean {

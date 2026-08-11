@@ -56,6 +56,7 @@ import type {
 import { renderAttemptPrompt } from "./prompts.js";
 import { pathIsWithin, pathsOverlap } from "./path-safety.js";
 import { piRpcAgentDir } from "./pi-rpc-spool.js";
+import { safePiRpcDiagnosticFromError, type SafeRuntimeDiagnostic } from "./pi-rpc-diagnostics.js";
 
 const BUNDLED_CODE_REVIEW_SKILL = resolve(import.meta.dirname, "../../pi/skills/code-review");
 const BUNDLED_FOCUSED_SELF_CHECK_SKILL = resolve(import.meta.dirname, "../../pi/skills/focused-self-check");
@@ -577,7 +578,13 @@ export class HarnessController {
           argv: attempt.executionSnapshot!.argv,
         });
       } catch (error) {
-        return this.reconcileAttemptOrBlock(state, job, attempt, `Herdr ${lane} start failed: ${message(error)}`);
+        return this.reconcileAttemptOrBlock(
+          state,
+          job,
+          attempt,
+          `Herdr ${lane} start failed: ${message(error)}`,
+          safePiRpcDiagnosticFromError(error),
+        );
       }
       const ready: Attempt = { ...attempt, phase: "agent_ready", reconciliationAttempts: 0 };
       const next = evolveJob(job, this.deps.clock.now(), { activeAttempt: ready, lastError: null });
@@ -641,7 +648,13 @@ export class HarnessController {
         const integrityBlock = await this.verifyReviewerIntegrity(state, job, attempt, null, null);
         if (integrityBlock) return integrityBlock;
       }
-      return this.reconcileAttemptOrBlock(state, job, attempt, `Herdr ${lane} wait failed: ${message(error)}`);
+      return this.reconcileAttemptOrBlock(
+        state,
+        job,
+        attempt,
+        `Herdr ${lane} wait failed: ${message(error)}`,
+        safePiRpcDiagnosticFromError(error),
+      );
     }
 
     return this.finishObservedAttempt(state, job, attempt, observation);
@@ -687,6 +700,7 @@ export class HarnessController {
     job: Job,
     attempt: Attempt,
     summary: string,
+    runtimeDiagnostic: SafeRuntimeDiagnostic | null = null,
   ): Promise<TickResult> {
     const retries = attempt.reconciliationAttempts ?? 0;
     if (retries >= MAX_ATTEMPT_RECONCILIATIONS) {
@@ -696,6 +710,7 @@ export class HarnessController {
         lane: attempt.lane,
         summary,
         attemptResult: null,
+        ...(runtimeDiagnostic ? { runtimeDiagnostic } : {}),
         ...(automaticRecovery ? { automaticRecovery } : {}),
       });
     }
@@ -1681,6 +1696,7 @@ export class HarnessController {
       attemptResult: AttemptResult | null;
       ciFailure?: CiFailure;
       automaticRecovery?: AutomaticRecoveryCandidate;
+      runtimeDiagnostic?: SafeRuntimeDiagnostic;
     },
   ): Promise<TickResult> {
     const now = this.deps.clock.now();
@@ -1700,6 +1716,7 @@ export class HarnessController {
       blockClass: input.class,
       summary: input.summary,
       ...(input.automaticRecovery ? { automaticRecovery: input.automaticRecovery } : {}),
+      ...(input.runtimeDiagnostic ? { runtimeDiagnostic: input.runtimeDiagnostic } : {}),
       clock: this.deps.clock,
       ids: this.deps.ids,
     });

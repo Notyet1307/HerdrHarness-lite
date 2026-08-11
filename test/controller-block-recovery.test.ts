@@ -1,7 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { HarnessController } from "../src/controller.js";
+import { LocalEvidence } from "../src/adapters/local-evidence.js";
 import { assertJobInvariant } from "../src/model.js";
+import { classifyProviderFailure, PiRpcRuntimeFailure } from "../src/pi-rpc-diagnostics.js";
 import { automaticRecoveryFor, operatorActionsFor, projectOperatorState } from "../src/policy.js";
 import { approveRecovery, cancelHeldJob, reassessIncident, resolveDecision } from "../src/recovery.js";
 import type { HarnessConfig } from "../src/ports.js";
@@ -34,6 +36,52 @@ const config: HarnessConfig = {
   workerArgv: validWorkerArgv,
   reviewerArgv: validReviewerArgv,
 };
+
+test("structured runtime diagnostics survive blocking and reach Analyst evidence", async () => {
+  const store = new MemoryStore();
+  const clock = new FakeClock();
+  const ids = new SequenceIds();
+  const herdr = new FakeHerdr([]);
+  const controller = new HarnessController({
+    config,
+    store,
+    github: new FakeGitHub([issue({ number: 96, title: "Diagnose Provider failure" })]),
+    git: new FakeGit(),
+    herdr,
+    analyst: new FakeAnalyst(),
+    evidence: new FakeEvidence(),
+    clock,
+    ids,
+    preflight: new FakeRuntimePreflight(),
+  });
+  for (let index = 0; index < 10 && store.state.activeJob?.activeAttempt?.phase !== "running"; index += 1) {
+    await controller.tick();
+  }
+  assert.equal(store.state.activeJob?.activeAttempt?.phase, "running");
+
+  const diagnostic = classifyProviderFailure("error", "HTTP 529 overloaded_error access_token_SECRET", {
+    providerApi: "anthropic-messages",
+    phase: "tool_continuation",
+    turnCount: 2,
+    assistantMessageCount: 3,
+    toolExecutionCount: 1,
+    toolErrorCount: 0,
+    transcriptBytes: 70_000,
+  });
+  herdr.waitFailure = new PiRpcRuntimeFailure("safe runtime failure", diagnostic);
+  assert.equal((await controller.tick()).action, "attempt_reconciling");
+  herdr.waitFailure = new PiRpcRuntimeFailure("safe runtime failure", diagnostic);
+  assert.equal((await controller.tick()).action, "blocked");
+
+  const job = store.state.activeJob!;
+  assert.deepEqual(job.incident?.runtimeDiagnostic, diagnostic);
+  assertJobInvariant(job);
+  const evidence = await new LocalEvidence().initial(job);
+  const runtimeEvidence = evidence.items.find((entry) => entry.ref === "runtime-diagnostic");
+  assert.ok(runtimeEvidence);
+  assert.match(runtimeEvidence.summary, /provider_overloaded/);
+  assert.equal(runtimeEvidence.summary.includes("access_token_SECRET"), false);
+});
 
 test("an exact held pre-PR job can be cancelled, archived, and selected again", async () => {
   const store = new MemoryStore();

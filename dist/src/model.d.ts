@@ -1,3 +1,4 @@
+import { type SafeRuntimeDiagnostic } from "./pi-rpc-diagnostics.js";
 export type IssueState = "OPEN" | "CLOSED";
 export type IssueReference = {
     number: number;
@@ -284,6 +285,7 @@ export type Incident = {
     evidenceDigest: string;
     allowedActions: RecoveryAction[];
     automaticRecovery?: AutomaticRecoveryCandidate;
+    runtimeDiagnostic?: SafeRuntimeDiagnostic;
     createdAt: string;
 };
 export type AnalystAdvice = {

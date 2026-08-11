@@ -30,6 +30,9 @@ export class LocalEvidence implements EvidencePort {
       ),
     ];
     if (job.incident) items.push(item("incident", "ledger.incident", JSON.stringify(job.incident)));
+    if (job.incident?.runtimeDiagnostic) {
+      items.push(item("runtime-diagnostic", "ledger.incident.runtimeDiagnostic", JSON.stringify(job.incident.runtimeDiagnostic)));
+    }
     if (job.ciFailure) items.push(item("ci-checks", "github.required-checks", JSON.stringify(job.ciFailure)));
     if (job.activeAttempt) items.push(item("active-attempt", "ledger.activeAttempt", JSON.stringify(job.activeAttempt)));
     const lastReview = [...job.attempts].reverse().find((attempt) => attempt.lane === "reviewer" && attempt.result);

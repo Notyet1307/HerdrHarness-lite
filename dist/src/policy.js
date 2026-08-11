@@ -317,6 +317,7 @@ export function makeIncident(input) {
         blockClass: input.blockClass,
         summary: input.summary,
         ...(input.automaticRecovery ? { automaticRecovery: input.automaticRecovery } : {}),
+        ...(input.runtimeDiagnostic ? { runtimeDiagnostic: input.runtimeDiagnostic } : {}),
         createdAt,
     };
     return {
@@ -328,6 +329,7 @@ export function makeIncident(input) {
         evidenceDigest: digest(core),
         allowedActions: allowedActionsFor(input.blockClass, input.lane),
         ...(input.automaticRecovery ? { automaticRecovery: input.automaticRecovery } : {}),
+        ...(input.runtimeDiagnostic ? { runtimeDiagnostic: input.runtimeDiagnostic } : {}),
         createdAt,
     };
 }

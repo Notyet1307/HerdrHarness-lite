@@ -60,5 +60,9 @@ test("assistant aborts and malformed diagnostics fail closed", () => {
     assert.equal(isSafePiRpcDiagnostic({ ...aborted, httpStatus: 200 }), false);
     assert.equal(isSafePiRpcDiagnostic({ ...aborted, toolExecutionCount: -1 }), false);
     assert.equal(isSafePiRpcDiagnostic({ ...aborted, failureDomain: "provider" }), false);
+    const overloaded = classifyProviderFailure("error", "HTTP 529 overloaded_error", context);
+    assert.equal(isSafePiRpcDiagnostic({ ...overloaded, retryable: false }), false);
+    assert.equal(isSafePiRpcDiagnostic({ ...overloaded, phase: "initial_generation" }), false);
+    assert.equal(isSafePiRpcDiagnostic({ ...overloaded, toolErrorCount: 2 }), false);
 });
 //# sourceMappingURL=pi-rpc-diagnostics.test.js.map

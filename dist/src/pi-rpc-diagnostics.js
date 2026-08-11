@@ -56,6 +56,19 @@ export const PI_RPC_TRANSCRIPT_SIZE_BUCKETS = [
     "256k_1m",
     "gte1m",
 ];
+const STRUCTURED_DIAGNOSTIC_FIELDS = [
+    "failureDomain",
+    "failureCode",
+    "diagnosticFingerprint",
+    "httpStatus",
+    "providerApi",
+    "phase",
+    "turnCount",
+    "assistantMessageCount",
+    "toolExecutionCount",
+    "toolErrorCount",
+    "transcriptSizeBucket",
+];
 const FAILURE_DOMAINS = new Set(PI_RPC_FAILURE_DOMAINS);
 const FAILURE_CODES = new Set(PI_RPC_FAILURE_CODES);
 const PROVIDER_APIS = new Set(PI_RPC_PROVIDER_APIS);
@@ -71,6 +84,14 @@ export class PiRpcRunnerError extends Error {
         this.failureCode = failureCode;
         this.retryable = retryable;
         this.name = "PiRpcRunnerError";
+    }
+}
+export class PiRpcRuntimeFailure extends Error {
+    diagnostic;
+    constructor(message, diagnostic) {
+        super(message);
+        this.diagnostic = diagnostic;
+        this.name = "PiRpcRuntimeFailure";
     }
 }
 export function piRpcRunnerError(failureDomain, failureCode, retryable) {
@@ -142,6 +163,10 @@ export function isSafePiRpcDiagnostic(value) {
         return false;
     if (diagnostic.failureDomain !== "provider" && diagnostic.failureCode.startsWith("provider_"))
         return false;
+    if (diagnostic.failureCode === "assistant_aborted" && (diagnostic.failureDomain !== "runner_internal" || diagnostic.retryable))
+        return false;
+    if (diagnostic.failureCode.startsWith("provider_") && providerRetryable(diagnostic.failureCode) !== diagnostic.retryable)
+        return false;
     if (diagnostic.httpStatus !== undefined && !validHttpStatus(diagnostic.httpStatus))
         return false;
     if (diagnostic.providerApi !== undefined && !PROVIDER_APIS.has(diagnostic.providerApi))
@@ -150,12 +175,66 @@ export function isSafePiRpcDiagnostic(value) {
         return false;
     if (diagnostic.transcriptSizeBucket !== undefined && !TRANSCRIPT_SIZE_BUCKETS.has(diagnostic.transcriptSizeBucket))
         return false;
-    return [
+    const countsValid = [
         diagnostic.turnCount,
         diagnostic.assistantMessageCount,
         diagnostic.toolExecutionCount,
         diagnostic.toolErrorCount,
     ].every((count) => count === undefined || validCount(count));
+    if (!countsValid)
+        return false;
+    if (diagnostic.toolErrorCount !== undefined && diagnostic.toolExecutionCount !== undefined
+        && diagnostic.toolErrorCount > diagnostic.toolExecutionCount)
+        return false;
+    if (diagnostic.failureDomain === "provider" || diagnostic.failureCode === "assistant_aborted") {
+        if (diagnostic.providerApi === undefined
+            || diagnostic.phase === undefined
+            || diagnostic.turnCount === undefined
+            || diagnostic.assistantMessageCount === undefined
+            || diagnostic.toolExecutionCount === undefined
+            || diagnostic.toolErrorCount === undefined
+            || diagnostic.transcriptSizeBucket === undefined
+            || failurePhase(diagnostic.toolExecutionCount, diagnostic.toolErrorCount) !== diagnostic.phase)
+            return false;
+    }
+    return true;
+}
+/** Returns null for legacy receipts and rejects partially structured diagnostics. */
+export function safePiRpcDiagnosticFrom(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value))
+        return null;
+    const record = value;
+    if (!STRUCTURED_DIAGNOSTIC_FIELDS.some((field) => record[field] !== undefined))
+        return null;
+    const candidate = Object.fromEntries([...STRUCTURED_DIAGNOSTIC_FIELDS, "retryable"]
+        .filter((field) => record[field] !== undefined)
+        .map((field) => [field, record[field]]));
+    if (!isSafePiRpcDiagnostic(candidate))
+        throw new Error("invalid safe Pi RPC diagnostic");
+    return candidate;
+}
+export function safePiRpcDiagnosticFromError(error) {
+    return error instanceof PiRpcRuntimeFailure ? error.diagnostic : null;
+}
+export function formatSafePiRpcDiagnostic(diagnostic) {
+    const parts = [
+        `${diagnostic.failureDomain}/${diagnostic.failureCode}`,
+        `retryable=${diagnostic.retryable ? "yes" : "no"}`,
+    ];
+    if (diagnostic.providerApi)
+        parts.push(`api=${diagnostic.providerApi}`);
+    if (diagnostic.phase)
+        parts.push(`phase=${diagnostic.phase}`);
+    if (diagnostic.httpStatus)
+        parts.push(`status=${diagnostic.httpStatus}`);
+    if (diagnostic.toolExecutionCount !== undefined)
+        parts.push(`tools=${diagnostic.toolExecutionCount}`);
+    if (diagnostic.toolErrorCount !== undefined)
+        parts.push(`toolErrors=${diagnostic.toolErrorCount}`);
+    if (diagnostic.transcriptSizeBucket)
+        parts.push(`size=${diagnostic.transcriptSizeBucket}`);
+    parts.push(`fingerprint=${diagnostic.diagnosticFingerprint.slice(0, 12)}`);
+    return parts.join(", ");
 }
 export function providerApi(value) {
     return typeof value === "string" && PROVIDER_APIS.has(value) ? value : "unknown";
@@ -229,6 +308,13 @@ function validCount(value) {
 }
 function validHttpStatus(value) {
     return Number.isInteger(value) && Number(value) >= 400 && Number(value) <= 599;
+}
+function providerRetryable(code) {
+    return code === "provider_rate_limited"
+        || code === "provider_timeout"
+        || code === "provider_overloaded"
+        || code === "provider_upstream_5xx"
+        || code === "provider_network";
 }
 function systemErrorCode(error) {
     if (!error || typeof error !== "object" || !("code" in error))

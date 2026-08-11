@@ -22,7 +22,7 @@ import {
   piRpcRunnerError,
   providerApi,
   type PiRpcProviderApi,
-  type SafePiRpcDiagnostic,
+  type SafeRuntimeDiagnostic,
 } from "./pi-rpc-diagnostics.js";
 
 const MAX_RPC_LINE_BYTES = 1024 * 1024;
@@ -46,7 +46,7 @@ const KNOWN_EVENT_TYPES = new Set([
 type JsonObject = Record<string, unknown>;
 type Child = ReturnType<typeof spawn>;
 type ChildExit = { code: number | null; signal: string | null };
-type AssistantFailure = { error: string; diagnostic: SafePiRpcDiagnostic };
+type AssistantFailure = { error: string; diagnostic: SafeRuntimeDiagnostic };
 
 export class StrictJsonlDecoder {
   private buffer = "";

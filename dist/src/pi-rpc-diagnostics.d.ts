@@ -13,7 +13,7 @@ export declare const PI_RPC_TRANSCRIPT_SIZE_BUCKETS: readonly ["lt64k", "64k_256
 export type PiRpcProviderApi = typeof PI_RPC_PROVIDER_APIS[number];
 export type PiRpcFailurePhase = typeof PI_RPC_FAILURE_PHASES[number];
 export type PiRpcTranscriptSizeBucket = typeof PI_RPC_TRANSCRIPT_SIZE_BUCKETS[number];
-export type SafePiRpcDiagnostic = PiRpcFailureDiagnostic & {
+export type SafeRuntimeDiagnostic = PiRpcFailureDiagnostic & {
     diagnosticFingerprint: string;
     httpStatus?: number;
     providerApi?: PiRpcProviderApi;
@@ -39,6 +39,10 @@ export declare class PiRpcRunnerError extends Error {
     readonly retryable: boolean;
     constructor(failureDomain: PiRpcFailureDomain, failureCode: PiRpcFailureCode, retryable: boolean);
 }
+export declare class PiRpcRuntimeFailure extends Error {
+    readonly diagnostic: SafeRuntimeDiagnostic;
+    constructor(message: string, diagnostic: SafeRuntimeDiagnostic);
+}
 export declare function piRpcRunnerError(failureDomain: PiRpcFailureDomain, failureCode: PiRpcFailureCode, retryable: boolean): PiRpcRunnerError;
 export declare function classifyPiRpcRunnerFailure(error: unknown, failureStage: string): PiRpcFailureDiagnostic;
 export declare function isPiRpcFailureDomain(value: unknown): value is PiRpcFailureDomain;
@@ -47,7 +51,11 @@ export declare function isPiRpcFailureCode(value: unknown): value is PiRpcFailur
  * Converts untrusted Provider text into a bounded, content-free diagnostic.
  * The input must never be logged, persisted, or included in the fingerprint.
  */
-export declare function classifyProviderFailure(stopReason: "error" | "aborted", errorMessage: unknown, context: ProviderFailureContext): SafePiRpcDiagnostic;
-export declare function isSafePiRpcDiagnostic(value: unknown): value is SafePiRpcDiagnostic;
+export declare function classifyProviderFailure(stopReason: "error" | "aborted", errorMessage: unknown, context: ProviderFailureContext): SafeRuntimeDiagnostic;
+export declare function isSafePiRpcDiagnostic(value: unknown): value is SafeRuntimeDiagnostic;
+/** Returns null for legacy receipts and rejects partially structured diagnostics. */
+export declare function safePiRpcDiagnosticFrom(value: unknown): SafeRuntimeDiagnostic | null;
+export declare function safePiRpcDiagnosticFromError(error: unknown): SafeRuntimeDiagnostic | null;
+export declare function formatSafePiRpcDiagnostic(diagnostic: SafeRuntimeDiagnostic): string;
 export declare function providerApi(value: unknown): PiRpcProviderApi;
 export declare function failurePhase(toolExecutionCount: number, toolErrorCount: number): PiRpcFailurePhase;

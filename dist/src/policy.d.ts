@@ -1,4 +1,5 @@
 import type { Attempt, AttemptResult, AnalystAdvice, Approval, AutomaticRecoveryCandidate, BlockClass, EvidencePack, HarnessState, Incident, Job, JobState, RecoveryAction } from "./model.js";
+import type { SafeRuntimeDiagnostic } from "./pi-rpc-diagnostics.js";
 import type { Clock, IdGenerator } from "./ports.js";
 export declare function allowedActionsFor(blockClass: BlockClass, lane: Incident["lane"]): RecoveryAction[];
 export declare function automaticRecoveryCandidateForAttempt(job: Job, attempt: Attempt): AutomaticRecoveryCandidate | undefined;
@@ -45,6 +46,7 @@ export declare function makeIncident(input: {
     blockClass: BlockClass;
     summary: string;
     automaticRecovery?: AutomaticRecoveryCandidate;
+    runtimeDiagnostic?: SafeRuntimeDiagnostic;
     clock: Clock;
     ids: IdGenerator;
 }): Incident;

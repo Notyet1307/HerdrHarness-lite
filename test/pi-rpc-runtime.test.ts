@@ -10,6 +10,10 @@ import { digest, type AgentHandle, type Attempt, type ExecutionSnapshot } from "
 import { executionResource, executionResourceDigest } from "../src/attempt-plan.js";
 import { StrictJsonlDecoder } from "../src/pi-rpc-runner.js";
 import {
+  classifyProviderFailure,
+  PiRpcRuntimeFailure,
+} from "../src/pi-rpc-diagnostics.js";
+import {
   readJson,
   rpcGeneration,
   type PiRpcPlan,
@@ -117,6 +121,74 @@ test("Pi RPC adapter never invents a missing dispatch and reports only sanitized
       expectedAttemptId: fixture.attempt.id,
       expectedLane: "worker",
     }), /Pi RPC assistant ended with error \(class=rate_limit, retryable=yes, stage=agent-run, child=exit:0\)/);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("Pi RPC adapter propagates only validated structured diagnostics", async () => {
+  const fixture = rpcFixture();
+  try {
+    const plan = fixture.plan();
+    const identity = receiptIdentity(plan);
+    const diagnostic = classifyProviderFailure("error", "HTTP 529 overloaded_error access_token_SECRET", {
+      providerApi: "anthropic-messages",
+      phase: "tool_continuation",
+      turnCount: 2,
+      assistantMessageCount: 3,
+      toolExecutionCount: 1,
+      toolErrorCount: 0,
+      transcriptBytes: 70_000,
+    });
+    writeExclusiveJson(join(plan.runtimeRoot, "plan.json"), plan);
+    writeExclusiveJson(join(plan.runtimeRoot, "dispatch.json"), { version: 1 });
+    writeAtomicJson(join(plan.runtimeRoot, "terminal.json"), {
+      ...identity,
+      ok: false,
+      error: "Pi RPC assistant ended with error",
+      failureStage: "agent-run",
+      ...diagnostic,
+      childExit: { code: 0, signal: null },
+    });
+
+    let failure: unknown;
+    try {
+      await new PiRpcRuntime({ runInPane: async () => undefined }).wait({
+        handle: fixture.handle,
+        attempt: fixture.attempt,
+        resultPath: fixture.attempt.resultPath,
+        expectedJobId: "job-1",
+        expectedAttemptId: fixture.attempt.id,
+        expectedLane: "worker",
+      });
+    } catch (error) {
+      failure = error;
+    }
+    assert.ok(failure instanceof PiRpcRuntimeFailure);
+    assert.deepEqual(failure.diagnostic, diagnostic);
+    assert.match(failure.message, /provider\/provider_overloaded/);
+    assert.match(failure.message, /api=anthropic-messages/);
+    assert.match(failure.message, /phase=tool_continuation/);
+    assert.match(failure.message, /status=529/);
+    assert.equal(failure.message.includes("access_token_SECRET"), false);
+
+    writeAtomicJson(join(plan.runtimeRoot, "terminal.json"), {
+      ...identity,
+      ok: false,
+      error: "Pi RPC assistant ended with error",
+      failureDomain: "provider",
+      failureCode: "provider_overloaded",
+      retryable: true,
+      diagnosticFingerprint: "not-a-digest",
+    });
+    await assert.rejects(() => new PiRpcRuntime({ runInPane: async () => undefined }).wait({
+      handle: fixture.handle,
+      attempt: fixture.attempt,
+      resultPath: fixture.attempt.resultPath,
+      expectedJobId: "job-1",
+      expectedAttemptId: fixture.attempt.id,
+      expectedLane: "worker",
+    }), /invalid runtime diagnostic/);
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
   }

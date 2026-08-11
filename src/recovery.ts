@@ -178,6 +178,7 @@ export async function reassessIncident(
     lane: job.incident.lane,
     attemptId: job.incident.attemptId,
     blockClass: replacementClass,
+    ...(job.incident.runtimeDiagnostic ? { runtimeDiagnostic: job.incident.runtimeDiagnostic } : {}),
     summary: [
       `Reassessment requested for held incident ${job.incident.id}.`,
       `Previous incident (untrusted):\n${job.incident.summary}`,

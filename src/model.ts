@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { isSafePiRpcDiagnostic, type SafeRuntimeDiagnostic } from "./pi-rpc-diagnostics.js";
 
 export type IssueState = "OPEN" | "CLOSED";
 
@@ -331,6 +332,7 @@ export type Incident = {
   evidenceDigest: string;
   allowedActions: RecoveryAction[];
   automaticRecovery?: AutomaticRecoveryCandidate;
+  runtimeDiagnostic?: SafeRuntimeDiagnostic;
   createdAt: string;
 };
 
@@ -606,6 +608,9 @@ export function assertJobInvariant(job: Job): void {
     !["worker_pre_dispatch_infrastructure", "reviewer_same_head_infrastructure"].includes(job.incident.automaticRecovery.rule)
     || !/^[0-9a-f]{64}$/i.test(job.incident.automaticRecovery.fingerprint)
   )) throw new Error("incident has an invalid automatic recovery candidate");
+  if (job.incident?.runtimeDiagnostic !== undefined && !isSafePiRpcDiagnostic(job.incident.runtimeDiagnostic)) {
+    throw new Error("incident has an invalid runtime diagnostic");
+  }
   if (job.analysis && !isRecoveryAction(job.analysis.action)) {
     throw new Error("analysis has an invalid recovery action");
   }

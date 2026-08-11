@@ -12,6 +12,7 @@ import type {
   JobState,
   RecoveryAction,
 } from "./model.js";
+import type { SafeRuntimeDiagnostic } from "./pi-rpc-diagnostics.js";
 import { digest, isRetryAction, MAX_CI_REWORKS } from "./model.js";
 import type { Clock, IdGenerator } from "./ports.js";
 
@@ -387,6 +388,7 @@ export function makeIncident(input: {
   blockClass: BlockClass;
   summary: string;
   automaticRecovery?: AutomaticRecoveryCandidate;
+  runtimeDiagnostic?: SafeRuntimeDiagnostic;
   clock: Clock;
   ids: IdGenerator;
 }): Incident {
@@ -399,6 +401,7 @@ export function makeIncident(input: {
     blockClass: input.blockClass,
     summary: input.summary,
     ...(input.automaticRecovery ? { automaticRecovery: input.automaticRecovery } : {}),
+    ...(input.runtimeDiagnostic ? { runtimeDiagnostic: input.runtimeDiagnostic } : {}),
     createdAt,
   };
   return {
@@ -410,6 +413,7 @@ export function makeIncident(input: {
     evidenceDigest: digest(core),
     allowedActions: allowedActionsFor(input.blockClass, input.lane),
     ...(input.automaticRecovery ? { automaticRecovery: input.automaticRecovery } : {}),
+    ...(input.runtimeDiagnostic ? { runtimeDiagnostic: input.runtimeDiagnostic } : {}),
     createdAt,
   };
 }
