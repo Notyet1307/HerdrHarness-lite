@@ -105,19 +105,21 @@ export class PiRpcRuntime {
         }
         const terminal = waitForReceipt(plan, "terminal.json", null);
         assertReceipt(terminal, plan, "terminal");
-        if (!terminal.ok)
-            throw runtimeFailure(terminal, "Pi RPC policy/runtime failure");
+        const terminalFailure = terminal.ok ? null : runtimeFailure(terminal, "Pi RPC policy/runtime failure");
+        const result = existsSync(input.resultPath)
+            ? JSON.parse(readFileSync(input.resultPath, "utf8"))
+            : null;
+        if (terminalFailure && (result === null || !recoverableLineSizeResult(terminal)))
+            throw terminalFailure;
         const terminated = waitForReceipt(plan, "terminated.json", TERMINATE_TIMEOUT_MS);
         assertReceipt(terminated, plan, "terminated");
         if (!terminated.ok)
             throw new Error(`Pi RPC termination is not confirmed: ${terminated.error ?? "unknown failure"}`);
-        const result = existsSync(input.resultPath)
-            ? JSON.parse(readFileSync(input.resultPath, "utf8"))
-            : null;
         return {
             agentStatus: "done",
             result,
-            diagnostic: result ? null : `Pi RPC settled without a durable result; events: ${spoolPath(plan.runtimeRoot, "runtime-events.jsonl")}`,
+            diagnostic: terminalFailure?.message
+                ?? (result ? null : `Pi RPC settled without a durable result; events: ${spoolPath(plan.runtimeRoot, "runtime-events.jsonl")}`),
         };
     }
     async terminate(input) {
@@ -187,13 +189,25 @@ export class PiRpcRuntime {
         };
     }
 }
+function recoverableLineSizeResult(receipt) {
+    return receipt.failureDomain === "rpc_protocol"
+        && receipt.failureCode === "rpc_line_too_large"
+        && receipt.failureStage === "agent-run"
+        && receipt.retryable === false
+        && receipt.childExit?.code === 0
+        && receipt.childExit.signal === null;
+}
 function waitForReceipt(plan, name, timeoutMs) {
     const started = Date.now();
     for (;;) {
         const receipt = readJsonIfExists(spoolPath(plan.runtimeRoot, name));
         if (receipt)
             return receipt;
-        const terminal = name === "terminal.json" ? null : readJsonIfExists(spoolPath(plan.runtimeRoot, "terminal.json"));
+        // A durable result written before a terminal failure may still be accepted,
+        // but only after the runner independently confirms child termination.
+        const terminal = name === "terminal.json" || name === "terminated.json"
+            ? null
+            : readJsonIfExists(spoolPath(plan.runtimeRoot, "terminal.json"));
         if (terminal && !terminal.ok)
             return terminal;
         const owner = readJsonIfExists(spoolPath(plan.runtimeRoot, "owner.json"));
