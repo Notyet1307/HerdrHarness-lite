@@ -189,6 +189,58 @@ test("Hermes status stays read-only and renders bounded ledger facts", () => {
     assert.match(why.stdout, /\n\n下一步\n/);
     assertMobileReadable(why.stdout);
 
+    const originalAnalysis = state.activeJob.analysis;
+    const originalIncidentClass = incident.class;
+    const originalIncidentSummary = incident.summary;
+    const originalAttemptRound = attempt.round;
+    const originalAttemptResult = attempt.result;
+    incident.class = "review_uncertain";
+    incident.summary = "review rounds exhausted at 3: four unsafe publication paths remain";
+    attempt.round = 3;
+    attempt.result = {
+      version: 1,
+      jobId: state.activeJob.id,
+      attemptId: attempt.id,
+      lane: "reviewer",
+      status: "changes",
+      summary: "Two blocking risks remain.",
+      reviewedHeadSha: state.activeJob.headSha,
+      findings: [
+        { severity: "major", summary: "Rollback failure can delete committed report bytes", evidence: "bounded evidence" },
+        { severity: "major", summary: "FIFO replacement can block publication", evidence: "bounded evidence" },
+      ],
+    };
+    state.activeJob.analysis = {
+      id: "analysis-failed",
+      incidentId: incident.id,
+      evidenceDigest: incident.evidenceDigest,
+      action: "hold",
+      summary: "Analyst diagnosis failed closed: Codex Analyst wrapper failed: FAIL: Analyst diagnosis is invalid",
+      resolutionBrief: "",
+      evidenceRefs: [],
+      unknowns: ["Codex Analyst wrapper failed: FAIL: Analyst diagnosis is invalid"],
+      createdAt: "2026-08-07T00:03:00.000Z",
+    };
+    writeFileSync(join(stateDir, "state.json"), `${JSON.stringify(state)}\n`, { encoding: "utf8", mode: 0o600 });
+
+    const failedClosedWhy = run("why", bridgeConfig);
+    assert.equal(failedClosedWhy.status, 0);
+    assert.match(failedClosedWhy.stdout, /结论\nReviewer 在第 3 轮仍要求修改，共 2 个阻断问题；已达到审查上限，任务安全暂停。/);
+    assert.match(failedClosedWhy.stdout, /发生了什么\nReviewer 已完成本轮审查，但仍有阻断问题；Harness 因达到审查上限转为人工决策。/);
+    assert.match(failedClosedWhy.stdout, /关键依据\n• major · Rollback failure can delete committed report bytes/);
+    assert.match(failedClosedWhy.stdout, /运行诊断\nAnalyst 输出未通过结构校验，Harness 未采用该诊断；原始 blocked 事实仍然有效。/);
+    assert.match(failedClosedWhy.stdout, /下一步\n发送 \/harness_actions 查看当前允许的操作；不要仅因诊断失败直接重试。/);
+    assert.ok(!failedClosedWhy.stdout.includes("主要原因 · 未结构化"));
+    assert.ok(!failedClosedWhy.stdout.includes("Analyst diagnosis is invalid"));
+    assertMobileReadable(failedClosedWhy.stdout);
+
+    state.activeJob.analysis = originalAnalysis;
+    incident.class = originalIncidentClass;
+    incident.summary = originalIncidentSummary;
+    attempt.round = originalAttemptRound;
+    attempt.result = originalAttemptResult;
+    writeFileSync(join(stateDir, "state.json"), `${JSON.stringify(state)}\n`, { encoding: "utf8", mode: 0o600 });
+
     const evidence = run("evidence", bridgeConfig);
     assert.equal(evidence.status, 0);
     assert.match(evidence.stdout, /^🔎 证据索引/m);
