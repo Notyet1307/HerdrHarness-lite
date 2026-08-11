@@ -5,6 +5,8 @@ import { JsonStateStore } from "./adapters/json-store.js";
 import { MAX_CI_REWORKS, type AnalystAdvice, type HarnessState, type Job } from "./model.js";
 import { projectOperatorState, type OperatorAction, type OperatorProjection } from "./policy.js";
 import { formatSafePiRpcDiagnostic } from "./pi-rpc-diagnostics.js";
+import { resolveReviewerProviderProfile } from "./reviewer-provider-profile.js";
+import type { ReviewerProviderProfiles } from "./ports.js";
 
 const MAX_MESSAGE_LENGTH = 3_500;
 const LANE_ID = /^[a-z0-9][a-z0-9-]{0,31}$/;
@@ -29,6 +31,7 @@ type HarnessStatusConfig = {
   stateDir: string;
   workerArgv: string[];
   reviewerArgv: string[];
+  reviewerProviderProfiles?: ReviewerProviderProfiles;
 };
 
 async function main(argv: string[]): Promise<number> {
@@ -78,7 +81,7 @@ function renderStatus(state: HarnessState, config: HarnessStatusConfig): string 
   if (job.pullRequest) lines.push(`PR：#${job.pullRequest.number} ${clean(job.pullRequest.url, 500)}`);
   lines.push(
     `Worker 配置：${runtimeSelection(config.workerArgv)}`,
-    `Reviewer 配置：${runtimeSelection(config.reviewerArgv)}`,
+    `Reviewer 配置：${runtimeSelection(resolveReviewerProviderProfile(config.reviewerArgv, config.reviewerProviderProfiles).argv)}`,
     `本轮运行：${activeRuntime(job)}`,
     `更新时间：${displayTime(job.updatedAt)}`,
     `下一步：${nextStep(job, projection)}`,
@@ -283,6 +286,7 @@ function loadHarnessConfig(path: string): HarnessStatusConfig {
     stateDir: parsed.stateDir,
     workerArgv: parsed.workerArgv,
     reviewerArgv: parsed.reviewerArgv,
+    ...(parsed.reviewerProviderProfiles ? { reviewerProviderProfiles: parsed.reviewerProviderProfiles } : {}),
   };
 }
 

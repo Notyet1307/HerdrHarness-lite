@@ -555,6 +555,72 @@ test("Pi RPC routes Reviewer through the durable runtime with one bound custom m
   }
 });
 
+test("Pi RPC routes Reviewer through canonical subscription OAuth selected by an active provider profile", async () => {
+  const root = mkdtempSync(join(tmpdir(), "harness-reviewer-oauth-rpc-"));
+  const agentDir = join(root, "pi-agent");
+  mkdirSync(agentDir);
+  const store = new MemoryStore();
+  const herdr = new FakeHerdr([{ lane: "worker", status: "completed", headSha: "b".repeat(40) }]);
+  const reviewerRpc = new FakeHerdr([{ lane: "reviewer", status: "pass" }]);
+  const preflight = new FakeRuntimePreflight();
+  preflight.agentDir = agentDir;
+  const runtimeConfig: HarnessConfig = {
+    ...config,
+    reviewerRuntime: "pi-rpc",
+    reviewerArgv: rpcReviewerArgv,
+    reviewerProviderProfiles: {
+      active: "subscription",
+      profiles: {
+        subscription: {
+          credentialMode: "canonical-oauth",
+          provider: "openai-codex",
+          model: "gpt-5.6-sol",
+        },
+        custom: {
+          credentialMode: "canonical-model-config",
+          provider: "custom",
+          model: "review-model",
+        },
+      },
+    },
+  };
+  try {
+    const controller = new HarnessController({
+      config: runtimeConfig,
+      store,
+      github: new FakeGitHub([issue({ number: 40, title: "Reviewer subscription RPC" })]),
+      git: new FakeGit(),
+      herdr,
+      piRpc: reviewerRpc,
+      analyst: new FakeAnalyst(),
+      evidence: new FakeEvidence(),
+      clock: new FakeClock(),
+      ids: new SequenceIds(),
+      preflight,
+    });
+    for (let index = 0; index < 9; index += 1) await controller.tick();
+    assert.equal(store.state.activeJob?.activeAttempt?.lane, "reviewer");
+    assert.equal(store.state.activeJob?.activeAttempt?.phase, "prepared");
+    runtimeConfig.reviewerProviderProfiles!.active = "custom";
+    for (let index = 9; index < 13; index += 1) await controller.tick();
+
+    const reviewer = store.state.activeJob?.attempts.find((attempt) => attempt.lane === "reviewer");
+    assert.equal(reviewer?.executionSnapshot?.adapter, "pi-rpc");
+    assert.equal(reviewer?.executionSnapshot?.provider, "openai-codex");
+    assert.equal(reviewer?.executionSnapshot?.model, "gpt-5.6-sol");
+    assert.equal(reviewer?.executionSnapshot?.thinking, "max");
+    assert.equal(reviewer?.executionSnapshot?.credentialMode, "canonical-oauth");
+    assert.equal(reviewer?.executionSnapshot?.resources.some((resource) => resource.kind === "model-config"), false);
+    const probes = preflight.providerCalls.filter((call) => call.lane === "reviewer");
+    assert.equal(probes.length, 2);
+    assert.equal(probes.every((call) => call.credentialMode === "canonical-oauth"), true);
+    assert.equal(probes.every((call) => call.modelConfig === undefined), true);
+    assert.equal(probes.every((call) => call.roleArgv.includes("gpt-5.6-sol")), true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("legacy running Attempts remain observable but legacy pre-start Attempts cannot launch", async () => {
   for (const phase of ["prepared", "running"] as const) {
     const store = new MemoryStore();

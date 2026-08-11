@@ -6,8 +6,13 @@ const packageJson = JSON.parse(readFileSync("package.json", "utf8")) as {
   pi?: { skills?: string[]; subagents?: { agents?: string[] } };
 };
 const exampleConfig = JSON.parse(readFileSync("harness.config.example.json", "utf8")) as {
+  reviewerRuntime: string;
   workerArgv: string[];
   reviewerArgv: string[];
+  reviewerProviderProfiles: {
+    active: string;
+    profiles: Record<string, { credentialMode: string; provider: string; model: string }>;
+  };
 };
 
 test("Pi package exposes the focused Worker check, independent review skill, and child agent", () => {
@@ -77,6 +82,18 @@ test("example config pins the Worker and Reviewer Pi role contracts", () => {
   assert.deepEqual(flagValues(exampleConfig.reviewerArgv, "--tools"), ["read,grep,find,ls,subagent,review_preflight,review_validate,review_submit"]);
   assert.deepEqual(flagValues(exampleConfig.workerArgv, "--thinking"), ["high"]);
   assert.deepEqual(flagValues(exampleConfig.reviewerArgv, "--thinking"), ["max"]);
+  assert.equal(exampleConfig.reviewerRuntime, "pi-rpc");
+  assert.equal(exampleConfig.reviewerProviderProfiles.active, "openai-subscription");
+  assert.deepEqual(exampleConfig.reviewerProviderProfiles.profiles["openai-subscription"], {
+    credentialMode: "canonical-oauth",
+    provider: "openai-codex",
+    model: "gpt-5.6-sol",
+  });
+  assert.deepEqual(exampleConfig.reviewerProviderProfiles.profiles.custom, {
+    credentialMode: "canonical-model-config",
+    provider: "baizhi-chat",
+    model: "deepseek-v4-flash",
+  });
   assert.match(readFileSync("pi/skills/code-review/SKILL.md", "utf8"), /candidate Head is review subject\s+data/);
 });
 
