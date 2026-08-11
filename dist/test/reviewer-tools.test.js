@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
 import { chmodSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -53,7 +54,7 @@ test("Reviewer tools isolate validation and write one identity-bound result", as
                 `DOCKER_CONFIG=${dockerConfig}`,
                 process.execPath,
                 "-e",
-                "const fs=require('node:fs');fs.writeFileSync('validation-only.txt','ok');fs.writeFileSync('validation-env.json',JSON.stringify(process.env))",
+                "const fs=require('node:fs');fs.writeFileSync('validation-only.txt','ok');fs.writeFileSync('validation-env.json',JSON.stringify(process.env));process.stdout.write('x'.repeat(100000)+'STDOUT_END');process.stderr.write('y'.repeat(100000)+'STDERR_END')",
             ],
             dockerHost: null,
             piAgentDir: join(root, "original-agent"),
@@ -219,7 +220,16 @@ test("Reviewer tools isolate validation and write one identity-bound result", as
             findings: [],
         }), /requires a review_validate run/);
         process.env.HERDR_REVIEWER_TEST_SECRET = "must-not-leak";
-        await validate.execute("validate", {});
+        const validationResult = await validate.execute("validate", {});
+        const validationDetails = JSON.parse(validationResult.content[0]?.text ?? "{}");
+        assert.ok(Buffer.byteLength(String(validationDetails.stdout)) <= 8 * 1024);
+        assert.ok(Buffer.byteLength(String(validationDetails.stderr)) <= 8 * 1024);
+        assert.match(String(validationDetails.stdout), /\[truncated\]\n.*STDOUT_END$/s);
+        assert.match(String(validationDetails.stderr), /\[truncated\]\n.*STDERR_END$/s);
+        assert.equal(validationDetails.stdoutBytes, 100010);
+        assert.equal(validationDetails.stderrBytes, 100010);
+        assert.match(String(validationDetails.stdoutDigest), /^[0-9a-f]{64}$/);
+        assert.match(String(validationDetails.stderrDigest), /^[0-9a-f]{64}$/);
         assert.equal(readFileSync(join(validation, "validation-only.txt"), "utf8"), "ok");
         assert.equal(readFileSync(join(source, "product.txt"), "utf8"), "source\n");
         const validationEnv = JSON.parse(readFileSync(join(validation, "validation-env.json"), "utf8"));

@@ -1,11 +1,12 @@
 import { accessSync, closeSync, constants, existsSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
+import { Buffer } from "node:buffer";
 import { spawnSync } from "node:child_process";
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { ORIGINAL_AGENT_DIR_ENV, PI_PACKAGE_ROOT_ENV } from "./reviewer-subagent-config.js";
 
 const DESCRIPTOR_ENV = "HERDR_HARNESS_REVIEW_DESCRIPTOR";
-const OUTPUT_LIMIT = 50_000;
+const OUTPUT_LIMIT = 8 * 1024;
 const SAFE_SUBAGENT_CONFIG = {
   asyncByDefault: false,
   forceTopLevelAsync: false,
@@ -117,13 +118,19 @@ export default function reviewerTools(pi) {
         maxBuffer: 20 * 1024 * 1024,
         timeout: 30 * 60 * 1000,
       });
+      const stdout = boundedOutput(output.stdout ?? "");
+      const stderr = boundedOutput(output.stderr ?? "");
       validation = {
         command: descriptor.validationArgv,
         exitCode: output.status,
         signal: output.signal,
         error: output.error?.message ?? null,
-        stdout: tail(output.stdout ?? ""),
-        stderr: tail(output.stderr ?? ""),
+        stdout: stdout.text,
+        stdoutBytes: stdout.bytes,
+        stdoutDigest: stdout.digest,
+        stderr: stderr.text,
+        stderrBytes: stderr.bytes,
+        stderrDigest: stderr.digest,
       };
       return toolResult(validation);
     },
@@ -490,8 +497,21 @@ function safeDockerHost(host) {
   return host.startsWith("unix:///") && !/[\0\r\n]/.test(host);
 }
 
-function tail(value) {
-  return value.length <= OUTPUT_LIMIT ? value : `[truncated]\n${value.slice(-OUTPUT_LIMIT)}`;
+function boundedOutput(value) {
+  const bytes = Buffer.byteLength(value);
+  const digest = createHash("sha256").update(value).digest("hex");
+  if (bytes <= OUTPUT_LIMIT) return { text: value, bytes, digest };
+  const marker = "[truncated]\n";
+  const budget = OUTPUT_LIMIT - Buffer.byteLength(marker);
+  let low = 0;
+  let high = value.length;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    if (Buffer.byteLength(value.slice(middle)) <= budget) high = middle;
+    else low = middle + 1;
+  }
+  if (value.charCodeAt(low) >= 0xDC00 && value.charCodeAt(low) <= 0xDFFF) low += 1;
+  return { text: `${marker}${value.slice(low)}`, bytes, digest };
 }
 
 function toolResult(details) {
