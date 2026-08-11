@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { createHash } from "node:crypto";
+import { Buffer } from "node:buffer";
 import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -39,6 +40,23 @@ type PiSdk = {
   ): Promise<RuntimeHost>;
   runRpcMode(runtime: RuntimeHost): Promise<never>;
 };
+
+type PiRpcEvent = Record<string, unknown>;
+type PiRpcListener = (event: PiRpcEvent) => void;
+type ProjectableRuntime = { session: object };
+
+const MAX_PROJECTED_ERROR_BYTES = 16 * 1024;
+const PROJECTED_EVENT_TYPES = new Set([
+  "agent_end",
+  "turn_end",
+  "message_start",
+  "message_update",
+  "message_end",
+  "tool_execution_start",
+  "tool_execution_update",
+  "tool_execution_end",
+  "bash_execution_update",
+]);
 
 type HostArgs = {
   piExecutable: string;
@@ -199,9 +217,117 @@ async function main(argv: string[]): Promise<void> {
     return;
   }
   failureStage = "rpc-mode";
-  await pi.runRpcMode(runtime);
+  await pi.runRpcMode(withProjectedPiRpcEvents(runtime));
   assertCredentialInputs();
   preparePiRpcAgentDirAt(privateAgentDir);
+}
+
+/**
+ * Projects content-heavy Pi lifecycle events onto the smaller Harness RPC
+ * interface. Pi's in-memory session and extension subscribers retain the
+ * original events; only the subscriber registered by runRpcMode sees these
+ * bounded observations.
+ */
+export function withProjectedPiRpcEvents<T extends ProjectableRuntime>(runtime: T): T {
+  const sessionProxies = new WeakMap<object, object>();
+  const projectSession = (session: object): object => {
+    const cached = sessionProxies.get(session);
+    if (cached) return cached;
+    const proxy = new Proxy(session, {
+      get(target, property, receiver) {
+        const value = Reflect.get(target, property, receiver) as unknown;
+        if (property === "subscribe" && typeof value === "function") {
+          return (listener: PiRpcListener): unknown => Reflect.apply(value, target, [
+            (event: PiRpcEvent) => listener(projectPiRpcEvent(event)),
+          ]);
+        }
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    sessionProxies.set(session, proxy);
+    return proxy;
+  };
+  return new Proxy(runtime, {
+    get(target, property, receiver) {
+      const value = Reflect.get(target, property, receiver) as unknown;
+      if (property === "session" && value && typeof value === "object") return projectSession(value);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+}
+
+export function projectPiRpcEvent(event: PiRpcEvent): PiRpcEvent {
+  const type = typeof event.type === "string" ? event.type : "";
+  if (!PROJECTED_EVENT_TYPES.has(type)) return event;
+  const metadata = eventPayloadMetadata(event);
+  if (type === "agent_end") {
+    const messages = Array.isArray(event.messages) ? event.messages : [];
+    const roleCounts = { assistant: 0, toolResult: 0, other: 0 };
+    for (const message of messages) {
+      const role = record(message).role;
+      if (role === "assistant") roleCounts.assistant += 1;
+      else if (role === "toolResult") roleCounts.toolResult += 1;
+      else roleCounts.other += 1;
+    }
+    return {
+      type,
+      willRetry: event.willRetry === true,
+      messageCount: messages.length,
+      roleCounts,
+      ...metadata,
+    };
+  }
+  if (type === "message_end") {
+    const source = record(event.message);
+    const message: PiRpcEvent = {};
+    if (typeof source.role === "string") message.role = source.role;
+    if (typeof source.stopReason === "string") message.stopReason = source.stopReason;
+    if (typeof source.errorMessage === "string") {
+      message.errorMessage = boundedUtf8(source.errorMessage, MAX_PROJECTED_ERROR_BYTES);
+    }
+    return { type, message, ...metadata };
+  }
+  if (type === "message_update") {
+    const source = record(event.assistantMessageEvent);
+    return {
+      type,
+      assistantMessageEvent: {
+        ...(typeof source.type === "string" ? { type: source.type } : {}),
+        ...metadata,
+      },
+    };
+  }
+  if (type === "tool_execution_start" || type === "tool_execution_end") {
+    return { type, isError: event.isError === true, ...metadata };
+  }
+  return { type, ...metadata };
+}
+
+function eventPayloadMetadata(event: PiRpcEvent): { payloadBytes: number; payloadDigest: string } {
+  const serialized = JSON.stringify(event);
+  const hash = createHash("sha256");
+  hash.update(serialized);
+  return {
+    payloadBytes: Buffer.byteLength(serialized),
+    payloadDigest: hash.digest("hex"),
+  };
+}
+
+function boundedUtf8(value: string, maxBytes: number): string {
+  if (Buffer.byteLength(value) <= maxBytes) return value;
+  let low = 0;
+  let high = value.length;
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    if (Buffer.byteLength(value.slice(0, middle)) <= maxBytes) low = middle;
+    else high = middle - 1;
+  }
+  const finalCodeUnit = value.charCodeAt(low - 1);
+  return value.slice(0, finalCodeUnit >= 0xD800 && finalCodeUnit <= 0xDBFF ? low - 1 : low);
+}
+
+function record(value: unknown): PiRpcEvent {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as PiRpcEvent : {};
 }
 
 async function runProbe(runtime: RuntimeHost, prompt: string): Promise<void> {
