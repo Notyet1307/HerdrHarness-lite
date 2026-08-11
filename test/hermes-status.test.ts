@@ -16,7 +16,22 @@ test("Hermes status stays read-only and renders bounded ledger facts", () => {
       stateDir,
       maxReviewRounds: 3,
       workerArgv: ["--provider", "openai-codex", "--model", "gpt-test", "--thinking", "max"],
-      reviewerArgv: ["--provider", "review-provider", "--model", "review-model", "--thinking", "high"],
+      reviewerArgv: ["--provider", "review-provider", "--model", "review-model", "--thinking", "max"],
+      reviewerProviderProfiles: {
+        active: "subscription",
+        profiles: {
+          subscription: {
+            credentialMode: "canonical-oauth",
+            provider: "openai-codex",
+            model: "gpt-5.6-sol",
+          },
+          custom: {
+            credentialMode: "canonical-model-config",
+            provider: "review-provider",
+            model: "review-model",
+          },
+        },
+      },
     }), { encoding: "utf8", mode: 0o600 });
     writeFileSync(bridgeConfig, JSON.stringify({ harnessConfig }), { encoding: "utf8", mode: 0o600 });
 
@@ -106,6 +121,7 @@ test("Hermes status stays read-only and renders bounded ledger facts", () => {
     assert.equal(status.status, 0);
     assert.match(status.stdout, /owner\/repo#48/);
     assert.match(status.stdout, /provider=openai-codex · model=gpt-test · effort=max/);
+    assert.match(status.stdout, /Reviewer 配置：provider=openai-codex · model=gpt-5\.6-sol · effort=max/);
     assert.match(status.stdout, /本轮运行：尚未记录运行信息，暂时无法确认模型。/);
     assert.ok(!status.stdout.includes("ledger 未持久化"));
     assert.match(status.stdout, /更新时间：08-07 08:02:00 GMT\+8/);

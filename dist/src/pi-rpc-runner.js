@@ -499,7 +499,10 @@ function validateCommands(response, plan) {
 }
 function validatePlan(plan) {
     const lane = plan.snapshot.context?.lane;
-    const expectedCredentialMode = lane === "worker" ? "canonical-oauth" : "canonical-model-config";
+    const validCredentialMode = lane === "worker"
+        ? plan.snapshot.credentialMode === "canonical-oauth"
+        : lane === "reviewer"
+            && (plan.snapshot.credentialMode === "canonical-oauth" || plan.snapshot.credentialMode === "canonical-model-config");
     if (plan.version !== 1
         || !plan.attemptId
         || !plan.generation
@@ -510,7 +513,7 @@ function validatePlan(plan) {
         || plan.snapshot.retryMode !== "disabled"
         || plan.snapshot.compactionMode !== "disabled"
         || (lane !== "worker" && lane !== "reviewer")
-        || plan.snapshot.credentialMode !== expectedCredentialMode
+        || !validCredentialMode
         || !plan.snapshot.provider
         || !plan.snapshot.model
         || !plan.snapshot.context?.agentDir

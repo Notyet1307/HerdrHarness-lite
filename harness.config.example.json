@@ -10,7 +10,22 @@
   "maxReviewRounds": 3,
   "maxAnalystTurns": 3,
   "workerRuntime": "herdr-pi-cli",
-  "reviewerRuntime": "herdr-pi-cli",
+  "reviewerRuntime": "pi-rpc",
+  "reviewerProviderProfiles": {
+    "active": "openai-subscription",
+    "profiles": {
+      "openai-subscription": {
+        "credentialMode": "canonical-oauth",
+        "provider": "openai-codex",
+        "model": "gpt-5.6-sol"
+      },
+      "custom": {
+        "credentialMode": "canonical-model-config",
+        "provider": "baizhi-chat",
+        "model": "deepseek-v4-flash"
+      }
+    }
+  },
   "preflight": {
     "piBin": "pi",
     "dockerRequired": false
@@ -57,6 +72,10 @@
     "/absolute/path/to/HerdrHarness-lite/pi/extensions/reviewer-tools.js",
     "--skill",
     "/absolute/path/to/HerdrHarness-lite/pi/skills/code-review",
+    "--provider",
+    "baizhi-chat",
+    "--model",
+    "deepseek-v4-flash",
     "--tools",
     "read,grep,find,ls,subagent,review_preflight,review_validate,review_submit",
     "--thinking",

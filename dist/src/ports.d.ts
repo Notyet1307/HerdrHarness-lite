@@ -15,6 +15,8 @@ export type HarnessConfig = {
     /** Native Pi arguments only; Herdr selects `pi` and Controller validates the role contract. */
     workerArgv: string[];
     reviewerArgv: string[];
+    /** Named Reviewer provider selections. Change only `active` to switch credentials and model. */
+    reviewerProviderProfiles?: ReviewerProviderProfiles;
     workerRuntime?: "herdr-pi-cli" | "pi-rpc";
     reviewerRuntime?: "herdr-pi-cli" | "pi-rpc";
     preflight?: {
@@ -23,6 +25,16 @@ export type HarnessConfig = {
         /** Require a local Docker daemon plus Compose V2 and bind its Unix socket into attempts. */
         dockerRequired?: boolean;
     };
+};
+export type PiRpcCredentialMode = "canonical-oauth" | "canonical-model-config";
+export type ReviewerProviderProfile = {
+    credentialMode: PiRpcCredentialMode;
+    provider: string;
+    model: string;
+};
+export type ReviewerProviderProfiles = {
+    active: string;
+    profiles: Record<string, ReviewerProviderProfile>;
 };
 export interface RuntimePreflightPort {
     inspectPi(input: {
@@ -45,7 +57,7 @@ export interface RuntimePreflightPort {
         piVersion?: string;
         agentDir?: string;
         credentialAgentDir?: string;
-        credentialMode?: "canonical-oauth" | "canonical-model-config";
+        credentialMode?: PiRpcCredentialMode;
         modelConfig?: ExecutionResource;
         rpcHost?: ExecutionResource;
     }): Promise<void>;

@@ -384,6 +384,74 @@ test("durable runner dispatches Reviewer code-review with the bound custom model
   }
 });
 
+test("durable runner accepts Reviewer code-review with canonical subscription OAuth", () => {
+  const fixture = rpcFixture();
+  const previous = {
+    result: process.env.FAKE_PI_RESULT_PATH,
+    job: process.env.FAKE_PI_JOB_ID,
+    attempt: process.env.FAKE_PI_ATTEMPT_ID,
+    lane: process.env.FAKE_PI_LANE,
+    skills: process.env.FAKE_PI_SKILLS,
+    thinking: process.env.FAKE_PI_THINKING,
+  };
+  try {
+    fixture.snapshot.context!.lane = "reviewer";
+    fixture.snapshot.credentialMode = "canonical-oauth";
+    fixture.snapshot.thinking = "max";
+    fixture.snapshot.tools = ["read", "subagent", "review_submit"];
+    fixture.snapshot.resources = [
+      { kind: "skill", path: "/skills/code-review", digest: "e".repeat(64) },
+      runtimeResource(resolve("dist/src/pi-rpc-runner.js")),
+      runtimeResource(resolve("test/fixtures/pi-rpc-sdk-entry.js")),
+    ];
+    fixture.attempt.id = "reviewer-oauth-1";
+    fixture.attempt.lane = "reviewer";
+    fixture.attempt.expectedHeadSha = "b".repeat(40);
+    fixture.attempt.promptDigest = digest("review");
+    const plan = fixture.plan({
+      executable: process.execPath,
+      argv: [
+        resolve("test/fixtures/fake-pi-rpc.js"),
+        "--no-session", "--no-context-files", "--no-prompt-templates", "--no-themes",
+        "--provider", "openai-codex", "--model", "gpt-5.6-sol", "--mode", "rpc",
+      ],
+    });
+    writeExclusiveJson(join(plan.runtimeRoot, "plan.json"), plan);
+    writeExclusiveJson(join(plan.runtimeRoot, "dispatch.json"), {
+      version: 1,
+      attemptId: plan.attemptId,
+      generation: plan.generation,
+      planDigest: plan.planDigest,
+      dispatchId: plan.attemptId,
+      promptDigest: fixture.attempt.promptDigest,
+      message: "/skill:code-review [harness-dispatch:reviewer-oauth-1]\nreview",
+    });
+    process.env.FAKE_PI_RESULT_PATH = fixture.attempt.resultPath;
+    process.env.FAKE_PI_JOB_ID = "job-1";
+    process.env.FAKE_PI_ATTEMPT_ID = fixture.attempt.id;
+    process.env.FAKE_PI_LANE = "reviewer";
+    process.env.FAKE_PI_SKILLS = "code-review";
+    process.env.FAKE_PI_THINKING = "max";
+
+    const execution = new SyncCommandRunner().run(process.execPath, [
+      resolve("dist/src/pi-rpc-runner.js"),
+      "--sdk-entry", resolve("test/fixtures/pi-rpc-sdk-entry.js"),
+      "--plan", join(plan.runtimeRoot, "plan.json"),
+    ], { cwd: fixture.root, timeoutMs: 10_000 });
+    assert.equal(execution.ok, true, execution.stderr);
+    assert.equal(readJson<{ credentialMode: string }>(join(plan.runtimeRoot, "ready.json")).credentialMode, "canonical-oauth");
+    assert.equal(JSON.parse(readFileSync(fixture.attempt.resultPath, "utf8")).lane, "reviewer");
+  } finally {
+    restoreEnv("FAKE_PI_RESULT_PATH", previous.result);
+    restoreEnv("FAKE_PI_JOB_ID", previous.job);
+    restoreEnv("FAKE_PI_ATTEMPT_ID", previous.attempt);
+    restoreEnv("FAKE_PI_LANE", previous.lane);
+    restoreEnv("FAKE_PI_SKILLS", previous.skills);
+    restoreEnv("FAKE_PI_THINKING", previous.thinking);
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("durable runner rejects Reviewer UI requests during an active agent or with the wrong widget", () => {
   for (const cleanup of ["before-settled", "wrong-key"]) {
     const fixture = rpcFixture();

@@ -50,6 +50,7 @@ import type {
   HarnessConfig,
   HerdrPort,
   IdGenerator,
+  PiRpcCredentialMode,
   RuntimePreflightPort,
   StateStore,
 } from "./ports.js";
@@ -57,6 +58,7 @@ import { renderAttemptPrompt } from "./prompts.js";
 import { pathIsWithin, pathsOverlap } from "./path-safety.js";
 import { piRpcAgentDir } from "./pi-rpc-spool.js";
 import { safePiRpcDiagnosticFromError, type SafeRuntimeDiagnostic } from "./pi-rpc-diagnostics.js";
+import { resolveReviewerProviderProfile } from "./reviewer-provider-profile.js";
 
 const BUNDLED_CODE_REVIEW_SKILL = resolve(import.meta.dirname, "../../pi/skills/code-review");
 const BUNDLED_FOCUSED_SELF_CHECK_SKILL = resolve(import.meta.dirname, "../../pi/skills/focused-self-check");
@@ -401,12 +403,13 @@ export class HarnessController {
         ? (await this.deps.preflight.probeDocker({ cwd: this.deps.config.localPath })).host
         : null;
       const useRpc = rpcEnabled(this.deps.config, lane);
+      const role = runtimeRole(this.deps.config, lane);
       executionSnapshot = buildExecutionSnapshot({
         adapter: useRpc ? "pi-rpc" : "herdr-pi-cli",
         executable: runtime.executable,
         runtimeVersion: runtime.version,
         argv: [
-          ...(lane === "worker" ? this.deps.config.workerArgv : this.deps.config.reviewerArgv),
+          ...role.argv,
           "--append-system-prompt",
           context.bundlePath,
           ...(useRpc ? ["--mode", "rpc"] : []),
@@ -414,7 +417,7 @@ export class HarnessController {
         context,
         retryMode: useRpc ? "disabled" : "runtime-default",
         compactionMode: useRpc ? "disabled" : "runtime-default",
-        credentialMode: useRpc ? (lane === "worker" ? "canonical-oauth" : "canonical-model-config") : "runtime-default",
+        credentialMode: useRpc ? role.credentialMode : "runtime-default",
         dockerHost,
         extraResources: [
           ...(lane === "reviewer" ? [{ kind: "agent" as const, path: BUNDLED_REVIEW_AXIS_AGENT }] : []),
@@ -422,7 +425,7 @@ export class HarnessController {
             { kind: "runtime" as const, path: PI_RPC_RUNNER },
             { kind: "runtime" as const, path: PI_RPC_SDK_ENTRY },
           ] : []),
-          ...(useRpc && lane === "reviewer" ? [
+          ...(useRpc && role.credentialMode === "canonical-model-config" ? [
             { kind: "model-config" as const, path: join(context.agentDir, "models.json") },
           ] : []),
         ],
@@ -747,10 +750,10 @@ export class HarnessController {
         : null;
       for (const lane of lanes) {
         const useRpc = executionSnapshot?.adapter === "pi-rpc" || (!executionSnapshot && rpcEnabled(this.deps.config, lane));
-        const credentialMode = useRpc ? (lane === "worker" ? "canonical-oauth" : "canonical-model-config") : undefined;
-        if (credentialMode && executionSnapshot && executionSnapshot.credentialMode !== credentialMode) {
-          throw new Error(`${lane} RPC snapshot has the wrong credential mode`);
-        }
+        const role = runtimeRole(this.deps.config, lane);
+        const credentialMode = useRpc
+          ? executionSnapshot ? snapshotCredentialMode(executionSnapshot) : role.credentialMode
+          : undefined;
         const credentialAgentDir = useRpc
           ? executionSnapshot?.context?.agentDir ?? preclaimCredentialAgentDir ?? undefined
           : undefined;
@@ -769,7 +772,7 @@ export class HarnessController {
         await this.deps.preflight.probeProvider({
           lane,
           cwd: this.deps.config.localPath,
-          roleArgv: executionSnapshot?.argv ?? (lane === "worker" ? this.deps.config.workerArgv : this.deps.config.reviewerArgv),
+          roleArgv: executionSnapshot?.argv ?? role.argv,
           piBin: executionSnapshot?.executable ?? preclaimRuntime?.executable ?? this.deps.config.preflight?.piBin ?? "pi",
           ...(useRpc ? { piVersion: executionSnapshot?.runtimeVersion ?? preclaimRuntime!.version } : {}),
           ...(useRpc ? { agentDir: executionSnapshot ? piRpcAgentDir(executionSnapshot) : resolve(this.deps.config.stateDir, "preflight", `pi-rpc-${lane}-agent`) } : {}),
@@ -1743,6 +1746,22 @@ function rpcEnabled(config: HarnessConfig, lane: Attempt["lane"]): boolean {
   return (lane === "worker" ? config.workerRuntime : config.reviewerRuntime) === "pi-rpc";
 }
 
+function runtimeRole(config: HarnessConfig, lane: Attempt["lane"]): {
+  argv: string[];
+  credentialMode: PiRpcCredentialMode;
+} {
+  if (lane === "worker") return { argv: [...config.workerArgv], credentialMode: "canonical-oauth" };
+  const selected = resolveReviewerProviderProfile(config.reviewerArgv, config.reviewerProviderProfiles);
+  return { argv: selected.argv, credentialMode: selected.credentialMode };
+}
+
+function snapshotCredentialMode(snapshot: ExecutionSnapshot): PiRpcCredentialMode {
+  if (snapshot.credentialMode === "canonical-oauth" || snapshot.credentialMode === "canonical-model-config") {
+    return snapshot.credentialMode;
+  }
+  throw new Error("Pi RPC snapshot has an invalid credential mode");
+}
+
 function settleAttempt(attempt: Attempt, resultValue: AttemptResult | null, now: string): Attempt {
   return {
     ...attempt,
@@ -1827,9 +1846,10 @@ function validateConfig(config: HarnessConfig): void {
       throw new Error("preflight.dockerRequired must be boolean");
     }
   }
+  const reviewerRole = runtimeRole(config, "reviewer");
   for (const [name, runtime, argv] of [
     ["workerRuntime", config.workerRuntime, config.workerArgv],
-    ["reviewerRuntime", config.reviewerRuntime, config.reviewerArgv],
+    ["reviewerRuntime", config.reviewerRuntime, reviewerRole.argv],
   ] as const) {
     if (runtime !== undefined && runtime !== "herdr-pi-cli" && runtime !== "pi-rpc") {
       throw new Error(`${name} must be herdr-pi-cli or pi-rpc`);
@@ -1850,7 +1870,7 @@ function validateConfig(config: HarnessConfig): void {
   );
   validatePiRoleArgv(
     "reviewerArgv",
-    config.reviewerArgv,
+    reviewerRole.argv,
     ["code-review"],
     ["read", "grep", "find", "ls", "subagent", "review_preflight", "review_validate", "review_submit"],
     ["max"],

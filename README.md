@@ -69,12 +69,12 @@ Snapshot + Envelope + rendered prompt
         -> ledger transition
 ```
 
-On the RPC path the Controller never owns Pi stdin/stdout. The pane runner owns the pipes, while the Controller writes one intent and reads atomic receipts. A Controller restart therefore observes the same Attempt instead of replaying its prompt. Credential contents never enter the envelope, prompt, or spool: Worker RPC lets Pi share subscription OAuth through the canonical pathname and native lock; Reviewer RPC binds the canonical `models.json` digest and parses only the supported custom provider in memory.
+On the RPC path the Controller never owns Pi stdin/stdout. The pane runner owns the pipes, while the Controller writes one intent and reads atomic receipts. A Controller restart therefore observes the same Attempt instead of replaying its prompt. Credential contents never enter the envelope, prompt, or spool: Worker RPC uses canonical subscription OAuth; Reviewer RPC selects either the same canonical OAuth path or a digest-bound custom `models.json` path through an explicit provider profile.
 
 | Lane | `herdr-pi-cli` | `pi-rpc` | Unchanged completion gate |
 | --- | --- | --- | --- |
 | Worker | Herdr interactive agent | Durable runner + SDK host + canonical subscription OAuth | `worker_submit` durable result + Git provenance |
-| Top-level Reviewer | Herdr interactive agent | Durable runner + SDK host + digest-bound custom model config | `review_submit` + exact HEAD + isolated validation |
+| Top-level Reviewer | Herdr interactive agent | Durable runner + SDK host + profile-selected subscription OAuth or digest-bound custom model config | `review_submit` + exact HEAD + isolated validation |
 | Reviewer axis children | Started in the foreground by the top-level Reviewer | Still use the immutable child wrapper and are not migrated to RPC | Both Standards and Spec axes must return substantive results |
 
 Pi `agent_settled`, a runner terminal, pane `done`, and child completion are runtime facts only. They never bypass the durable result, Git fixed point, Reviewer decision, or GitHub merge. See **Attempt execution plan and context trust** for the full trust boundary.
@@ -358,7 +358,7 @@ Reviewer findings and approved recovery/CI decisions move through a versioned `T
 
 Pi context/session/prompt-template/theme discovery is disabled. The Harness reads at most one root policy directly from the `job.baseSha` Git object using Pi precedence (`AGENTS.override.md`, `AGENTS.md`, `AGENTS.MD`, `CLAUDE.md`, `CLAUDE.MD`), records path/mode/source SHA/digest, and injects a read-only bundle. A policy reference does not grant another candidate file instruction authority unless the Harness separately exports it into the manifest. The bundled Worker TDD adapter likewise treats candidate `CONTEXT.md`, ADRs, and rule files as data rather than ambient instructions. Candidate-Head rule files are review data for the top-level Reviewer and both fresh review-axis children. Pi CLI cannot disable only `SYSTEM.md` while retaining its default system prompt, so a `SYSTEM.md` in the bound user agent directory or candidate root blocks launch; the bound agent directory is explicitly injected into every Herdr pane.
 
-With `workerRuntime=pi-rpc` or `reviewerRuntime=pi-rpc`, the Controller never owns RPC pipes. A foreground runner in the Herdr pane owns Pi stdin/stdout; the Controller writes O_EXCL intents and reads atomic receipts. The exact-version-pinned SDK host keeps settings and sessions in memory and keeps resources/context Attempt-bound. Worker uses the exact canonical `auth.json` pathname so subscription OAuth refresh shares Pi's normal lock. Reviewer instead captures strict-JSON bytes from the exact canonical `models.json`, requires their digest to match the execution plan, normalizes one supported standalone custom provider into a complete public `ProviderConfigInput`, and registers it through public `ModelRuntime.registerProvider` with an empty, non-persistent credential store. The normalization fills Pi-compatible model defaults, folds model overrides, and accepts only the deployed compat subset (`supportsStore`, `supportsDeveloperRole`, `requiresReasoningContentOnAssistantMessages`, and Pi 0.84 `thinkingFormat` values); built-in-provider overlays, OAuth providers, comments, and unsupported fields fail closed. The source file must be a private regular single-link file. Neither credential has a second disk file or link, appears in a receipt, or is returned to the Controller. The RPC Provider probe uses the same credential seam before selection and again before launch. The SDK host projects content-heavy lifecycle events onto a bounded Harness interface before JSONL serialization: Pi sessions and extensions retain the original messages, while the runner receives counts, raw payload size/digest, retry state, and the bounded Provider fields required for classification. The runner's independent one-MiB line limit remains a fail-closed transport guard. The runner proves a fresh session, disables auto-retry and auto-compaction, and rejects credential/resource drift before accepting the prompt and after child exit. The runner accepts an explicit set of fully qualified exact Pi versions rather than one scattered hard-coded constant; the current qualified set is still only `0.84.0`, and every Attempt remains pinned to the exact inspected version. A new version blocks until its protocol and SDK behavior are tested and added to that set. `agent_settled` establishes only a runtime terminal; completion still requires the existing durable result and Git provenance. Reviewer RPC changes only the top-level Reviewer runtime; its two fixed review-axis children retain the existing immutable wrapper and capability ceiling.
+With `workerRuntime=pi-rpc` or `reviewerRuntime=pi-rpc`, the Controller never owns RPC pipes. A foreground runner in the Herdr pane owns Pi stdin/stdout; the Controller writes O_EXCL intents and reads atomic receipts. The exact-version-pinned SDK host keeps settings and sessions in memory and keeps resources/context Attempt-bound. Worker uses the exact canonical `auth.json` pathname so subscription OAuth refresh shares Pi's normal lock. Reviewer selects its credential mode through `reviewerProviderProfiles`: `canonical-oauth` uses the same canonical subscription path, while `canonical-model-config` captures strict-JSON bytes from the exact canonical `models.json`, requires their digest to match the execution plan, normalizes one supported standalone custom provider into a complete public `ProviderConfigInput`, and registers it through public `ModelRuntime.registerProvider` with an empty, non-persistent credential store. The normalization fills Pi-compatible model defaults, folds model overrides, and accepts only the deployed compat subset (`supportsStore`, `supportsDeveloperRole`, `requiresReasoningContentOnAssistantMessages`, and Pi 0.84 `thinkingFormat` values); built-in-provider overlays, OAuth providers, comments, and unsupported fields fail closed. The source file must be a private regular single-link file. Neither credential has a second disk file or link, appears in a receipt, or is returned to the Controller. The selected profile is resolved before preflight and its effective provider, model, and credential mode are bound into the immutable Attempt snapshot; changing `active` never changes an already prepared Attempt. The RPC Provider probe uses the same credential seam before selection and again before launch. The SDK host projects content-heavy lifecycle events onto a bounded Harness interface before JSONL serialization: Pi sessions and extensions retain the original messages, while the runner receives counts, raw payload size/digest, retry state, and the bounded Provider fields required for classification. The runner's independent one-MiB line limit remains a fail-closed transport guard. The runner proves a fresh session, disables auto-retry and auto-compaction, and rejects credential/resource drift before accepting the prompt and after child exit. The runner accepts an explicit set of fully qualified exact Pi versions rather than one scattered hard-coded constant; the current qualified set is still only `0.84.0`, and every Attempt remains pinned to the exact inspected version. A new version blocks until its protocol and SDK behavior are tested and added to that set. `agent_settled` establishes only a runtime terminal; completion still requires the existing durable result and Git provenance. Reviewer RPC changes only the top-level Reviewer runtime; its two fixed review-axis children retain the existing immutable wrapper and capability ceiling.
 
 ### Review, rework, and Reviewer isolation
 
@@ -424,7 +424,8 @@ Treat [`harness.config.example.json`](./harness.config.example.json) as the sing
 | `reviewerValidationArgv` | Fixed validation argv executed directly by the Harness without shell interpolation |
 | `autoMerge` | Request GitHub native auto-merge after Reviewer pass |
 | `workerRuntime` | `herdr-pi-cli` (default) or `pi-rpc`; RPC requires an explicit built-in `--provider`, exact built-in `--model`, and canonical subscription OAuth in private `auth.json` |
-| `reviewerRuntime` | `herdr-pi-cli` (default) or `pi-rpc`; RPC requires an explicit custom `--provider`/`--model` backed by canonical private `models.json` |
+| `reviewerRuntime` | `herdr-pi-cli` (default) or `pi-rpc`; RPC accepts the credential mode selected by the active Reviewer provider profile |
+| `reviewerProviderProfiles` | Optional named Reviewer selections. Each binds `provider`, `model`, and `credentialMode`; change only `active` and restart the Controller to switch future Attempts. Omit it to preserve the legacy custom `models.json` behavior |
 | `workerArgv` / `reviewerArgv` | Pi role contracts validated by the Controller |
 | `herdr.session` | Required named Herdr session |
 | `analyst` | Command and arguments for the task-bound Codex Analyst wrapper |
@@ -458,6 +459,28 @@ Inside the complete `reviewerArgv`:
 "--model", "deepseek-v4-flash",
 "--thinking", "max"
 ```
+
+For a one-field Reviewer switch, keep both selections in the Harness config:
+
+```json
+"reviewerProviderProfiles": {
+  "active": "openai-subscription",
+  "profiles": {
+    "openai-subscription": {
+      "credentialMode": "canonical-oauth",
+      "provider": "openai-codex",
+      "model": "gpt-5.6-sol"
+    },
+    "custom": {
+      "credentialMode": "canonical-model-config",
+      "provider": "baizhi-chat",
+      "model": "deepseek-v4-flash"
+    }
+  }
+}
+```
+
+The base `reviewerArgv` still contains exactly one `--provider` and `--model`; the active profile replaces only those two values before validation and snapshot binding. Change `active`, restart the Controller, and verify the effective selection before approving a fresh Attempt. Existing prepared/running Attempts continue with their bound snapshot.
 
 The selections are independent. Automatic preflight makes one bounded live
 call against each configured Provider before selection and repeats the current
