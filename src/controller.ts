@@ -1126,6 +1126,9 @@ export class HarnessController {
       return result(false, "waiting_for_merge", job.id, `PR observation is retryable: ${message(error)}`);
     }
     if (observation.status === "open") {
+      if (observation.requiredChecks.some((check) => check.bucket === "pending")) {
+        return result(true, "waiting_for_merge", job.id, `PR #${job.pullRequest.number} required checks are still pending`);
+      }
       const failedChecks = observation.requiredChecks.filter(isFailedCheck);
       if (failedChecks.length > 0) {
         if (observation.autoMergeEnabled) {
@@ -1152,9 +1155,6 @@ export class HarnessController {
           attemptResult: null,
           ciFailure,
         });
-      }
-      if (observation.requiredChecks.some((check) => check.bucket === "pending")) {
-        return result(true, "waiting_for_merge", job.id, `PR #${job.pullRequest.number} required checks are still pending`);
       }
       const refreshed = await this.refreshBaseForReview(
         state,

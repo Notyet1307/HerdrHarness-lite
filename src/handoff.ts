@@ -1,5 +1,8 @@
 import { digest, type AnalystAdvice, type Approval, type Attempt, type Incident, type Job, type ReviewerResult, type TypedHandoff } from "./model.js";
 
+const MAX_HANDOFF_OBLIGATION_SUMMARY = 10_000;
+const HANDOFF_TRUNCATION_MARKER = "\n...[truncated for typed handoff]...\n";
+
 export function reviewChangesHandoff(input: {
   job: Job;
   attempt: Attempt;
@@ -55,7 +58,7 @@ export function approvedRecoveryHandoff(input: {
   if (input.incident.class === "ci_failure") {
     obligations.push(...(input.job.ciFailure?.checks ?? []).map((check) => ({
       severity: null,
-      summary: `${check.name}: ${check.diagnostic ?? check.state}`,
+      summary: boundHandoffText(`${check.name}: ${check.diagnostic ?? check.state}`, MAX_HANDOFF_OBLIGATION_SUMMARY),
       evidence: check.link || null,
     })));
   }
@@ -109,4 +112,12 @@ export function bindPendingHandoff(job: Job, attempt: Attempt): TypedHandoff | n
 
 function identify(body: Omit<TypedHandoff, "id">): TypedHandoff {
   return { ...body, id: `handoff-${digest(body).slice(0, 32)}` };
+}
+
+function boundHandoffText(value: string, maxLength: number): string {
+  if (value.length <= maxLength) return value;
+  const available = maxLength - HANDOFF_TRUNCATION_MARKER.length;
+  const prefixLength = Math.ceil(available / 2);
+  const suffixLength = Math.floor(available / 2);
+  return `${value.slice(0, prefixLength)}${HANDOFF_TRUNCATION_MARKER}${value.slice(-suffixLength)}`;
 }
