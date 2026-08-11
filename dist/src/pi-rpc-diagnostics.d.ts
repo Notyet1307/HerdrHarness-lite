@@ -10,9 +10,15 @@ export type PiRpcFailureDiagnostic = {
 export declare const PI_RPC_PROVIDER_APIS: readonly ["anthropic-messages", "openai-responses", "openai-completions", "unknown"];
 export declare const PI_RPC_FAILURE_PHASES: readonly ["initial_generation", "tool_continuation", "tool_error_recovery"];
 export declare const PI_RPC_TRANSCRIPT_SIZE_BUCKETS: readonly ["lt64k", "64k_256k", "256k_1m", "gte1m"];
+export declare const PI_RPC_FAILURE_STAGES: readonly ["startup", "handshake", "await-dispatch", "dispatch", "agent-run", "child-shutdown", "rpc-output", "credential-postflight", "child-exit"];
 export type PiRpcProviderApi = typeof PI_RPC_PROVIDER_APIS[number];
 export type PiRpcFailurePhase = typeof PI_RPC_FAILURE_PHASES[number];
 export type PiRpcTranscriptSizeBucket = typeof PI_RPC_TRANSCRIPT_SIZE_BUCKETS[number];
+export type PiRpcFailureStage = typeof PI_RPC_FAILURE_STAGES[number];
+export type SafeChildExit = {
+    code: number | null;
+    signal: string | null;
+} | null;
 export type SafeRuntimeDiagnostic = PiRpcFailureDiagnostic & {
     diagnosticFingerprint: string;
     httpStatus?: number;
@@ -23,6 +29,8 @@ export type SafeRuntimeDiagnostic = PiRpcFailureDiagnostic & {
     toolExecutionCount?: number;
     toolErrorCount?: number;
     transcriptSizeBucket?: PiRpcTranscriptSizeBucket;
+    failureStage?: PiRpcFailureStage;
+    childExit?: SafeChildExit;
 };
 export type ProviderFailureContext = {
     providerApi: PiRpcProviderApi;

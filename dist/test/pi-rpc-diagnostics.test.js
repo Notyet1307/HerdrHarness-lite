@@ -64,5 +64,7 @@ test("assistant aborts and malformed diagnostics fail closed", () => {
     assert.equal(isSafePiRpcDiagnostic({ ...overloaded, retryable: false }), false);
     assert.equal(isSafePiRpcDiagnostic({ ...overloaded, phase: "initial_generation" }), false);
     assert.equal(isSafePiRpcDiagnostic({ ...overloaded, toolErrorCount: 2 }), false);
+    assert.equal(isSafePiRpcDiagnostic({ ...overloaded, failureStage: "unknown-stage" }), false);
+    assert.equal(isSafePiRpcDiagnostic({ ...overloaded, childExit: { code: 23, signal: "SIGTERM" } }), false);
 });
 //# sourceMappingURL=pi-rpc-diagnostics.test.js.map

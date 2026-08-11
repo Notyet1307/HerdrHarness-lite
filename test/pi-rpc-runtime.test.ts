@@ -165,7 +165,11 @@ test("Pi RPC adapter propagates only validated structured diagnostics", async ()
       failure = error;
     }
     assert.ok(failure instanceof PiRpcRuntimeFailure);
-    assert.deepEqual(failure.diagnostic, diagnostic);
+    assert.deepEqual(failure.diagnostic, {
+      ...diagnostic,
+      failureStage: "agent-run",
+      childExit: { code: 0, signal: null },
+    });
     assert.match(failure.message, /provider\/provider_overloaded/);
     assert.match(failure.message, /api=anthropic-messages/);
     assert.match(failure.message, /phase=tool_continuation/);
@@ -839,7 +843,7 @@ test("durable runner handles child exit races and records sanitized failures", a
           expectedJobId: "job-1",
           expectedAttemptId: fixture.attempt.id,
           expectedLane: "worker",
-        }), new RegExp(`Pi RPC runner failed \\(domain=child_process, code=child_exit_after_settled, retryable=no, stage=child-exit, child=${mode === "code" ? "exit:23" : "signal:SIGTERM"}, fingerprint=[0-9a-f]{12}\\)`));
+        }), new RegExp(`Pi RPC runner failed \\(child_process/child_exit_after_settled, retryable=no, stage=child-exit, child=${mode === "code" ? "exit:23" : "signal:SIGTERM"}, fingerprint=[0-9a-f]{12}\\)`));
       }
       for (const path of filesUnder(plan.runtimeRoot)) assert.equal(readFileSync(path, "utf8").includes(sentinel), false, path);
     } finally {

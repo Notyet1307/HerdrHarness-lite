@@ -56,6 +56,17 @@ export const PI_RPC_TRANSCRIPT_SIZE_BUCKETS = [
     "256k_1m",
     "gte1m",
 ];
+export const PI_RPC_FAILURE_STAGES = [
+    "startup",
+    "handshake",
+    "await-dispatch",
+    "dispatch",
+    "agent-run",
+    "child-shutdown",
+    "rpc-output",
+    "credential-postflight",
+    "child-exit",
+];
 const STRUCTURED_DIAGNOSTIC_FIELDS = [
     "failureDomain",
     "failureCode",
@@ -68,12 +79,16 @@ const STRUCTURED_DIAGNOSTIC_FIELDS = [
     "toolExecutionCount",
     "toolErrorCount",
     "transcriptSizeBucket",
+    "failureStage",
+    "childExit",
 ];
+const STRUCTURED_DIAGNOSTIC_MARKERS = ["failureDomain", "failureCode", "diagnosticFingerprint"];
 const FAILURE_DOMAINS = new Set(PI_RPC_FAILURE_DOMAINS);
 const FAILURE_CODES = new Set(PI_RPC_FAILURE_CODES);
 const PROVIDER_APIS = new Set(PI_RPC_PROVIDER_APIS);
 const FAILURE_PHASES = new Set(PI_RPC_FAILURE_PHASES);
 const TRANSCRIPT_SIZE_BUCKETS = new Set(PI_RPC_TRANSCRIPT_SIZE_BUCKETS);
+const FAILURE_STAGES = new Set(PI_RPC_FAILURE_STAGES);
 export class PiRpcRunnerError extends Error {
     failureDomain;
     failureCode;
@@ -175,6 +190,10 @@ export function isSafePiRpcDiagnostic(value) {
         return false;
     if (diagnostic.transcriptSizeBucket !== undefined && !TRANSCRIPT_SIZE_BUCKETS.has(diagnostic.transcriptSizeBucket))
         return false;
+    if (diagnostic.failureStage !== undefined && !FAILURE_STAGES.has(diagnostic.failureStage))
+        return false;
+    if (diagnostic.childExit !== undefined && !validChildExit(diagnostic.childExit))
+        return false;
     const countsValid = [
         diagnostic.turnCount,
         diagnostic.assistantMessageCount,
@@ -204,7 +223,7 @@ export function safePiRpcDiagnosticFrom(value) {
     if (!value || typeof value !== "object" || Array.isArray(value))
         return null;
     const record = value;
-    if (!STRUCTURED_DIAGNOSTIC_FIELDS.some((field) => record[field] !== undefined))
+    if (!STRUCTURED_DIAGNOSTIC_MARKERS.some((field) => record[field] !== undefined))
         return null;
     const candidate = Object.fromEntries([...STRUCTURED_DIAGNOSTIC_FIELDS, "retryable"]
         .filter((field) => record[field] !== undefined)
@@ -233,6 +252,10 @@ export function formatSafePiRpcDiagnostic(diagnostic) {
         parts.push(`toolErrors=${diagnostic.toolErrorCount}`);
     if (diagnostic.transcriptSizeBucket)
         parts.push(`size=${diagnostic.transcriptSizeBucket}`);
+    if (diagnostic.failureStage)
+        parts.push(`stage=${diagnostic.failureStage}`);
+    if (diagnostic.childExit !== undefined)
+        parts.push(`child=${childExitLabel(diagnostic.childExit)}`);
     parts.push(`fingerprint=${diagnostic.diagnosticFingerprint.slice(0, 12)}`);
     return parts.join(", ");
 }
@@ -308,6 +331,23 @@ function validCount(value) {
 }
 function validHttpStatus(value) {
     return Number.isInteger(value) && Number(value) >= 400 && Number(value) <= 599;
+}
+function validChildExit(value) {
+    if (value === null)
+        return true;
+    if (!value || typeof value !== "object" || Array.isArray(value))
+        return false;
+    const exit = value;
+    const validCode = exit.code === null || (Number.isInteger(exit.code) && Number(exit.code) >= 0 && Number(exit.code) <= 255);
+    const validSignal = exit.signal === null || (typeof exit.signal === "string" && /^SIG[A-Z0-9]+$/.test(exit.signal));
+    if (exit.code === null && exit.signal === null)
+        return true;
+    return validCode && validSignal && !((exit.code !== null) === (exit.signal !== null));
+}
+function childExitLabel(value) {
+    if (!value || (value.code === null && value.signal === null))
+        return "unknown";
+    return value.code === null ? `signal:${value.signal}` : `exit:${value.code}`;
 }
 function providerRetryable(code) {
     return code === "provider_rate_limited"
