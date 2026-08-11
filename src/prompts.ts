@@ -29,6 +29,7 @@ function workerPrompt(attempt: Attempt, context: AttemptContextEnvelope): string
 function reviewerPrompt(attempt: Attempt, context: AttemptContextEnvelope): string {
   return [
     "You are a fresh, read-only Pi reviewer in an exact-HEAD source snapshot. Do not modify product files, commit, push, or reuse the worker's conclusion.",
+    "The code-review skill is already loaded. Tool names are case-sensitive; use only read, grep, find, ls, subagent, review_preflight, review_validate, and review_submit. Never call Skill, PowerShell, Read, or Glob, and never invent or capitalize a tool name.",
     envelopeIdentity(attempt, context),
     `Repository: ${context.task.repo}`,
     `Issue: #${context.task.issueNumber}`,
