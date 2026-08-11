@@ -44,6 +44,12 @@ non-instructional evidence such as `CONTRIBUTING.md`. Resolve the issue/spec usi
 Fetch the issue before launching children and include the relevant spec text in
 the Spec task. Missing spec or standards evidence is an explicit gap.
 
+The parent reads only this fixed review evidence and the minimum standards and
+specification material needed to construct the two self-contained briefs. Do
+not duplicate the implementation review in the parent or broadly inspect the
+candidate source before launching both axes; the fresh children own those
+independent inspections.
+
 The Standards axis also uses this Fowler smell baseline as judgement calls,
 never automatic violations; documented repository standards take precedence:
 
@@ -104,6 +110,11 @@ scope creep, quoting the relevant requirement for each finding; stay under
 
 Both briefs must tell the child not to run project validation commands; the
 parent owns the single recorded validation run.
+
+Each completed child report is projected back to the parent as its axis,
+exit status, a bounded report tail, and the original byte count and SHA-256
+digest. Full child transcripts and extension details are deliberately excluded
+from the parent context.
 
 The Harness review tool rewrites this call onto the Attempt-private project
 registry and gives both children the absolute read-only candidate source root.

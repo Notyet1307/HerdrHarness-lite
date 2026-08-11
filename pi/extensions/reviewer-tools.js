@@ -7,6 +7,7 @@ import { ORIGINAL_AGENT_DIR_ENV, PI_PACKAGE_ROOT_ENV } from "./reviewer-subagent
 
 const DESCRIPTOR_ENV = "HERDR_HARNESS_REVIEW_DESCRIPTOR";
 const OUTPUT_LIMIT = 8 * 1024;
+const AXIS_OUTPUT_LIMIT = 12 * 1024;
 const SAFE_SUBAGENT_CONFIG = {
   asyncByDefault: false,
   forceTopLevelAsync: false,
@@ -48,6 +49,7 @@ export default function reviewerTools(pi) {
   pi.on("tool_result", async (event) => {
     if (event.toolName === "subagent" && axesCall?.id === event.toolCallId) {
       axesCompleted = completedReviewAxes(event, axesCall.tasks);
+      if (axesCompleted) return projectedReviewAxes(event.details);
     }
     return undefined;
   });
@@ -349,6 +351,21 @@ function completedReviewAxes(event, expectedTasks) {
   return tasks.size === 2;
 }
 
+function projectedReviewAxes(details) {
+  const results = details.results.map((result) => {
+    const output = boundedOutput(result.finalOutput, AXIS_OUTPUT_LIMIT);
+    return {
+      axis: reviewAxis(result.task),
+      exitCode: result.exitCode,
+      finalOutput: output.text,
+      outputBytes: output.bytes,
+      outputDigest: output.digest,
+    };
+  });
+  const projected = { mode: "workflow", results };
+  return { content: [{ type: "text", text: JSON.stringify(projected) }], details: projected, isError: false };
+}
+
 function reviewerEnv(descriptor) {
   const env = validationEnv({
     HOME: join(descriptor.scratchPath, "home"),
@@ -497,12 +514,12 @@ function safeDockerHost(host) {
   return host.startsWith("unix:///") && !/[\0\r\n]/.test(host);
 }
 
-function boundedOutput(value) {
+function boundedOutput(value, limit = OUTPUT_LIMIT) {
   const bytes = Buffer.byteLength(value);
   const digest = createHash("sha256").update(value).digest("hex");
-  if (bytes <= OUTPUT_LIMIT) return { text: value, bytes, digest };
+  if (bytes <= limit) return { text: value, bytes, digest };
   const marker = "[truncated]\n";
-  const budget = OUTPUT_LIMIT - Buffer.byteLength(marker);
+  const budget = limit - Buffer.byteLength(marker);
   let low = 0;
   let high = value.length;
   while (low < high) {

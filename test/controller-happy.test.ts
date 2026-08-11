@@ -819,6 +819,8 @@ test("happy path claims, starts Analyst, runs fresh Pi worker/reviewer, publishe
   assert.match(herdr.prompts[0]?.text ?? "", /call worker_submit exactly once/);
   assert.equal(/Required identity:/.test(herdr.prompts[0]?.text ?? ""), false);
   assert.match(herdr.prompts[1]?.text ?? "", /Call review_preflight before/);
+  assert.match(herdr.prompts[1]?.text ?? "", /Do not independently re-review the candidate implementation in the parent/);
+  assert.match(herdr.prompts[1]?.text ?? "", /launch both axes before any broad source inspection/);
   assert.match(herdr.prompts[1]?.text ?? "", /Tool names are case-sensitive/);
   assert.match(herdr.prompts[1]?.text ?? "", /Never call Skill, PowerShell, Read, or Glob/);
   assert.deepEqual(herdr.closed, [

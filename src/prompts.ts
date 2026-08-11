@@ -42,6 +42,7 @@ function reviewerPrompt(attempt: Attempt, context: AttemptContextEnvelope): stri
     `Objective:\n${context.task.objective}`,
     handoffInstruction(context.handoff?.value ?? null),
     "Call review_preflight before reading the full review evidence or launching review axes. If it fails, submit status=blocked with the concrete environment failure and do not launch subagents.",
+    "After successful preflight, read the fixed review evidence and only the minimum policy and specification material needed to construct the two self-contained axis briefs. Do not independently re-review the candidate implementation in the parent; launch both axes before any broad source inspection.",
     "After a successful preflight, follow the loaded code-review skill with Base SHA as the fixed point and independently review the exact Head SHA. Generic shell and file-writing tools are intentionally unavailable.",
     "Call review_validate exactly once for the configured validation command; it runs only in a disposable writable copy.",
     "Use status=changes only with actionable findings; use status=blocked when either review axis or required evidence is incomplete.",
