@@ -21,6 +21,14 @@ const passedCheck = {
     bucket: "pass",
     diagnostic: null,
 };
+const pendingCheck = {
+    ...failedCheck,
+    name: "test-playwright",
+    state: "IN_PROGRESS",
+    bucket: "pending",
+    completedAt: null,
+    diagnostic: null,
+};
 const failedCoverageCheck = {
     name: "coverage",
     state: "FAILURE",
@@ -267,6 +275,89 @@ test("blocked CI refreshes its incident when another required check fails on the
     assert.match(store.state.activeJob?.incident?.summary ?? "", /coverage: FAILURE/);
     assert.equal(store.state.activeJob?.ciReworkCount, 0);
     assert.equal(store.state.activeJob?.headSha, oldHead);
+});
+test("a failed check waits for every required check to become terminal before blocking", async () => {
+    const store = new MemoryStore();
+    const github = new FakeGitHub([issue({ number: 41, title: "Wait for complete CI" })]);
+    const controller = new HarnessController({
+        config,
+        store,
+        github,
+        git: new FakeGit(),
+        herdr: new FakeHerdr([
+            { lane: "worker", status: "completed", headSha: oldHead },
+            { lane: "reviewer", status: "pass", reviewedHeadSha: oldHead },
+        ]),
+        analyst: new FakeAnalyst(),
+        evidence: new FakeEvidence(),
+        clock: new FakeClock(),
+        ids: new SequenceIds(),
+        preflight: new FakeRuntimePreflight(),
+    });
+    await driveUntil(controller, store, "awaiting_merge");
+    github.autoMergeEnabled = true;
+    github.requiredChecks = [failedCheck, pendingCheck];
+    const collecting = await controller.tick();
+    assert.equal(collecting.action, "waiting_for_merge");
+    assert.equal(collecting.ok, true);
+    assert.equal(store.state.activeJob?.state, "awaiting_merge");
+    assert.equal(store.state.activeJob?.ciFailure, null);
+    assert.deepEqual(github.suspended, []);
+    github.requiredChecks = [failedCheck, { ...pendingCheck, state: "SUCCESS", bucket: "pass", completedAt: "2026-08-06T00:02:00Z" }];
+    const blocked = await controller.tick();
+    assert.equal(blocked.action, "blocked");
+    assert.equal(store.state.activeJob?.incident?.class, "ci_failure");
+    assert.deepEqual(store.state.activeJob?.ciFailure?.checks, [failedCheck]);
+    assert.deepEqual(github.suspended, [42]);
+});
+test("CI recovery bounds long diagnostics before creating a typed handoff", async () => {
+    const store = new MemoryStore();
+    const clock = new FakeClock();
+    const ids = new SequenceIds();
+    const github = new FakeGitHub([issue({ number: 42, title: "Bound CI diagnostics" })]);
+    const longFailure = {
+        ...failedCheck,
+        diagnostic: `${"failure context ".repeat(800)}final failure marker`,
+    };
+    const controller = new HarnessController({
+        config,
+        store,
+        github,
+        git: new FakeGit(),
+        herdr: new FakeHerdr([
+            { lane: "worker", status: "completed", headSha: oldHead },
+            { lane: "reviewer", status: "pass", reviewedHeadSha: oldHead },
+        ]),
+        analyst: new FakeAnalyst([{
+                kind: "advice",
+                action: "retry_fresh_worker",
+                summary: "The generated client drift is bounded to required CI",
+                resolutionBrief: "Regenerate and commit the frontend client, then rerun required CI.",
+                evidenceRefs: ["ci-checks"],
+                unknowns: [],
+            }]),
+        evidence: new FakeEvidence(),
+        clock,
+        ids,
+        preflight: new FakeRuntimePreflight(),
+    });
+    await driveUntil(controller, store, "awaiting_merge");
+    github.requiredChecks = [longFailure];
+    assert.equal((await controller.tick()).action, "blocked");
+    assert.equal((await controller.tick()).action, "analysis_recorded");
+    const blocked = store.state.activeJob;
+    await approveRecovery(store, {
+        expectedRevision: blocked.revision,
+        incidentId: blocked.incident.id,
+        analysisId: blocked.analysis.id,
+        actor: "human@example.test",
+        reason: "The exact failed check is understood.",
+    }, { clock, ids });
+    assert.equal((await controller.tick()).action, "recovery_applied");
+    const diagnostic = store.state.activeJob?.pendingHandoff?.obligations.at(-1)?.summary ?? "";
+    assert.ok(diagnostic.length <= 10_000);
+    assert.match(diagnostic, /truncated for typed handoff/);
+    assert.match(diagnostic, /final failure marker/);
 });
 test("CI evidence-turn exhaustion records an actionable Simplified-Chinese hold", async () => {
     const store = new MemoryStore();
