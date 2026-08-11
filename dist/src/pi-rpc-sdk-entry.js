@@ -1,10 +1,23 @@
 #!/usr/bin/env node
 import { createHash } from "node:crypto";
+import { Buffer } from "node:buffer";
 import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { executionResourceDigest } from "./attempt-plan.js";
 import { preparePiRpcAgentDirAt } from "./pi-rpc-spool.js";
+const MAX_PROJECTED_ERROR_BYTES = 16 * 1024;
+const PROJECTED_EVENT_TYPES = new Set([
+    "agent_end",
+    "turn_end",
+    "message_start",
+    "message_update",
+    "message_end",
+    "tool_execution_start",
+    "tool_execution_update",
+    "tool_execution_end",
+    "bash_execution_update",
+]);
 let failureStage = "arguments";
 async function main(argv) {
     const host = parseHostArgs(argv);
@@ -138,9 +151,123 @@ async function main(argv) {
         return;
     }
     failureStage = "rpc-mode";
-    await pi.runRpcMode(runtime);
+    await pi.runRpcMode(withProjectedPiRpcEvents(runtime));
     assertCredentialInputs();
     preparePiRpcAgentDirAt(privateAgentDir);
+}
+/**
+ * Projects content-heavy Pi lifecycle events onto the smaller Harness RPC
+ * interface. Pi's in-memory session and extension subscribers retain the
+ * original events; only the subscriber registered by runRpcMode sees these
+ * bounded observations.
+ */
+export function withProjectedPiRpcEvents(runtime) {
+    const sessionProxies = new WeakMap();
+    const projectSession = (session) => {
+        const cached = sessionProxies.get(session);
+        if (cached)
+            return cached;
+        const proxy = new Proxy(session, {
+            get(target, property, receiver) {
+                const value = Reflect.get(target, property, receiver);
+                if (property === "subscribe" && typeof value === "function") {
+                    return (listener) => Reflect.apply(value, target, [
+                        (event) => listener(projectPiRpcEvent(event)),
+                    ]);
+                }
+                return typeof value === "function" ? value.bind(target) : value;
+            },
+        });
+        sessionProxies.set(session, proxy);
+        return proxy;
+    };
+    return new Proxy(runtime, {
+        get(target, property, receiver) {
+            const value = Reflect.get(target, property, receiver);
+            if (property === "session" && value && typeof value === "object")
+                return projectSession(value);
+            return typeof value === "function" ? value.bind(target) : value;
+        },
+    });
+}
+export function projectPiRpcEvent(event) {
+    const type = typeof event.type === "string" ? event.type : "";
+    if (!PROJECTED_EVENT_TYPES.has(type))
+        return event;
+    const metadata = eventPayloadMetadata(event);
+    if (type === "agent_end") {
+        const messages = Array.isArray(event.messages) ? event.messages : [];
+        const roleCounts = { assistant: 0, toolResult: 0, other: 0 };
+        for (const message of messages) {
+            const role = record(message).role;
+            if (role === "assistant")
+                roleCounts.assistant += 1;
+            else if (role === "toolResult")
+                roleCounts.toolResult += 1;
+            else
+                roleCounts.other += 1;
+        }
+        return {
+            type,
+            willRetry: event.willRetry === true,
+            messageCount: messages.length,
+            roleCounts,
+            ...metadata,
+        };
+    }
+    if (type === "message_end") {
+        const source = record(event.message);
+        const message = {};
+        if (typeof source.role === "string")
+            message.role = source.role;
+        if (typeof source.stopReason === "string")
+            message.stopReason = source.stopReason;
+        if (typeof source.errorMessage === "string") {
+            message.errorMessage = boundedUtf8(source.errorMessage, MAX_PROJECTED_ERROR_BYTES);
+        }
+        return { type, message, ...metadata };
+    }
+    if (type === "message_update") {
+        const source = record(event.assistantMessageEvent);
+        return {
+            type,
+            assistantMessageEvent: {
+                ...(typeof source.type === "string" ? { type: source.type } : {}),
+                ...metadata,
+            },
+        };
+    }
+    if (type === "tool_execution_start" || type === "tool_execution_end") {
+        return { type, isError: event.isError === true, ...metadata };
+    }
+    return { type, ...metadata };
+}
+function eventPayloadMetadata(event) {
+    const serialized = JSON.stringify(event);
+    const hash = createHash("sha256");
+    hash.update(serialized);
+    return {
+        payloadBytes: Buffer.byteLength(serialized),
+        payloadDigest: hash.digest("hex"),
+    };
+}
+function boundedUtf8(value, maxBytes) {
+    if (Buffer.byteLength(value) <= maxBytes)
+        return value;
+    let low = 0;
+    let high = value.length;
+    while (low < high) {
+        const middle = Math.ceil((low + high) / 2);
+        if (Buffer.byteLength(value.slice(0, middle)) <= maxBytes)
+            low = middle;
+        else
+            high = middle - 1;
+    }
+    const finalCodeUnit = value.charCodeAt(low - 1);
+    return value.slice(0, finalCodeUnit >= 0xD800 && finalCodeUnit <= 0xDBFF ? low - 1 : low);
+}
+function record(value) {
+    return value && typeof value === "object" && !Array.isArray(value) ? value : {};
 }
 async function runProbe(runtime, prompt) {
     const marker = /^Reply with exactly ([A-Z0-9_]{1,100})$/u.exec(prompt)?.[1];

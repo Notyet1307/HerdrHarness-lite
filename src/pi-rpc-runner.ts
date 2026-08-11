@@ -229,10 +229,10 @@ async function main(argv: string[]): Promise<void> {
     if (type === "agent_end") agentEndObserved = true;
     if (type === "turn_start") turnCount += 1;
     if (["message_end", "tool_execution_end", "turn_end"].includes(type)) {
-      transcriptBytes = Math.min(4 * 1024 * 1024, transcriptBytes + Buffer.byteLength(JSON.stringify(event), "utf8"));
+      transcriptBytes = Math.min(4 * 1024 * 1024, transcriptBytes + observedPayloadBytes(event));
     }
     if (["message_update", "tool_execution_update", "bash_execution_update"].includes(type)) return;
-    const summary: JsonObject = { type, digest: digest(event) };
+    const summary: JsonObject = { type, digest: observedPayloadDigest(event) };
     const message = type === "message_end" ? object(event.message) : {};
     if (message.role === "assistant") assistantMessageCount += 1;
     if (type === "tool_execution_end") {
@@ -433,6 +433,18 @@ async function main(argv: string[]): Promise<void> {
     });
     throw new Error("Pi RPC runner failed");
   }
+}
+
+function observedPayloadBytes(event: JsonObject): number {
+  const projected = event.payloadBytes;
+  return typeof projected === "number" && Number.isSafeInteger(projected) && projected >= 0
+    ? projected
+    : Buffer.byteLength(JSON.stringify(event), "utf8");
+}
+
+function observedPayloadDigest(event: JsonObject): string {
+  const projected = event.payloadDigest;
+  return typeof projected === "string" && /^[0-9a-f]{64}$/u.test(projected) ? projected : digest(event);
 }
 
 async function waitForDispatch(plan: PiRpcPlan, client: RpcClient): Promise<{ dispatchId: string; message: string } | null> {

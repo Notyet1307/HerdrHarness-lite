@@ -1,10 +1,76 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { Buffer } from "node:buffer";
 import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { SyncCommandRunner } from "../src/adapters/command.js";
 import { executionResourceDigest } from "../src/attempt-plan.js";
+import { projectPiRpcEvent, withProjectedPiRpcEvents } from "../src/pi-rpc-sdk-entry.js";
+import { StrictJsonlDecoder } from "../src/pi-rpc-runner.js";
+test("Pi RPC event adapter bounds a large agent_end without mutating Pi session data", () => {
+    const sentinel = "FULL_TRANSCRIPT_SENTINEL";
+    const event = {
+        type: "agent_end",
+        willRetry: false,
+        messages: [
+            { role: "assistant", content: [{ type: "text", text: sentinel }] },
+            { role: "toolResult", content: [{ type: "text", text: "x".repeat(1024 * 1024) }] },
+        ],
+    };
+    const projected = projectPiRpcEvent(event);
+    const line = `${JSON.stringify(projected)}\n`;
+    assert.equal(new StrictJsonlDecoder().push(line).length, 1);
+    assert.ok(Buffer.byteLength(line) < 1024 * 1024);
+    assert.deepEqual(projected, {
+        type: "agent_end",
+        willRetry: false,
+        messageCount: 2,
+        roleCounts: { assistant: 1, toolResult: 1, other: 0 },
+        payloadBytes: Buffer.byteLength(JSON.stringify(event)),
+        payloadDigest: projected.payloadDigest,
+    });
+    assert.match(String(projected.payloadDigest), /^[0-9a-f]{64}$/);
+    assert.equal(line.includes(sentinel), false);
+    assert.equal(event.messages[0]?.content[0]?.text, sentinel);
+    assert.equal(event.messages[1]?.content[0]?.text.length, 1024 * 1024);
+});
+test("Pi RPC event adapter projects only the RPC subscriber and preserves diagnostic fields", () => {
+    const listeners = [];
+    const messages = [{ role: "assistant", content: [{ type: "text", text: "private session text" }] }];
+    const runtime = {
+        session: {
+            state: { messages },
+            subscribe(listener) {
+                listeners.push(listener);
+                return () => undefined;
+            },
+        },
+    };
+    const projectedRuntime = withProjectedPiRpcEvents(runtime);
+    const received = [];
+    projectedRuntime.session.subscribe((event) => received.push(event));
+    const providerError = "HTTP 429 rate limit ".repeat(1024);
+    const event = {
+        type: "message_end",
+        message: {
+            role: "assistant",
+            stopReason: "error",
+            errorMessage: providerError,
+            content: [{ type: "text", text: "untrusted provider response" }],
+        },
+    };
+    listeners[0]?.(event);
+    assert.equal(projectedRuntime.session.state.messages, messages);
+    assert.equal(received.length, 1);
+    assert.equal(received[0]?.type, "message_end");
+    assert.equal((received[0]?.message).role, "assistant");
+    assert.equal((received[0]?.message).stopReason, "error");
+    assert.match(String((received[0]?.message).errorMessage), /^HTTP 429 rate limit/);
+    assert.ok(Buffer.byteLength(String((received[0]?.message).errorMessage)) <= 16 * 1024);
+    assert.equal(JSON.stringify(received[0]).includes("untrusted provider response"), false);
+    assert.deepEqual(event.message.content, [{ type: "text", text: "untrusted provider response" }]);
+});
 test("Pi RPC SDK host shares only canonical subscription OAuth and keeps settings in memory", () => {
     const root = mkdtempSync(join(tmpdir(), "harness-pi-sdk-"));
     const dist = join(root, "pi", "dist");
