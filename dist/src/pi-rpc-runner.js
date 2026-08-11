@@ -8,6 +8,7 @@ import { digest } from "./model.js";
 import { executionResource, executionResourceDigest } from "./attempt-plan.js";
 import { readJson, preparePiRpcAgentDir, spoolPath, writeAtomicJson, writeExclusiveJson, } from "./pi-rpc-spool.js";
 import { isQualifiedPiRpcVersion } from "./pi-rpc-compat.js";
+import { classifyPiRpcRunnerFailure, piRpcRunnerError, } from "./pi-rpc-diagnostics.js";
 const MAX_RPC_LINE_BYTES = 1024 * 1024;
 const MAX_EVENT_LOG_BYTES = 512 * 1024;
 const COMMAND_TIMEOUT_MS = 30_000;
@@ -27,10 +28,10 @@ const KNOWN_EVENT_TYPES = new Set([
 ]);
 export class StrictJsonlDecoder {
     buffer = "";
-    push(chunk) {
+    push(chunk, onRecord) {
         this.buffer += chunk;
         if (Buffer.byteLength(this.buffer, "utf8") > MAX_RPC_LINE_BYTES && !this.buffer.includes("\n")) {
-            throw new Error("Pi RPC line exceeded the maximum size");
+            throw piRpcRunnerError("rpc_protocol", "rpc_line_too_large", false);
         }
         const records = [];
         for (;;) {
@@ -43,24 +44,28 @@ export class StrictJsonlDecoder {
                 line = line.slice(0, -1);
             if (!line)
                 continue;
-            if (Buffer.byteLength(line, "utf8") > MAX_RPC_LINE_BYTES)
-                throw new Error("Pi RPC line exceeded the maximum size");
+            if (Buffer.byteLength(line, "utf8") > MAX_RPC_LINE_BYTES) {
+                throw piRpcRunnerError("rpc_protocol", "rpc_line_too_large", false);
+            }
             let value;
             try {
                 value = JSON.parse(line);
             }
             catch {
-                throw new Error("Pi RPC stdout contained invalid JSON");
+                throw piRpcRunnerError("rpc_protocol", "rpc_invalid_json", false);
             }
-            if (!value || typeof value !== "object" || Array.isArray(value))
-                throw new Error("Pi RPC record is not an object");
-            records.push(value);
+            if (!value || typeof value !== "object" || Array.isArray(value)) {
+                throw piRpcRunnerError("rpc_protocol", "rpc_record_not_object", false);
+            }
+            const record = value;
+            records.push(record);
+            onRecord?.(record);
         }
         return records;
     }
     finish() {
         if (this.buffer.trim())
-            throw new Error("Pi RPC stdout ended with an incomplete JSONL record");
+            throw piRpcRunnerError("rpc_protocol", "rpc_incomplete_jsonl", false);
     }
 }
 class RpcClient {
@@ -70,6 +75,7 @@ class RpcClient {
     pending = new Map();
     sequence = 0;
     fatalError = null;
+    stdoutEnded = false;
     exit;
     outputEnded;
     constructor(child, onEvent) {
@@ -78,8 +84,7 @@ class RpcClient {
         child.stdout.setEncoding("utf8");
         child.stdout.on("data", (chunk) => {
             try {
-                for (const record of this.decoder.push(String(chunk)))
-                    this.accept(record);
+                this.decoder.push(String(chunk), (record) => this.accept(record));
             }
             catch (error) {
                 this.fail(error);
@@ -93,6 +98,7 @@ class RpcClient {
                 catch (error) {
                     this.fail(error);
                 }
+                this.stdoutEnded = true;
                 resolveEnd();
             });
         });
@@ -107,6 +113,9 @@ class RpcClient {
     get failure() {
         return this.fatalError;
     }
+    get outputFinished() {
+        return this.stdoutEnded;
+    }
     async command(type, fields = {}) {
         if (this.fatalError)
             throw this.fatalError;
@@ -115,30 +124,31 @@ class RpcClient {
             this.pending.set(id, { command: type, resolve: resolveResponse, reject });
         });
         this.child.stdin.write(`${JSON.stringify({ id, type, ...fields })}\n`);
-        return withTimeout(response, COMMAND_TIMEOUT_MS, `Pi RPC ${type} response`);
+        return withTimeout(response, COMMAND_TIMEOUT_MS);
     }
     accept(record) {
         if (record.type !== "response") {
             if (typeof record.type !== "string")
-                throw new Error("Pi RPC event has no type");
+                throw piRpcRunnerError("rpc_protocol", "rpc_event_missing_type", false);
             this.onEvent(record);
             return;
         }
         const id = record.id;
         const command = record.command;
-        if (typeof id !== "string" || typeof command !== "string")
-            throw new Error("Pi RPC response has no identity");
+        if (typeof id !== "string" || typeof command !== "string") {
+            throw piRpcRunnerError("rpc_protocol", "rpc_response_missing_identity", false);
+        }
         const pending = this.pending.get(id);
         if (!pending)
-            throw new Error(`Pi RPC returned an unknown or duplicate response id: ${id}`);
+            throw piRpcRunnerError("rpc_protocol", "rpc_unknown_response_id", false);
         this.pending.delete(id);
         if (pending.command !== command) {
-            const error = new Error(`Pi RPC response command ${command} != ${pending.command}`);
+            const error = piRpcRunnerError("rpc_protocol", "rpc_command_mismatch", false);
             pending.reject(error);
             throw error;
         }
         if (record.success !== true) {
-            pending.reject(new Error(`Pi RPC ${command} failed`));
+            pending.reject(piRpcRunnerError("rpc_protocol", "rpc_command_failed", false));
             return;
         }
         pending.resolve(record);
@@ -181,9 +191,16 @@ async function main(argv) {
     let agentStarts = 0;
     let eventBytes = 0;
     let logTruncated = false;
+    let eventCount = 0;
+    let lastEventType = null;
+    let agentEndObserved = false;
     const persistEvent = (event) => {
         const reportedType = typeof event.type === "string" ? event.type : "";
         const type = KNOWN_EVENT_TYPES.has(reportedType) ? reportedType : "unknown";
+        eventCount += 1;
+        lastEventType = type;
+        if (type === "agent_end")
+            agentEndObserved = true;
         if (["message_update", "tool_execution_update", "bash_execution_update"].includes(type))
             return;
         const summary = { type, digest: digest(event) };
@@ -291,8 +308,9 @@ async function main(argv) {
             if (settled)
                 break;
             const exited = await Promise.race([client.exit.then((value) => ({ exited: value })), delay(POLL_MS).then(() => null)]);
-            if (exited && !settled)
-                throw new Error(`Pi RPC exited before agent_settled: ${JSON.stringify(exited.exited)}`);
+            if (exited && !settled) {
+                throw piRpcRunnerError("child_process", "child_exit_before_settled", true);
+            }
             if (client.failure)
                 throw client.failure;
             terminationRequested = terminationRequested || existsSync(spoolPath(plan.runtimeRoot, "terminate.json"));
@@ -319,7 +337,7 @@ async function main(argv) {
         const ok = terminalError === null && !terminationRequested && settled;
         failureStage = "child-exit";
         if (ok && (childExit.code !== 0 || childExit.signal !== null)) {
-            throw new Error(`Pi RPC exited unsuccessfully after settlement: ${JSON.stringify(childExit)}`);
+            throw piRpcRunnerError("child_process", "child_exit_after_settled", false);
         }
         writeAtomicJson(spoolPath(plan.runtimeRoot, "terminal.json"), {
             ...identity,
@@ -335,31 +353,48 @@ async function main(argv) {
         });
         writeAtomicJson(spoolPath(plan.runtimeRoot, "terminated.json"), { ...identity, ok: true, reason: "settled and child exited" });
     }
-    catch {
-        let terminationError = null;
+    catch (error) {
+        const primaryFailure = classifyPiRpcRunnerFailure(error, failureStage);
+        let cleanupFailureCode = null;
         if (child && client) {
             try {
                 childExit ??= await stopChild(child, client);
             }
             catch (stopError) {
-                terminationError = stopError instanceof Error ? stopError.message : String(stopError);
+                cleanupFailureCode = classifyPiRpcRunnerFailure(stopError, "child-shutdown").failureCode;
             }
         }
         else if (child) {
-            terminationError = "Pi RPC child exists without a controllable client";
+            cleanupFailureCode = "child_shutdown_unconfirmed";
         }
+        const diagnosticFingerprint = digest({
+            version: 1,
+            ...primaryFailure,
+            agentSettled: settled,
+            agentEndObserved,
+            lastEventType,
+            childExit: childExitCategory(childExit),
+        });
         writeAtomicJson(spoolPath(plan.runtimeRoot, "terminal.json"), {
             ...identity,
             ok: false,
             error: "Pi RPC runner failed",
             failureStage,
+            ...primaryFailure,
+            diagnosticFingerprint,
             childExit,
+            agentSettled: settled,
+            agentEndObserved,
+            lastEventType,
+            eventCount,
+            stdoutEnded: client?.outputFinished ?? false,
+            ...(cleanupFailureCode ? { cleanupFailureCode } : {}),
         });
         writeAtomicJson(spoolPath(plan.runtimeRoot, "terminated.json"), {
             ...identity,
-            ok: terminationError === null,
-            reason: terminationError === null ? "runner failure child exit confirmed" : "runner failure child exit unconfirmed",
-            ...(terminationError ? { error: "Pi RPC child exit unconfirmed" } : {}),
+            ok: cleanupFailureCode === null,
+            reason: cleanupFailureCode === null ? "runner failure child exit confirmed" : "runner failure child exit unconfirmed",
+            ...(cleanupFailureCode ? { error: "Pi RPC child exit unconfirmed", cleanupFailureCode } : {}),
         });
         throw new Error("Pi RPC runner failed");
     }
@@ -528,12 +563,14 @@ async function stopChild(child, client) {
         child.kill("SIGTERM");
         if (!await exitsWithin(client.exit, EXIT_TIMEOUT_MS / 2)) {
             child.kill("SIGKILL");
-            if (!await exitsWithin(client.exit, EXIT_TIMEOUT_MS / 2))
-                throw new Error("Pi RPC child termination is not confirmed");
+            if (!await exitsWithin(client.exit, EXIT_TIMEOUT_MS / 2)) {
+                throw piRpcRunnerError("child_process", "child_shutdown_unconfirmed", false);
+            }
         }
     }
-    if (!await exitsWithin(client.outputEnded, EXIT_TIMEOUT_MS / 2))
-        throw new Error("Pi RPC stdout termination is not confirmed");
+    if (!await exitsWithin(client.outputEnded, EXIT_TIMEOUT_MS / 2)) {
+        throw piRpcRunnerError("rpc_transport", "rpc_stdout_end_timeout", false);
+    }
     return client.exit;
 }
 async function exitsWithin(exit, timeoutMs) {
@@ -548,6 +585,17 @@ async function exitsWithin(exit, timeoutMs) {
 function receiptIdentity(plan) {
     return { version: 1, attemptId: plan.attemptId, generation: plan.generation, planDigest: plan.planDigest };
 }
+function childExitCategory(childExit) {
+    if (!childExit)
+        return "unknown";
+    if (childExit.signal !== null)
+        return "signal";
+    if (childExit.code === 0)
+        return "success";
+    if (childExit.code !== null)
+        return "nonzero";
+    return "unknown";
+}
 function object(value) {
     return value && typeof value === "object" && !Array.isArray(value) ? value : {};
 }
@@ -558,9 +606,9 @@ function flag(argv, name) {
 function delay(ms) {
     return new Promise((resolveDelay) => setTimeout(resolveDelay, ms));
 }
-async function withTimeout(promise, timeoutMs, label) {
+async function withTimeout(promise, timeoutMs) {
     return new Promise((resolveValue, reject) => {
-        const timer = setTimeout(() => reject(new Error(`timed out waiting for ${label}`)), timeoutMs);
+        const timer = setTimeout(() => reject(piRpcRunnerError("rpc_transport", "rpc_command_timeout", true)), timeoutMs);
         promise.then((value) => {
             clearTimeout(timer);
             resolveValue(value);

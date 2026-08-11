@@ -215,7 +215,7 @@ herdr --session SESSION_NAME agent read AGENT_NAME \
 
 The Pi footer shows the effective `(provider) model • thinking`. Configuration expresses intent; the live footer and a real probe establish the selected runtime.
 
-An RPC Worker/Reviewer has no Herdr interactive-agent record. Inspect its ledger ExecutionSnapshot and the Attempt's `runtime/ready.json`, `accepted.json`, `terminal.json`, and `terminated.json` receipts. An assistant failure exposes only fixed `failureClass`, `retryable`, `failureStage`, and child `{code, signal}` fields; child stderr and Provider payloads remain excluded. Never try to reconnect or recreate the runner-owned stdin/stdout pipes.
+An RPC Worker/Reviewer has no Herdr interactive-agent record. Inspect its ledger ExecutionSnapshot and the Attempt's `runtime/ready.json`, `accepted.json`, `terminal.json`, and `terminated.json` receipts. An assistant failure exposes only fixed `failureClass`, `retryable`, `failureStage`, and child `{code, signal}` fields. A runner failure additionally exposes allowlisted `failureDomain`/`failureCode`, a safe diagnostic fingerprint, and bounded lifecycle state; child stderr, Provider payloads, raw exception messages, and stacks remain excluded. Never try to reconnect or recreate the runner-owned stdin/stdout pipes.
 
 Plain `status` returns the complete ledger. `status --operator` returns the stable operator projection: current mode/phase and only the actions that are valid for the exact revision, incident, analysis, Attempt, and HEAD bindings.
 

@@ -4,6 +4,7 @@ import { digest } from "../model.js";
 import { executionResourceDigest } from "../attempt-plan.js";
 import { ensurePrivateDirectory, readJsonIfExists, rpcGeneration, rpcRuntimeRoot, sameJson, spoolPath, writeExclusiveJson, } from "../pi-rpc-spool.js";
 import { assertQualifiedPiRpcVersion } from "../pi-rpc-compat.js";
+import { isPiRpcFailureCode, isPiRpcFailureDomain } from "../pi-rpc-diagnostics.js";
 const READY_TIMEOUT_MS = 30_000;
 const ACCEPT_TIMEOUT_MS = 30_000;
 const TERMINATE_TIMEOUT_MS = 30_000;
@@ -212,7 +213,14 @@ function assertReceipt(receipt, plan, label) {
 }
 function runtimeFailure(receipt) {
     const details = [];
-    if (receipt.failureClass && RUNNER_FAILURE_CLASSES.has(receipt.failureClass)) {
+    const structuredRunnerFailure = isPiRpcFailureDomain(receipt.failureDomain) && isPiRpcFailureCode(receipt.failureCode);
+    if (structuredRunnerFailure) {
+        details.push(`domain=${receipt.failureDomain}`);
+        details.push(`code=${receipt.failureCode}`);
+        if (typeof receipt.retryable === "boolean")
+            details.push(`retryable=${receipt.retryable ? "yes" : "no"}`);
+    }
+    else if (receipt.failureClass && RUNNER_FAILURE_CLASSES.has(receipt.failureClass)) {
         details.push(`class=${receipt.failureClass}`);
         if (typeof receipt.retryable === "boolean")
             details.push(`retryable=${receipt.retryable ? "yes" : "no"}`);
@@ -228,6 +236,9 @@ function runtimeFailure(receipt) {
     }
     else if (exit && exit.code === null && exit.signal === null) {
         details.push("child=unknown");
+    }
+    if (typeof receipt.diagnosticFingerprint === "string" && /^[0-9a-f]{64}$/.test(receipt.diagnosticFingerprint)) {
+        details.push(`fingerprint=${receipt.diagnosticFingerprint.slice(0, 12)}`);
     }
     return `${receipt.error ?? "unknown failure"}${details.length ? ` (${details.join(", ")})` : ""}`;
 }
