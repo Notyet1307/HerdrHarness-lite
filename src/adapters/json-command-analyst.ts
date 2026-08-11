@@ -1,8 +1,20 @@
-import { isBoundedText as boundedText, type AnalystSession, type AnalystTurn, type TaskSnapshot } from "../model.js";
+import { isBoundedText as boundedText, type AnalystDiagnosis, type AnalystSession, type AnalystTurn, type EvidenceRequestKind, type TaskSnapshot } from "../model.js";
 import type { AnalystPort } from "../ports.js";
 import { type CommandRunner, requireSuccess, SyncCommandRunner } from "./command.js";
 
 export const MAX_ANALYST_UNKNOWNS = 4;
+const EVIDENCE_REQUEST_KINDS: EvidenceRequestKind[] = [
+  "issue_context",
+  "git_status",
+  "git_diff",
+  "worktree_progress",
+  "test_output",
+  "attempt_result",
+  "attempt_runtime",
+  "attempt_history",
+  "controller_health",
+  "file_excerpt",
+];
 
 /**
  * Adapter boundary for a persistent Codex wrapper.
@@ -54,7 +66,7 @@ export class JsonCommandAnalyst implements AnalystPort {
       evidence: input.evidence,
       turn: input.turn,
       allowedOutput: {
-        need_evidence: ["issue_context", "git_status", "git_diff", "test_output", "attempt_result", "file_excerpt"],
+        need_evidence: EVIDENCE_REQUEST_KINDS,
         advice: ["retry_fresh_worker", "retry_fresh_reviewer", "hold"],
       },
     });
@@ -96,16 +108,14 @@ export function parseAnalystTurn(value: unknown): AnalystTurn {
         if (!request || typeof request !== "object") throw new Error("Analyst evidence request is invalid");
         const item = request as Record<string, unknown>;
         if (
-          !["issue_context", "git_status", "git_diff", "test_output", "attempt_result", "file_excerpt"].includes(
-            String(item.kind),
-          ) ||
+          !EVIDENCE_REQUEST_KINDS.includes(item.kind as EvidenceRequestKind) ||
           !boundedText(item.reason, 512) ||
           (item.path !== null && item.path !== undefined && !boundedText(item.path, 512))
         ) {
           throw new Error("Analyst requested an unsupported evidence operation");
         }
         return {
-          kind: item.kind as "issue_context" | "git_status" | "git_diff" | "test_output" | "attempt_result" | "file_excerpt",
+          kind: item.kind as EvidenceRequestKind,
           path: boundedText(item.path, 512) ? item.path : null,
           reason: item.reason,
         };
@@ -133,7 +143,54 @@ export function parseAnalystTurn(value: unknown): AnalystTurn {
     resolutionBrief: object.resolutionBrief,
     evidenceRefs: object.evidenceRefs as string[],
     unknowns: object.unknowns as string[],
+    ...(object.diagnosis === undefined ? {} : { diagnosis: parseDiagnosis(object.diagnosis) }),
   };
+}
+
+function parseDiagnosis(value: unknown): AnalystDiagnosis {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Analyst diagnosis is invalid");
+  const object = value as Record<string, unknown>;
+  if (
+    !boundedText(object.primaryCause, 2_000)
+    || !["high", "medium", "low"].includes(String(object.confidence))
+    || !boundedTextArray(object.contributingFactors, 4, 512)
+    || !boundedTextArray(object.preservationConstraints, 4, 512)
+    || !Array.isArray(object.hypotheses)
+    || object.hypotheses.length === 0
+    || object.hypotheses.length > 5
+  ) throw new Error("Analyst diagnosis is invalid");
+  const hypotheses = object.hypotheses.map((value) => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Analyst diagnosis hypothesis is invalid");
+    const hypothesis = value as Record<string, unknown>;
+    if (
+      !boundedText(hypothesis.claim, 512)
+      || !["supported", "rejected", "unresolved"].includes(String(hypothesis.status))
+      || !["high", "medium", "low"].includes(String(hypothesis.confidence))
+      || !Array.isArray(hypothesis.evidenceRefs)
+      || hypothesis.evidenceRefs.length > 8
+      || !hypothesis.evidenceRefs.every((entry) => boundedText(entry, 128))
+      || new Set(hypothesis.evidenceRefs).size !== hypothesis.evidenceRefs.length
+    ) throw new Error("Analyst diagnosis hypothesis is invalid");
+    return {
+      claim: hypothesis.claim as string,
+      status: hypothesis.status as "supported" | "rejected" | "unresolved",
+      confidence: hypothesis.confidence as "high" | "medium" | "low",
+      evidenceRefs: hypothesis.evidenceRefs as string[],
+    };
+  });
+  return {
+    primaryCause: object.primaryCause as string,
+    confidence: object.confidence as "high" | "medium" | "low",
+    contributingFactors: object.contributingFactors as string[],
+    preservationConstraints: object.preservationConstraints as string[],
+    hypotheses,
+  };
+}
+
+function boundedTextArray(value: unknown, maxItems: number, maxLength: number): value is string[] {
+  return Array.isArray(value)
+    && value.length <= maxItems
+    && value.every((entry) => boundedText(entry, maxLength));
 }
 
 function codexUuid(value: unknown): value is string {

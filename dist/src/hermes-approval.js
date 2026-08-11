@@ -4,7 +4,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, renameSync, writeFileSync, } from "node:fs";
 import { dirname, isAbsolute, join } from "node:path";
 import { JsonStateStore } from "./adapters/json-store.js";
-import { isRetryAction } from "./model.js";
+import { isBoundedText } from "./model.js";
 import { operatorActionsFor } from "./policy.js";
 const CHALLENGE_TTL_MS = 10 * 60 * 1_000;
 const MAX_STDIN_BYTES = 1_024;
@@ -35,11 +35,12 @@ async function main(argv) {
     }
     const config = loadConfig(requiredFlag(argv, "--config"));
     const json = argv.includes("--json");
-    if (command === "request")
-        return requestChallenge(config, json);
-    return decideChallenge(config, command, json);
+    if (command === "request") {
+        return requestChallenge(config, json, (optionalFlag(argv, "--kind") ?? "approve_retry"), optionalFlag(argv, "--reason"));
+    }
+    return decideChallenge(config, command, json, optionalFlag(argv, "--kind"));
 }
-async function requestChallenge(config, json) {
+async function requestChallenge(config, json, kind, requestedReason) {
     const ledger = await new JsonStateStore(config.harnessStateDir).load();
     const job = ledger.activeJob;
     if (!job)
@@ -48,13 +49,21 @@ async function requestChallenge(config, json) {
         throw new Error("当前任务不在等待恢复批准");
     if (!job.analysis || job.analysis.incidentId !== job.incident.id)
         throw new Error("当前 incident 尚无精确绑定的 Analyst 建议");
-    const option = operatorActionsFor(job).find((candidate) => candidate.kind === "approve_retry");
-    if (!option || !isRetryAction(option.effect))
-        throw new Error("当前 incident policy 不允许 fresh retry");
+    if (!["approve_retry", "reassess", "resolve_decision", "cancel"].includes(kind))
+        throw new Error("请求的 operator action 无效");
+    const option = operatorActionsFor(job).find((candidate) => candidate.kind === kind);
+    if (!option)
+        throw new Error(`当前 incident policy 不允许 ${kind}`);
+    const reason = requestedReason?.trim() || defaultReason(kind);
+    if (!isBoundedText(reason, 2_000))
+        throw new Error("operator reason 必须为 1-2000 字符的有界文本");
+    if (kind !== "approve_retry" && !requestedReason?.trim()) {
+        throw new Error(`${kind} 必须提供明确 reason`);
+    }
     const token = randomUUID().replaceAll("-", "").slice(0, 16).toUpperCase();
     const createdAt = new Date();
     const challenge = {
-        version: 2,
+        version: 3,
         tokenDigest: digestToken(token),
         jobId: job.id,
         revision: job.revision,
@@ -62,7 +71,10 @@ async function requestChallenge(config, json) {
         issueNumber: job.task.issueNumber,
         incidentId: job.incident.id,
         analysisId: job.analysis.id,
-        action: option.effect,
+        optionId: option.id,
+        kind: option.kind,
+        effect: option.effect,
+        reason,
         createdAt: createdAt.toISOString(),
         expiresAt: new Date(createdAt.getTime() + CHALLENGE_TTL_MS).toISOString(),
         consumedAt: null,
@@ -71,16 +83,17 @@ async function requestChallenge(config, json) {
     };
     saveChallenge(config.approvalState, challenge);
     const humanMessage = [
-        "⚠️ 待批准 Harness fresh retry",
+        "⚠️ 待确认 Harness operator action",
         `任务：${clean(job.task.repo, 160)}#${job.task.issueNumber}`,
         `阻塞：${job.incident.class} · ${job.incident.lane}`,
         ...(job.headSha ? [`HEAD：${job.headSha.slice(0, 12)}`] : []),
-        `动作：${actionLabel(challenge.action)}`,
+        `动作：${actionLabel(challenge.kind, challenge.effect)}`,
+        `原因：${clean(challenge.reason, 700)}`,
         `revision：${job.revision}`,
         `Analyst：${clean(job.analysis.summary, 500)}`,
         `恢复说明：${clean(job.analysis.resolutionBrief, 700)}`,
         "有效期：10 分钟；新的挑战会使旧挑战失效。",
-        `确认命令：${approvalCommand(config, token)}`,
+        `确认命令：${challengeCommand(config, challenge.kind, token)}`,
         "不想批准就不要发送确认命令。",
     ].join("\n");
     if (json) {
@@ -88,8 +101,10 @@ async function requestChallenge(config, json) {
             ok: true,
             action: "challenge_created",
             analysisId: challenge.analysisId,
+            kind: challenge.kind,
+            effect: challenge.effect,
             expiresAt: challenge.expiresAt,
-            card: approvalCard(job, token, config.laneId),
+            card: approvalCard(job, challenge, token, config.laneId),
         })}\n`);
     }
     else {
@@ -97,17 +112,20 @@ async function requestChallenge(config, json) {
     }
     return 0;
 }
-async function decideChallenge(config, decision, json) {
+async function decideChallenge(config, decision, json, expectedKind) {
     const token = readToken();
     const challenge = loadChallenge(config.approvalState);
     if (challenge.consumedAt !== null
         || Date.parse(challenge.expiresAt) <= Date.now()
         || digestToken(token) !== challenge.tokenDigest) {
-        throw new ApprovalCommandError("challenge_invalid", `挑战码无效、已过期或已使用；请重新发送 ${approvalCommand(config)}`, true);
+        throw new ApprovalCommandError("challenge_invalid", "挑战码无效、已过期或已使用；请重新读取 /harness actions", true);
+    }
+    if (expectedKind !== null && challenge.kind !== expectedKind) {
+        throw new ApprovalCommandError("challenge_kind_mismatch", "命令类型与 challenge 不匹配；请使用 challenge 中显示的确认命令", true);
     }
     const store = new JsonStateStore(config.harnessStateDir);
     const before = await store.load();
-    assertChallengeCurrent(before.activeJob, challenge, config);
+    assertChallengeCurrent(before.activeJob, challenge);
     const actor = `telegram:${config.telegramAllowedUser}`;
     if (decision === "hold") {
         challenge.consumedAt = new Date().toISOString();
@@ -122,32 +140,21 @@ async function decideChallenge(config, decision, json) {
         process.stdout.write(json ? `${JSON.stringify(output)}\n` : `⏸️ ${output.message}\n`);
         return 0;
     }
-    const reason = "Approved through a Telegram challenge bound to the exact job revision, incident, analysis, and retry action.";
-    const approved = spawnSync(config.nodeBin, [
+    const executed = spawnSync(config.nodeBin, [
         config.harnessCliScript,
-        "approve",
+        "decide",
         "--config", config.harnessConfig,
-        "--revision", String(challenge.revision),
-        "--incident", challenge.incidentId,
-        "--analysis", challenge.analysisId,
+        "--option", challenge.optionId,
         "--actor", actor,
-        "--reason", reason,
+        "--reason", challenge.reason,
     ], { encoding: "utf8", timeout: 15_000, maxBuffer: 1024 * 1024 });
-    if (approved.status !== 0) {
-        throw new ApprovalCommandError("harness_rejected", `Harness 拒绝批准：${clean(approved.error?.message || approved.stderr || approved.stdout || `exit ${approved.status}`, 700)}`, false);
+    if (executed.status !== 0) {
+        throw new ApprovalCommandError("harness_rejected", `Harness 拒绝操作：${clean(executed.error?.message || executed.stderr || executed.stdout || `exit ${executed.status}`, 700)}`, false);
     }
     const after = await store.load();
-    const approval = after.activeJob?.approval;
-    if (!approval
-        || approval.jobRevision !== challenge.revision
-        || approval.incidentId !== challenge.incidentId
-        || approval.analysisId !== challenge.analysisId
-        || approval.action !== challenge.action
-        || approval.actor !== actor) {
-        throw new ApprovalCommandError("approval_mismatch", "Harness 命令返回成功，但 ledger 中没有精确匹配的 durable approval", true);
-    }
+    assertEffectRecorded(after.activeJob, challenge, actor);
     challenge.consumedAt = new Date().toISOString();
-    challenge.decision = "approved";
+    challenge.decision = "confirmed";
     challenge.actor = actor;
     let auditWarning = "";
     try {
@@ -157,17 +164,17 @@ async function decideChallenge(config, decision, json) {
         auditWarning = `\n⚠️ approval 已写入 ledger，但挑战状态落盘失败：${clean(message(error), 300)}`;
     }
     const humanMessage = [
-        "✅ Harness 已记录精确恢复批准",
+        "✅ Harness 已记录精确 operator action",
         `任务：${clean(challenge.repo, 160)}#${challenge.issueNumber}`,
-        `动作：${actionLabel(challenge.action)}`,
-        "Controller 会重新校验并只启动全新的 Worker/Reviewer。",
+        `动作：${actionLabel(challenge.kind, challenge.effect)}`,
+        "Harness 已完成 CAS 校验并写入 durable ledger；后续由 Controller 按状态机继续。",
     ].join("\n") + auditWarning;
     process.stdout.write(json
-        ? `${JSON.stringify({ ok: true, action: "approved", message: clean(humanMessage, 1_500) })}\n`
+        ? `${JSON.stringify({ ok: true, action: "confirmed", kind: challenge.kind, effect: challenge.effect, message: clean(humanMessage, 1_500) })}\n`
         : `${humanMessage}\n`);
     return 0;
 }
-function assertChallengeCurrent(job, challenge, config) {
+function assertChallengeCurrent(job, challenge) {
     if (!job
         || job.id !== challenge.jobId
         || job.revision !== challenge.revision
@@ -175,15 +182,33 @@ function assertChallengeCurrent(job, challenge, config) {
         || job.incident?.id !== challenge.incidentId
         || job.analysis?.id !== challenge.analysisId
         || job.analysis.incidentId !== job.incident.id
-        || !operatorActionsFor(job).some((option) => option.kind === "approve_retry" && option.effect === challenge.action)) {
-        throw new ApprovalCommandError("binding_stale", `任务、revision、incident 或 analysis 已变化；请重新发送 ${approvalCommand(config)}`, true);
+        || !operatorActionsFor(job).some((option) => (option.id === challenge.optionId
+            && option.kind === challenge.kind
+            && option.effect === challenge.effect))) {
+        throw new ApprovalCommandError("binding_stale", "任务、revision、incident、analysis、attempt 或 HEAD 已变化；请重新读取 /harness actions", true);
     }
 }
-function approvalCard(job, token, laneId) {
+function assertEffectRecorded(job, challenge, actor) {
+    const common = (record) => (record?.jobRevision === challenge.revision
+        && record.incidentId === challenge.incidentId
+        && record.analysisId === challenge.analysisId
+        && record.actor === actor
+        && record.reason === challenge.reason);
+    const matched = challenge.kind === "cancel"
+        ? common(job?.cancellation)
+        : challenge.kind === "reassess"
+            ? (job?.reassessments ?? []).some((record) => common(record))
+            : common(job?.approval);
+    if (!matched) {
+        throw new ApprovalCommandError("effect_mismatch", "Harness 命令返回成功，但 ledger 中没有精确匹配的 durable effect", true);
+    }
+}
+function approvalCard(job, challenge, token, laneId) {
     const incident = job.incident;
     const analysis = job.analysis;
-    if (!isRetryAction(analysis.action))
-        throw new Error("approval card requires a fresh retry action");
+    const option = operatorActionsFor(job).find((candidate) => candidate.id === challenge.optionId);
+    if (!option)
+        throw new Error("operator card requires a current action");
     const unknowns = analysis.unknowns.length === 0
         ? "无"
         : analysis.unknowns.slice(0, 3).map((value) => `• ${html(clean(value, 220), 140)}`).join("\n");
@@ -195,9 +220,10 @@ function approvalCard(job, token, laneId) {
             "",
             `<b>结论：</b>${html(clean(analysis.summary, 420), 340)}`,
             "<b>影响：</b>自动流程暂停；Harness 尚未启动恢复 agent。",
-            `<b>建议：</b>${html(actionLabel(analysis.action), 100)}`,
-            html(clean(analysis.resolutionBrief, 540), 440),
-            "<b>建议原因：</b>这是与当前阻塞精确绑定、且符合 Harness 策略的恢复动作；批准后 Controller 仍会重新校验任务、HEAD 与全部绑定。",
+            `<b>建议：</b>${html(actionLabel(option.kind, option.effect), 100)}`,
+            html(clean(analysis.resolutionBrief || "由 operator 提供的有界 reason 将随 challenge 一并审计。", 540), 440),
+            `<b>Operator reason：</b>${html(clean(challenge.reason, 540), 440)}`,
+            "<b>建议原因：</b>这是与当前阻塞精确绑定、且符合 Harness 策略的操作；确认后 Harness 仍会重新校验任务、HEAD 与全部绑定。",
             "",
             "⏱️ <b>10 分钟内有效</b>；新卡片会使旧卡片失效。",
             "",
@@ -211,9 +237,7 @@ function approvalCard(job, token, laneId) {
             `Incident：<code>${html(clean(incident.id, 80), 60)}</code> · revision <code>${job.revision}</code>`,
             "</blockquote>",
         ].join("\n"),
-        approveLabel: analysis.action === "retry_fresh_worker"
-            ? "批准：全新 Worker"
-            : "批准：全新 Reviewer",
+        approveLabel: actionButtonLabel(option.kind, option.effect),
         approveCallback: `hh:a:${laneId ? `${laneId}:` : ""}${token}`,
         holdCallback: `hh:h:${laneId ? `${laneId}:` : ""}${token}`,
     };
@@ -221,8 +245,6 @@ function approvalCard(job, token, laneId) {
 function analysisTimeline(job) {
     const incident = job.incident;
     const analysis = job.analysis;
-    if (!isRetryAction(analysis.action))
-        throw new Error("approval timeline requires a fresh retry action");
     const attempt = incident.attemptId === null
         ? null
         : job.attempts.find((candidate) => candidate.id === incident.attemptId)
@@ -243,7 +265,7 @@ function analysisTimeline(job) {
     if (job.ciFailure?.observedAt) {
         events.push({ at: job.ciFailure.observedAt, text: "已观察到 GitHub 必需 CI 失败" });
     }
-    events.push({ at: incident.createdAt, text: `Harness 记录 ${incident.class} · ${incident.lane}` }, { at: analysis.createdAt, text: `Analyst 建议：${actionLabel(analysis.action)}` });
+    events.push({ at: incident.createdAt, text: `Harness 记录 ${incident.class} · ${incident.lane}` }, { at: analysis.createdAt, text: `Analyst 建议：${analysis.action}` });
     return events
         .sort((left, right) => Date.parse(left.at) - Date.parse(right.at))
         .map(({ at, text }) => `<code>${html(localTime(at), 40)}</code> · ${html(text, 180)}`);
@@ -293,13 +315,13 @@ function loadConfig(path) {
     }
     return { ...file, harnessStateDir: harness.stateDir };
 }
-function approvalCommand(config, token) {
-    return `/harness${config.laneId ? ` ${config.laneId}` : ""} approve${token ? ` ${token}` : ""}`;
+function challengeCommand(config, kind, token) {
+    return `/harness${config.laneId ? ` ${config.laneId}` : ""} ${commandForKind(kind)}${token ? ` ${token}` : ""}`;
 }
 function loadChallenge(path) {
     assertSecureAbsoluteFile(path, "approval challenge");
     const value = JSON.parse(readFileSync(path, "utf8"));
-    if (value.version !== 2
+    if (value.version !== 3
         || !/^[0-9a-f]{64}$/.test(value.tokenDigest)
         || !value.jobId?.trim()
         || !Number.isInteger(value.revision)
@@ -310,11 +332,15 @@ function loadChallenge(path) {
         || value.issueNumber <= 0
         || !value.incidentId?.trim()
         || !value.analysisId?.trim()
-        || !isRetryAction(value.action)
+        || !value.optionId?.trim()
+        || !["approve_retry", "reassess", "resolve_decision", "cancel"].includes(value.kind)
+        || !["retry_fresh_worker", "retry_fresh_reviewer", "rerun_analysis", "cancel_and_requeue"].includes(value.effect)
+        || !kindMatchesEffect(value.kind, value.effect)
+        || !isBoundedText(value.reason, 2_000)
         || !Number.isFinite(Date.parse(value.createdAt))
         || !Number.isFinite(Date.parse(value.expiresAt))
         || (value.consumedAt !== null && !Number.isFinite(Date.parse(value.consumedAt)))
-        || (value.decision !== null && value.decision !== "approved" && value.decision !== "held")
+        || (value.decision !== null && value.decision !== "confirmed" && value.decision !== "held")
         || (value.actor !== null && !value.actor.trim())
         || ((value.decision === null) !== (value.consumedAt === null))) {
         throw new Error("approval challenge state is invalid");
@@ -344,8 +370,44 @@ function digestToken(token) {
     hash.update(token);
     return hash.digest("hex");
 }
-function actionLabel(action) {
-    return action === "retry_fresh_worker" ? "启动全新 Worker" : "启动全新 Reviewer（保持当前 HEAD）";
+function actionLabel(kind, effect) {
+    if (kind === "approve_retry")
+        return effect === "retry_fresh_worker" ? "启动全新 Worker" : "启动全新 Reviewer（保持当前 HEAD）";
+    if (kind === "reassess")
+        return "基于新证据重新分析";
+    if (kind === "resolve_decision")
+        return "记录人工架构决策并启动全新 Worker";
+    return "取消当前任务并重新入队";
+}
+function actionButtonLabel(kind, effect) {
+    if (kind === "approve_retry")
+        return effect === "retry_fresh_worker" ? "批准：全新 Worker" : "批准：全新 Reviewer";
+    if (kind === "reassess")
+        return "确认：重新分析";
+    if (kind === "resolve_decision")
+        return "确认：人工决策";
+    return "确认：取消并重排";
+}
+function commandForKind(kind) {
+    if (kind === "approve_retry")
+        return "retry";
+    if (kind === "resolve_decision")
+        return "resolve";
+    return kind;
+}
+function kindMatchesEffect(kind, effect) {
+    if (kind === "approve_retry")
+        return effect === "retry_fresh_worker" || effect === "retry_fresh_reviewer";
+    if (kind === "resolve_decision")
+        return effect === "retry_fresh_worker";
+    if (kind === "reassess")
+        return effect === "rerun_analysis";
+    return effect === "cancel_and_requeue";
+}
+function defaultReason(kind) {
+    return kind === "approve_retry"
+        ? "Confirmed through a Telegram challenge bound to the exact operator option."
+        : "";
 }
 function requiredFlag(argv, name) {
     const index = argv.indexOf(name);
@@ -353,6 +415,11 @@ function requiredFlag(argv, name) {
     if (!value?.trim())
         throw new Error(`${name} is required`);
     return value;
+}
+function optionalFlag(argv, name) {
+    const index = argv.indexOf(name);
+    const value = index >= 0 ? argv[index + 1] : undefined;
+    return value?.trim() ? value : null;
 }
 function clean(value, max) {
     return value.replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim().slice(0, max);

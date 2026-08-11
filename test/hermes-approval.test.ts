@@ -49,7 +49,7 @@ test("Telegram approval challenge is one-use and bound to exact durable recovery
     const secondToken = tokenFrom(second.stdout);
     const confirmed = run("confirm", bridgeConfig, secondToken);
     assert.equal(confirmed.status, 0);
-    assert.match(confirmed.stdout, /已记录精确恢复批准/);
+    assert.match(confirmed.stdout, /已记录精确 operator action/);
     const approved = readLedger(ledgerPath).activeJob;
     assert.equal(approved.state, "recovery_approved");
     assert.equal(approved.approval.actor, "telegram:123456789");
@@ -105,7 +105,7 @@ test("Telegram approval card exposes bounded decisions and hold consumes only th
     assert.match(payload.card.text, /Reviewer 开始（第 1 轮）/);
     assert.match(payload.card.text, /Reviewer 结束；ledger 尚未收到持久化结果/);
     assert.match(payload.card.text, /Harness 记录 infrastructure_exhausted · reviewer/);
-    assert.match(payload.card.text, /Analyst 建议：启动全新 Reviewer/);
+    assert.match(payload.card.text, /Analyst 建议：retry_fresh_reviewer/);
     assert.match(payload.card.text, /原始阻塞：/);
     assert.match(payload.card.text, /证据引用：attempt_result/);
     assert.match(payload.card.text, /实例.*exposure/);
@@ -130,6 +130,51 @@ test("Telegram approval card exposes bounded decisions and hold consumes only th
     assert.equal(replay.status, 1);
     assert.equal(JSON.parse(replay.stdout).code, "challenge_invalid");
     assert.equal(JSON.parse(replay.stdout).terminal, true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Telegram challenge can consume an exact reassessment option with a bounded operator reason", () => {
+  const root = mkdtempSync(join(tmpdir(), "herdr-hermes-reassess-"));
+  try {
+    const stateDir = join(root, "harness-state");
+    const harnessConfig = join(root, "harness.json");
+    const bridgeConfig = join(root, "bridge.json");
+    const approvalState = join(root, "approval", "state.json");
+    const ledgerPath = join(stateDir, "state.json");
+    mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+    writeFileSync(harnessConfig, JSON.stringify({ stateDir, herdr: { session: "test" }, analyst: { command: "/usr/bin/false" } }), { encoding: "utf8", mode: 0o600 });
+    writeFileSync(bridgeConfig, JSON.stringify({
+      laneId: "exposure",
+      harnessConfig,
+      nodeBin: process.execPath,
+      harnessCliScript: resolve("dist/src/cli.js"),
+      approvalState,
+      telegramAllowedUser: "123456789",
+    }), { encoding: "utf8", mode: 0o600 });
+    const state = blockedState();
+    state.activeJob.analysis.action = "hold";
+    state.activeJob.analysis.resolutionBrief = "";
+    state.activeJob.analysis.unknowns = ["Dirty worktree progress is not yet classified."];
+    writeFileSync(ledgerPath, `${JSON.stringify(state)}\n`, { encoding: "utf8", mode: 0o600 });
+
+    const reason = "Preserve staged and unstaged files, then analyze the fresh evidence.";
+    const requested = run("request", bridgeConfig, undefined, false, ["--kind", "reassess", "--reason", reason]);
+    assert.equal(requested.status, 0, requested.stderr);
+    const token = tokenFrom(requested.stdout, "reassess");
+    const mismatched = run("confirm", bridgeConfig, token, false, ["--kind", "approve_retry"]);
+    assert.equal(mismatched.status, 1);
+    assert.match(mismatched.stderr, /命令类型与 challenge 不匹配/);
+    assert.equal(readLedger(ledgerPath).activeJob.analysis.action, "hold");
+    const confirmed = run("confirm", bridgeConfig, token, false, ["--kind", "reassess"]);
+    assert.equal(confirmed.status, 0, confirmed.stderr);
+    const job = readLedger(ledgerPath).activeJob;
+    assert.equal(job.state, "blocked");
+    assert.equal(job.analysis, null);
+    assert.equal(job.reassessments.at(-1).reason, reason);
+    assert.equal(job.reassessments.at(-1).actor, "telegram:123456789");
+    assert.ok(job.incident.id !== "incident-001");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -168,9 +213,9 @@ test("CLI projects and consumes one exact operator option", () => {
   }
 });
 
-function run(command: "request" | "confirm" | "hold", config: string, token?: string, json = false) {
+function run(command: "request" | "confirm" | "hold", config: string, token?: string, json = false, extraArgs: string[] = []) {
   return spawnSync(process.execPath, [
-    resolve("dist/src/hermes-approval.js"), command, "--config", config, ...(json ? ["--json"] : []),
+    resolve("dist/src/hermes-approval.js"), command, "--config", config, ...extraArgs, ...(json ? ["--json"] : []),
   ], {
     encoding: "utf8",
     timeout: 10_000,
@@ -185,8 +230,8 @@ function runHarness(argv: string[]) {
   });
 }
 
-function tokenFrom(output: string): string {
-  const match = output.match(/\/harness approve ([0-9A-F]{16})/);
+function tokenFrom(output: string, command = "retry"): string {
+  const match = output.match(new RegExp(`/harness(?: exposure)? ${command} ([0-9A-F]{16})`));
   assert.ok(match);
   return match[1]!;
 }

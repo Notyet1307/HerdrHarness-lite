@@ -103,6 +103,20 @@ test("Hermes status stays read-only and renders bounded ledger facts", () => {
           resolutionBrief: "Start a fresh Reviewer against the unchanged HEAD.",
           evidenceRefs: ["attempt_result"],
           unknowns: [],
+          diagnosis: {
+            primaryCause: "The Reviewer Provider failed before a durable result was recorded.",
+            confidence: "high",
+            contributingFactors: ["The Provider session pool was exhausted."],
+            preservationConstraints: ["Keep the reviewed HEAD unchanged."],
+            hypotheses: [
+              {
+                claim: "The candidate HEAD changed during review.",
+                status: "rejected",
+                confidence: "high",
+                evidenceRefs: ["attempt_result"],
+              },
+            ],
+          },
           createdAt: "2026-08-07T00:02:00.000Z",
         },
         approval: null,
@@ -156,6 +170,22 @@ test("Hermes status stays read-only and renders bounded ledger facts", () => {
     assert.match(blocked.stdout, /Analyst 建议：retry_fresh_reviewer/);
     assert.match(blocked.stdout, /可执行操作：批准 fresh retry \(decision-[0-9a-f]{16}\)/);
     assert.match(blocked.stdout, /Telegram 决策卡/);
+
+    const why = run("why", bridgeConfig);
+    assert.equal(why.status, 0);
+    assert.match(why.stdout, /主要原因：The Reviewer Provider failed/);
+    assert.match(why.stdout, /rejected\/high：The candidate HEAD changed/);
+    assert.match(why.stdout, /必须保留：Keep the reviewed HEAD unchanged/);
+
+    const evidence = run("evidence", bridgeConfig);
+    assert.equal(evidence.status, 0);
+    assert.match(evidence.stdout, /Evidence digest：/);
+    assert.match(evidence.stdout, /- attempt_result/);
+
+    const actions = run("actions", bridgeConfig);
+    assert.equal(actions.status, 0);
+    assert.match(actions.stdout, /精确绑定操作/);
+    assert.match(actions.stdout, /命令：\/harness retry/);
 
     const notification = run("notification", bridgeConfig);
     assert.equal(notification.status, 0);

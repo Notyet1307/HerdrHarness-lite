@@ -107,7 +107,7 @@ async function main(argv) {
             herdr,
             piRpc: new PiRpcRuntime(herdr),
             analyst: new JsonCommandAnalyst(config.analyst.command, config.analyst.argv ?? []),
-            evidence: new LocalEvidence(),
+            evidence: new LocalEvidence(new SyncCommandRunner(), config.stateDir),
             preflight: new RuntimePreflightCli(),
             clock,
             ids,

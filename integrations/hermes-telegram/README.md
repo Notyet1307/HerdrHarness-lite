@@ -69,8 +69,14 @@ Single lane:
 /harness
 /harness status
 /harness incident
-/harness approve
-/harness approve 0123456789ABCDEF
+/harness why
+/harness evidence
+/harness actions
+/harness retry
+/harness retry 0123456789ABCDEF
+/harness reassess preserve the dirty worktree and analyze new evidence
+/harness resolve bounded maintainer decision
+/harness cancel bounded cancellation reason
 ```
 
 Multiple lanes:
@@ -79,7 +85,9 @@ Multiple lanes:
 /harness
 /harness exposure status
 /harness exposure incident
-/harness exposure approve
+/harness exposure why
+/harness exposure actions
+/harness exposure retry
 ```
 
 `/harness` returns one compact line per lane when more than one lane exists.
@@ -91,11 +99,13 @@ decisions, exact approval cards, and automation health changes. Normal
 Worker/Reviewer/publish/merge-wait progress remains available through
 `/harness`, avoiding notification noise.
 
-Approval cards are ten-minute, single-use challenges bound to the exact job,
-revision, incident, analysis, lane, and retry action. The Bridge accepts one
-allowlisted user in a private chat. **Keep blocked** consumes the challenge
-without writing recovery approval; **Approve** still passes through the Harness
-approval gate and ledger verification.
+Operator cards are ten-minute, single-use challenges bound to the exact option,
+job, revision, incident, analysis, Attempt, lane, and HEAD. The Bridge accepts
+one allowlisted user in a private chat. Abandoning the challenge writes no
+operator action; confirmation still passes through `decide --option` and the
+Harness ledger CAS. The standalone Bridge supports the expanded command set;
+the Hermes compatibility plugin intentionally retains its legacy
+`status|incident|approve` vocabulary.
 
 ## Multi-repository lanes
 

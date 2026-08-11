@@ -1,6 +1,18 @@
 import { isBoundedText as boundedText } from "../model.js";
 import { requireSuccess, SyncCommandRunner } from "./command.js";
 export const MAX_ANALYST_UNKNOWNS = 4;
+const EVIDENCE_REQUEST_KINDS = [
+    "issue_context",
+    "git_status",
+    "git_diff",
+    "worktree_progress",
+    "test_output",
+    "attempt_result",
+    "attempt_runtime",
+    "attempt_history",
+    "controller_health",
+    "file_excerpt",
+];
 /**
  * Adapter boundary for a persistent Codex wrapper.
  *
@@ -46,7 +58,7 @@ export class JsonCommandAnalyst {
             evidence: input.evidence,
             turn: input.turn,
             allowedOutput: {
-                need_evidence: ["issue_context", "git_status", "git_diff", "test_output", "attempt_result", "file_excerpt"],
+                need_evidence: EVIDENCE_REQUEST_KINDS,
                 advice: ["retry_fresh_worker", "retry_fresh_reviewer", "hold"],
             },
         });
@@ -87,7 +99,7 @@ export function parseAnalystTurn(value) {
                 if (!request || typeof request !== "object")
                     throw new Error("Analyst evidence request is invalid");
                 const item = request;
-                if (!["issue_context", "git_status", "git_diff", "test_output", "attempt_result", "file_excerpt"].includes(String(item.kind)) ||
+                if (!EVIDENCE_REQUEST_KINDS.includes(item.kind) ||
                     !boundedText(item.reason, 512) ||
                     (item.path !== null && item.path !== undefined && !boundedText(item.path, 512))) {
                     throw new Error("Analyst requested an unsupported evidence operation");
@@ -120,7 +132,52 @@ export function parseAnalystTurn(value) {
         resolutionBrief: object.resolutionBrief,
         evidenceRefs: object.evidenceRefs,
         unknowns: object.unknowns,
+        ...(object.diagnosis === undefined ? {} : { diagnosis: parseDiagnosis(object.diagnosis) }),
     };
+}
+function parseDiagnosis(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value))
+        throw new Error("Analyst diagnosis is invalid");
+    const object = value;
+    if (!boundedText(object.primaryCause, 2_000)
+        || !["high", "medium", "low"].includes(String(object.confidence))
+        || !boundedTextArray(object.contributingFactors, 4, 512)
+        || !boundedTextArray(object.preservationConstraints, 4, 512)
+        || !Array.isArray(object.hypotheses)
+        || object.hypotheses.length === 0
+        || object.hypotheses.length > 5)
+        throw new Error("Analyst diagnosis is invalid");
+    const hypotheses = object.hypotheses.map((value) => {
+        if (!value || typeof value !== "object" || Array.isArray(value))
+            throw new Error("Analyst diagnosis hypothesis is invalid");
+        const hypothesis = value;
+        if (!boundedText(hypothesis.claim, 512)
+            || !["supported", "rejected", "unresolved"].includes(String(hypothesis.status))
+            || !["high", "medium", "low"].includes(String(hypothesis.confidence))
+            || !Array.isArray(hypothesis.evidenceRefs)
+            || hypothesis.evidenceRefs.length > 8
+            || !hypothesis.evidenceRefs.every((entry) => boundedText(entry, 128))
+            || new Set(hypothesis.evidenceRefs).size !== hypothesis.evidenceRefs.length)
+            throw new Error("Analyst diagnosis hypothesis is invalid");
+        return {
+            claim: hypothesis.claim,
+            status: hypothesis.status,
+            confidence: hypothesis.confidence,
+            evidenceRefs: hypothesis.evidenceRefs,
+        };
+    });
+    return {
+        primaryCause: object.primaryCause,
+        confidence: object.confidence,
+        contributingFactors: object.contributingFactors,
+        preservationConstraints: object.preservationConstraints,
+        hypotheses,
+    };
+}
+function boundedTextArray(value, maxItems, maxLength) {
+    return Array.isArray(value)
+        && value.length <= maxItems
+        && value.every((entry) => boundedText(entry, maxLength));
 }
 function codexUuid(value) {
     return typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
