@@ -1959,8 +1959,14 @@ function validateWorkerExtension(argv: string[], fail: (reason: string) => never
     fail("exactly one --no-extensions is required");
   }
   const extensions = flagValues(argv, "--extension");
-  if (extensions.length !== 1 || !isAbsolute(extensions[0]!) || resolve(extensions[0]!) !== BUNDLED_WORKER_TOOLS_EXTENSION) {
-    fail("the sole Worker extension must be the bundled worker-tools extension");
+  if (extensions.length < 1 || extensions.length > 2 || extensions.some((path) => !isAbsolute(path))) {
+    fail("Worker requires bundled worker-tools and permits only one optional Ponytail extension");
+  }
+  if (resolve(extensions[0]!) !== BUNDLED_WORKER_TOOLS_EXTENSION) {
+    fail("the first Worker extension must be the bundled worker-tools extension");
+  }
+  if (extensions[1] && !isPonytailExtension(extensions[1])) {
+    fail("the optional second Worker extension must be the declared @dietrichgebert/ponytail Pi extension");
   }
 }
 
@@ -2026,6 +2032,23 @@ function isPiSubagentsExtension(path: string): boolean {
       && manifest.pi.extensions.some((entry) => typeof entry === "string" && resolve(packageRoot, entry) === extensionPath)
       && typeof capabilityEntrypoint === "string"
       && existsSync(resolve(packageRoot, capabilityEntrypoint));
+  } catch {
+    return false;
+  }
+}
+
+function isPonytailExtension(path: string): boolean {
+  const extensionPath = resolve(path);
+  const packageRoot = dirname(dirname(extensionPath));
+  try {
+    const manifest = JSON.parse(readFileSync(resolve(packageRoot, "package.json"), "utf8")) as {
+      name?: unknown;
+      pi?: { extensions?: unknown };
+    };
+    return manifest.name === "@dietrichgebert/ponytail"
+      && existsSync(extensionPath)
+      && Array.isArray(manifest.pi?.extensions)
+      && manifest.pi.extensions.some((entry) => typeof entry === "string" && resolve(packageRoot, entry) === extensionPath);
   } catch {
     return false;
   }

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { lstatSync, readdirSync, readFileSync, realpathSync } from "node:fs";
-import { dirname, isAbsolute, join } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { digest } from "./model.js";
 export function buildExecutionSnapshot(input) {
     return {
@@ -72,8 +72,30 @@ export function executionResource(kind, path) {
         }
     }
     const realPath = realpathSync(path);
-    const digestRoot = (kind === "extension" || kind === "runtime") && lstatSync(realPath).isFile() ? dirname(realPath) : realPath;
+    const digestRoot = kind === "extension" && lstatSync(realPath).isFile()
+        ? extensionDigestRoot(realPath)
+        : kind === "runtime" && lstatSync(realPath).isFile()
+            ? dirname(realPath)
+            : realPath;
     return { kind, path: realPath, digest: executionResourceDigest(digestRoot) };
+}
+function extensionDigestRoot(path) {
+    const fallback = dirname(path);
+    let directory = fallback;
+    for (;;) {
+        try {
+            const manifest = JSON.parse(readFileSync(join(directory, "package.json"), "utf8"));
+            if (Array.isArray(manifest.pi?.extensions) && manifest.pi.extensions.some((entry) => (typeof entry === "string" && resolve(directory, entry) === path)))
+                return directory;
+        }
+        catch {
+            // Keep looking for the declaring Pi package.
+        }
+        const parent = dirname(directory);
+        if (parent === directory)
+            return fallback;
+        directory = parent;
+    }
 }
 export function executionResourceDigest(path) {
     const hash = createHash("sha256");

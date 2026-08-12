@@ -436,7 +436,13 @@ Harness 不会：
 | Reviewer | bundled `code-review`、bundled config isolator、显式 `pi-subagents` 与 bundled `reviewer-tools.js` | `read,grep,find,ls,subagent,review_preflight,review_validate,review_submit` | `max` |
 | Review-axis 子代理 | fresh context，不继承 project context、skills 或 extensions | `read,grep,find,ls` | `max` |
 
-Worker 与 Reviewer 都必须包含 `--no-approve --no-skills --no-session --no-extensions --no-context-files --no-prompt-templates --no-themes`。Worker 只加载 bundled `worker-tools.js`；Reviewer 必须按顺序加载 config isolator、`pi-subagents`、`reviewer-tools.js` 三个 extension。Controller 会核对 skill/extension 身份、工具集合和 bundled 代码。用户可选运行时选择器仅限 `--provider`、`--model`；RPC 所需 `--mode rpc` 与显式 context bundle 由 Controller 注入，不能写进 role argv。
+Worker 与 Reviewer 都必须包含 `--no-approve --no-skills --no-session --no-extensions --no-context-files --no-prompt-templates --no-themes`。Worker 先加载 bundled `worker-tools.js`，并可把已安装的 `@dietrichgebert/ponytail` Pi extension 作为第二个扩展加载；其他 Worker extension 仍会被拒绝。Reviewer 必须按顺序加载 config isolator、`pi-subagents`、`reviewer-tools.js` 三个 extension。Controller 会核对 skill/extension 身份、工具集合和 bundled 代码。用户可选运行时选择器仅限 `--provider`、`--model`；RPC 所需 `--mode rpc` 与显式 context bundle 由 Controller 注入，不能写进 role argv。
+
+要在继续禁用 ambient extension discovery 的同时为 Worker Attempt 启用 Ponytail，请在 `workerArgv` 的 `worker-tools.js` 后紧接着加入：
+
+```text
+"--extension", "/absolute/path/to/.pi/agent/git/github.com/DietrichGebert/ponytail/pi-extension/index.js"
+```
 
 Reviewer adapter 只接受已验收的 `pi-subagents` `0.42.1`。双轴通过一次前台 `workflowScript` 启动；Harness 只接收固定的 `return await runs.all(<JSON>);` manifest，已删除的旧 `tasks` API 或任意脚本逻辑都会被拒绝。
 

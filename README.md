@@ -449,7 +449,13 @@ Role contracts:
 | Reviewer | bundled `code-review`, bundled config isolator, explicit `pi-subagents`, and bundled `reviewer-tools.js` | `read,grep,find,ls,subagent,review_preflight,review_validate,review_submit` | `max` |
 | Review-axis child | Fresh context with no inherited project context, skills, or extensions | `read,grep,find,ls` | `max` |
 
-Worker and Reviewer both require `--no-approve --no-skills --no-session --no-extensions --no-context-files --no-prompt-templates --no-themes`. Worker loads only bundled `worker-tools.js`; Reviewer loads exactly the config isolator, `pi-subagents`, and `reviewer-tools.js` in that order. The Controller verifies skill/extension identity, exact tools, and bundled code. User-supplied runtime selectors are limited to `--provider` and `--model`; the Controller injects RPC `--mode rpc` and the explicit context bundle.
+Worker and Reviewer both require `--no-approve --no-skills --no-session --no-extensions --no-context-files --no-prompt-templates --no-themes`. Worker loads bundled `worker-tools.js` first and may load the installed `@dietrichgebert/ponytail` Pi extension second; no other Worker extension is accepted. Reviewer loads exactly the config isolator, `pi-subagents`, and `reviewer-tools.js` in that order. The Controller verifies skill/extension identity, exact tools, and bundled code. User-supplied runtime selectors are limited to `--provider` and `--model`; the Controller injects RPC `--mode rpc` and the explicit context bundle.
+
+To enable Ponytail for Worker Attempts while keeping ambient extension discovery disabled, add this immediately after `worker-tools.js` in `workerArgv`:
+
+```text
+"--extension", "/absolute/path/to/.pi/agent/git/github.com/DietrichGebert/ponytail/pi-extension/index.js"
+```
 
 The Reviewer adapter is qualified against `pi-subagents` `0.42.1` exactly. Its two axes use one foreground `workflowScript`; the Harness accepts only a fixed `return await runs.all(<JSON>);` manifest and rejects the removed legacy `tasks` API or arbitrary script logic.
 

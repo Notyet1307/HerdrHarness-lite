@@ -160,6 +160,33 @@ test("config rejects incomplete Pi role contracts", () => {
   }
 });
 
+test("config accepts the declared Ponytail Pi extension only as the second Worker extension", () => {
+  const root = mkdtempSync(join(tmpdir(), "herdr-ponytail-extension-"));
+  const extension = join(root, "pi-extension", "index.js");
+  try {
+    mkdirSync(dirname(extension), { recursive: true });
+    writeFileSync(extension, "export default function ponytail() {}\n");
+    writeFileSync(join(root, "package.json"), JSON.stringify({
+      name: "@dietrichgebert/ponytail",
+      pi: { extensions: ["./pi-extension/index.js"] },
+    }));
+    new HarnessController({
+      config: { ...config, workerArgv: [...validWorkerArgv, "--extension", extension] },
+      store: new MemoryStore(),
+      github: new FakeGitHub([]),
+      git: new FakeGit(),
+      herdr: new FakeHerdr([]),
+      analyst: new FakeAnalyst(),
+      evidence: new FakeEvidence(),
+      clock: new FakeClock(),
+      ids: new SequenceIds(),
+      preflight: new FakeRuntimePreflight(),
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("config rejects an unqualified pi-subagents version", () => {
   const root = mkdtempSync(join(tmpdir(), "herdr-pi-subagents-version-"));
   const packageRoot = join(root, "pi-subagents");

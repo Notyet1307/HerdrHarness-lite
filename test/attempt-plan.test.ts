@@ -22,6 +22,26 @@ test("execution snapshot binds an extension's local module closure", () => {
   }
 });
 
+test("execution snapshot binds a declared Pi package extension's sibling hooks", () => {
+  const root = mkdtempSync(join(tmpdir(), "harness-package-extension-"));
+  try {
+    const extension = join(root, "pi-extension", "index.js");
+    const hook = join(root, "hooks", "rules.js");
+    mkdirSync(join(root, "pi-extension"));
+    mkdirSync(join(root, "hooks"));
+    writeFileSync(join(root, "package.json"), JSON.stringify({ pi: { extensions: ["./pi-extension/index.js"] } }));
+    writeFileSync(extension, 'import "../hooks/rules.js";\n');
+    writeFileSync(hook, "export const rules = 1;\n");
+    const argv = ["--extension", extension, "--tools", "read", "--thinking", "high", "--no-session"];
+    const first = buildExecutionSnapshot({ adapter: "herdr-pi-cli", executable: "/pi", runtimeVersion: "0.84.0", argv });
+    writeFileSync(hook, "export const rules = 2;\n");
+    const second = buildExecutionSnapshot({ adapter: "herdr-pi-cli", executable: "/pi", runtimeVersion: "0.84.0", argv });
+    assert.equal(first.resources[0]?.digest === second.resources[0]?.digest, false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("model config execution resources require one private regular file", () => {
   const root = mkdtempSync(join(tmpdir(), "harness-model-config-"));
   try {
