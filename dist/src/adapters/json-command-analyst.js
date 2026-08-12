@@ -1,6 +1,7 @@
 import { isBoundedText as boundedText } from "../model.js";
 import { requireSuccess, SyncCommandRunner } from "./command.js";
 export const MAX_ANALYST_UNKNOWNS = 4;
+export const MAX_ANALYST_HYPOTHESES = 5;
 const EVIDENCE_REQUEST_KINDS = [
     "issue_context",
     "git_status",
@@ -142,11 +143,13 @@ function parseDiagnosis(value) {
     if (!boundedText(object.primaryCause, 2_000)
         || !["high", "medium", "low"].includes(String(object.confidence))
         || !boundedTextArray(object.contributingFactors, 4, 512)
-        || !boundedTextArray(object.preservationConstraints, 4, 512)
-        || !Array.isArray(object.hypotheses)
-        || object.hypotheses.length === 0
-        || object.hypotheses.length > 5)
+        || !boundedTextArray(object.preservationConstraints, 4, 512))
         throw new Error("Analyst diagnosis is invalid");
+    if (!Array.isArray(object.hypotheses))
+        throw new Error("Analyst diagnosis hypotheses are invalid");
+    if (object.hypotheses.length === 0 || object.hypotheses.length > MAX_ANALYST_HYPOTHESES) {
+        throw new Error(`Analyst diagnosis hypotheses contain ${object.hypotheses.length} entries; expected between 1 and ${MAX_ANALYST_HYPOTHESES}`);
+    }
     const hypotheses = object.hypotheses.map((value) => {
         if (!value || typeof value !== "object" || Array.isArray(value))
             throw new Error("Analyst diagnosis hypothesis is invalid");

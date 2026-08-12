@@ -110,6 +110,7 @@ test("Codex Analyst turn is replay-safe and bound to the evidence digest", () =>
         assert.match(calls[1].at(-1), /summary must be an outcome-first conclusion/);
         assert.match(calls[1].at(-1), /recommended next step and why it is the safest allowed action/);
         assert.match(calls[1].at(-1), /unknowns must contain at most 4 entries/);
+        assert.match(calls[1].at(-1), /hypotheses must contain between 1 and 5 entries/);
         for (const args of calls) {
             assert.ok(args.includes("--strict-config"));
             assert.ok(args.includes("--ignore-user-config"));

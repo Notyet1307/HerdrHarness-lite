@@ -3,6 +3,7 @@ import type { AnalystPort } from "../ports.js";
 import { type CommandRunner, requireSuccess, SyncCommandRunner } from "./command.js";
 
 export const MAX_ANALYST_UNKNOWNS = 4;
+export const MAX_ANALYST_HYPOTHESES = 5;
 const EVIDENCE_REQUEST_KINDS: EvidenceRequestKind[] = [
   "issue_context",
   "git_status",
@@ -155,10 +156,13 @@ function parseDiagnosis(value: unknown): AnalystDiagnosis {
     || !["high", "medium", "low"].includes(String(object.confidence))
     || !boundedTextArray(object.contributingFactors, 4, 512)
     || !boundedTextArray(object.preservationConstraints, 4, 512)
-    || !Array.isArray(object.hypotheses)
-    || object.hypotheses.length === 0
-    || object.hypotheses.length > 5
   ) throw new Error("Analyst diagnosis is invalid");
+  if (!Array.isArray(object.hypotheses)) throw new Error("Analyst diagnosis hypotheses are invalid");
+  if (object.hypotheses.length === 0 || object.hypotheses.length > MAX_ANALYST_HYPOTHESES) {
+    throw new Error(
+      `Analyst diagnosis hypotheses contain ${object.hypotheses.length} entries; expected between 1 and ${MAX_ANALYST_HYPOTHESES}`,
+    );
+  }
   const hypotheses = object.hypotheses.map((value) => {
     if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Analyst diagnosis hypothesis is invalid");
     const hypothesis = value as Record<string, unknown>;
