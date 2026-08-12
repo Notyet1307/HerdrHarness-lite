@@ -129,6 +129,32 @@ test("JSON Analyst protocol accepts structured hypotheses and advanced evidence"
   assert.equal(advice.diagnosis?.hypotheses[0]?.status, "rejected");
 });
 
+test("JSON Analyst protocol reports the hypothesis count when advice exceeds the contract", () => {
+  assert.throws(
+    () => parseAnalystTurn({
+      kind: "advice",
+      action: "retry_fresh_worker",
+      summary: "Retry after fixing the remaining risks.",
+      resolutionBrief: "Preserve the current HEAD and use one fresh Worker.",
+      evidenceRefs: ["active-attempt"],
+      unknowns: [],
+      diagnosis: {
+        primaryCause: "The current implementation has unresolved recovery risks.",
+        confidence: "high",
+        contributingFactors: [],
+        preservationConstraints: ["Keep the current HEAD."],
+        hypotheses: Array.from({ length: 6 }, (_, index) => ({
+          claim: `Hypothesis ${index + 1}`,
+          status: "unresolved",
+          confidence: "medium",
+          evidenceRefs: ["active-attempt"],
+        })),
+      },
+    }),
+    /Analyst diagnosis hypotheses contain 6 entries; expected between 1 and 5/,
+  );
+});
+
 test("JSON Analyst protocol rejects malformed evidence paths", () => {
   assert.throws(
     () => parseAnalystTurn({
