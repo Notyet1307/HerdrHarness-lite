@@ -1,4 +1,4 @@
-const QUALIFIED_PI_RPC_VERSIONS = new Set(["0.84.0"]);
+const QUALIFIED_PI_RPC_VERSIONS = new Set(["0.84.0", "0.84.1"]);
 export function isQualifiedPiRpcVersion(version) {
     return QUALIFIED_PI_RPC_VERSIONS.has(version);
 }

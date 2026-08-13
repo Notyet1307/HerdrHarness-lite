@@ -64,7 +64,7 @@ test("RPC Provider preflight uses canonical OAuth with an Attempt-private settin
             agentDir: isolatedAgentDir,
             credentialAgentDir: sourceAgentDir,
             credentialMode: "canonical-oauth",
-            piVersion: "0.84.0",
+            piVersion: "0.84.1",
             rpcHost,
             roleArgv: [
                 "--no-approve",
@@ -80,7 +80,7 @@ test("RPC Provider preflight uses canonical OAuth with an Attempt-private settin
                 args: [
                     rpcHost.path,
                     "--pi-executable", "/opt/pi",
-                    "--expected-version", "0.84.0",
+                    "--expected-version", "0.84.1",
                     "--credential-mode", "canonical-oauth",
                     "--credential-agent-dir", sourceAgentDir,
                     "--private-agent-dir", isolatedAgentDir,
