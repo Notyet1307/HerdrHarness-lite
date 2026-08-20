@@ -3,7 +3,12 @@ import { Buffer } from "node:buffer";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { attemptPlanDigest, buildExecutionSnapshot, executionPlanMatches, executionResource } from "./attempt-plan.js";
 import { buildAttemptContextEnvelope } from "./attempt-context.js";
-import { SUPPORTED_PI_SUBAGENTS_VERSION } from "./compatibility.js";
+import {
+  isSupportedPonytailExtension,
+  QUALIFIED_CONTROLLED_COMPACTION_PI_VERSION,
+  SUPPORTED_PI_SUBAGENTS_VERSION,
+  WORKER_CONTROLLED_COMPACTION_POLICY,
+} from "./compatibility.js";
 import { selectNextTask } from "./eligibility.js";
 import { approvedRecoveryHandoff, bindPendingHandoff, reviewChangesHandoff } from "./handoff.js";
 import {
@@ -403,6 +408,9 @@ export class HarnessController {
         ? (await this.deps.preflight.probeDocker({ cwd: this.deps.config.localPath })).host
         : null;
       const useRpc = rpcEnabled(this.deps.config, lane);
+      if (useRpc && lane === "worker" && runtime.version !== QUALIFIED_CONTROLLED_COMPACTION_PI_VERSION) {
+        throw new Error(`controlled Worker compaction requires Pi ${QUALIFIED_CONTROLLED_COMPACTION_PI_VERSION}`);
+      }
       const role = runtimeRole(this.deps.config, lane);
       executionSnapshot = buildExecutionSnapshot({
         adapter: useRpc ? "pi-rpc" : "herdr-pi-cli",
@@ -416,7 +424,12 @@ export class HarnessController {
         ],
         context,
         retryMode: useRpc ? "disabled" : "runtime-default",
-        compactionMode: useRpc ? "disabled" : "runtime-default",
+        compactionMode: useRpc
+          ? lane === "worker" ? "controlled-threshold" : "disabled"
+          : "runtime-default",
+        ...(useRpc && lane === "worker"
+          ? { compactionPolicy: WORKER_CONTROLLED_COMPACTION_POLICY }
+          : {}),
         credentialMode: useRpc ? role.credentialMode : "runtime-default",
         dockerHost,
         extraResources: [
@@ -509,6 +522,7 @@ export class HarnessController {
               PYTHONDONTWRITEBYTECODE: "1",
               [PI_AGENT_DIR_ENV]: attempt.executionSnapshot!.context!.agentDir,
               DOCKER_HOST: preflight.dockerHost ?? "",
+              ...ponytailEnvironment(attempt.executionSnapshot!),
             }
           : {};
         if (lane === "worker") {
@@ -745,6 +759,10 @@ export class HarnessController {
             piBin: this.deps.config.preflight?.piBin ?? "pi",
           })
         : null;
+      if (!executionSnapshot && lanes.includes("worker") && rpcEnabled(this.deps.config, "worker")
+        && preclaimRuntime?.version !== QUALIFIED_CONTROLLED_COMPACTION_PI_VERSION) {
+        throw new Error(`controlled Worker compaction requires Pi ${QUALIFIED_CONTROLLED_COMPACTION_PI_VERSION}`);
+      }
       const preclaimCredentialAgentDir = preclaimNeedsRpc
         ? (await this.deps.preflight.assertNoAmbientSystemPrompt({ cwd: this.deps.config.localPath })).agentDir
         : null;
@@ -815,6 +833,7 @@ export class HarnessController {
         argv: expected.argv,
         retryMode: expected.retryMode,
         compactionMode: expected.compactionMode,
+        compactionPolicy: expected.compactionPolicy,
         credentialMode: expected.credentialMode,
         dockerHost: expected.dockerHost,
         context: expected.context,
@@ -1965,9 +1984,20 @@ function validateWorkerExtension(argv: string[], fail: (reason: string) => never
   if (resolve(extensions[0]!) !== BUNDLED_WORKER_TOOLS_EXTENSION) {
     fail("the first Worker extension must be the bundled worker-tools extension");
   }
-  if (extensions[1] && !isPonytailExtension(extensions[1])) {
+  if (extensions[1] && !isSupportedPonytailExtension(extensions[1])) {
     fail("the optional second Worker extension must be the declared @dietrichgebert/ponytail Pi extension");
   }
+}
+
+function ponytailEnvironment(snapshot: ExecutionSnapshot): Record<string, string> {
+  if (snapshot.context?.lane !== "worker" || !snapshot.resources.some((resource) => (
+    resource.kind === "extension" && isSupportedPonytailExtension(resource.path)
+  ))) return {};
+  return {
+    PONYTAIL_DEFAULT_MODE: "full",
+    PONYTAIL_HIDE_STATUS: "1",
+    PONYTAIL_QUIET_STARTUP: "1",
+  };
 }
 
 function flagValues(argv: string[], flag: string): string[] {
@@ -2032,23 +2062,6 @@ function isPiSubagentsExtension(path: string): boolean {
       && manifest.pi.extensions.some((entry) => typeof entry === "string" && resolve(packageRoot, entry) === extensionPath)
       && typeof capabilityEntrypoint === "string"
       && existsSync(resolve(packageRoot, capabilityEntrypoint));
-  } catch {
-    return false;
-  }
-}
-
-function isPonytailExtension(path: string): boolean {
-  const extensionPath = resolve(path);
-  const packageRoot = dirname(dirname(extensionPath));
-  try {
-    const manifest = JSON.parse(readFileSync(resolve(packageRoot, "package.json"), "utf8")) as {
-      name?: unknown;
-      pi?: { extensions?: unknown };
-    };
-    return manifest.name === "@dietrichgebert/ponytail"
-      && existsSync(extensionPath)
-      && Array.isArray(manifest.pi?.extensions)
-      && manifest.pi.extensions.some((entry) => typeof entry === "string" && resolve(packageRoot, entry) === extensionPath);
   } catch {
     return false;
   }

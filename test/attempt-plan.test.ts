@@ -42,6 +42,26 @@ test("execution snapshot binds a declared Pi package extension's sibling hooks",
   }
 });
 
+test("controlled compaction snapshot requires the exact qualified policy", () => {
+  const argv = [
+    "--provider", "test", "--model", "model", "--thinking", "high", "--tools", "read",
+  ];
+  assert.throws(() => buildExecutionSnapshot({
+    adapter: "pi-rpc",
+    executable: "/pi",
+    runtimeVersion: "0.84.2",
+    argv,
+    compactionMode: "controlled-threshold",
+  }), /exact qualified policy/);
+  assert.throws(() => buildExecutionSnapshot({
+    adapter: "pi-rpc",
+    executable: "/pi",
+    runtimeVersion: "0.84.2",
+    argv,
+    compactionPolicy: { triggerPercent: 75, maxCompactions: 1, keepRecentTokens: 20_000, overflowContinuation: false },
+  }), /exact qualified policy/);
+});
+
 test("model config execution resources require one private regular file", () => {
   const root = mkdtempSync(join(tmpdir(), "harness-model-config-"));
   try {

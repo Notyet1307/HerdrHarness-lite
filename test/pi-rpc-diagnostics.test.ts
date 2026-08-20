@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   classifyProviderFailure,
   isSafePiRpcDiagnostic,
+  providerApi,
   type PiRpcFailureCode,
   type ProviderFailureContext,
 } from "../src/pi-rpc-diagnostics.js";
@@ -46,6 +47,10 @@ test("Provider failures are classified into safe, bounded diagnostics", () => {
     assert.match(diagnostic.diagnosticFingerprint, /^[0-9a-f]{64}$/);
     assert.equal(isSafePiRpcDiagnostic(diagnostic), true);
   }
+});
+
+test("canonical Codex Responses API remains identifiable in safe diagnostics", () => {
+  assert.equal(providerApi("openai-codex-responses"), "openai-codex-responses");
 });
 
 test("Provider diagnostic fingerprints never depend on secret error text", () => {

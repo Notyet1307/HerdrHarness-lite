@@ -74,6 +74,9 @@ export function buildAttemptContextEnvelope(input: {
       sessionMode: input.executionSnapshot.sessionMode,
       retryMode: input.executionSnapshot.retryMode,
       compactionMode: input.executionSnapshot.compactionMode,
+      ...(input.executionSnapshot.compactionPolicy
+        ? { compactionPolicy: { ...input.executionSnapshot.compactionPolicy } }
+        : {}),
       credentialMode: input.executionSnapshot.credentialMode,
     },
     writeback: input.attempt.lane === "worker"

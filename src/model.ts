@@ -80,6 +80,13 @@ export type ExecutionContext = {
   agentDir: string;
 };
 
+export type ControlledCompactionPolicy = {
+  triggerPercent: number;
+  maxCompactions: number;
+  keepRecentTokens: number;
+  overflowContinuation: boolean;
+};
+
 export type ExecutionSnapshot = {
   version: 1;
   adapter: AttemptRuntimeAdapter;
@@ -92,7 +99,8 @@ export type ExecutionSnapshot = {
   tools: string[];
   sessionMode: "ephemeral" | "fresh-persistent";
   retryMode: "runtime-default" | "disabled";
-  compactionMode: "runtime-default" | "disabled";
+  compactionMode: "runtime-default" | "disabled" | "controlled-threshold";
+  compactionPolicy?: ControlledCompactionPolicy;
   credentialMode: "runtime-default" | "canonical-oauth" | "canonical-model-config";
   dockerHost: string | null;
   resources: ExecutionResource[];
@@ -216,6 +224,7 @@ export type AttemptContextEnvelope = {
     sessionMode: ExecutionSnapshot["sessionMode"];
     retryMode: ExecutionSnapshot["retryMode"];
     compactionMode: ExecutionSnapshot["compactionMode"];
+    compactionPolicy?: ControlledCompactionPolicy;
     credentialMode: ExecutionSnapshot["credentialMode"];
   };
   writeback:

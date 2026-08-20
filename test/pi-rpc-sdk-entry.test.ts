@@ -6,7 +6,11 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { SyncCommandRunner } from "../src/adapters/command.js";
 import { executionResourceDigest } from "../src/attempt-plan.js";
-import { projectPiRpcEvent, withProjectedPiRpcEvents } from "../src/pi-rpc-sdk-entry.js";
+import {
+  installWorkerContextControls,
+  projectPiRpcEvent,
+  withProjectedPiRpcEvents,
+} from "../src/pi-rpc-sdk-entry.js";
 import { StrictJsonlDecoder } from "../src/pi-rpc-runner.js";
 
 test("Pi RPC event adapter bounds a large agent_end without mutating Pi session data", () => {
@@ -63,6 +67,32 @@ test("Pi RPC event adapter keeps Pi 0.84.2 message_update serialization fields",
   assert.equal(JSON.stringify(projected).includes("PRIVATE_"), false);
 });
 
+test("Pi RPC event adapter strips controlled compaction summary content", () => {
+  const event = {
+    type: "compaction_end",
+    source: "harness-controlled",
+    reason: "threshold",
+    count: 1,
+    triggerPercent: 75,
+    willRetry: false,
+    outcome: "completed",
+    tokensBefore: 96_000,
+    estimatedTokensAfter: 18_000,
+    summaryDigest: "a".repeat(64),
+    result: { summary: "PRIVATE_COMPACTION_SUMMARY" },
+  };
+
+  const projected = projectPiRpcEvent(event);
+
+  assert.equal(projected.type, "compaction_end");
+  assert.equal(projected.source, "harness-controlled");
+  assert.equal(projected.reason, "threshold");
+  assert.equal(projected.willRetry, false);
+  assert.equal(projected.summaryDigest, "a".repeat(64));
+  assert.equal(JSON.stringify(projected).includes("PRIVATE_COMPACTION_SUMMARY"), false);
+  assert.equal(projected.result, undefined);
+});
+
 test("Pi RPC event adapter projects only the RPC subscriber and preserves diagnostic fields", () => {
   const listeners: Array<(event: Record<string, unknown>) => void> = [];
   const messages = [{ role: "assistant", content: [{ type: "text", text: "private session text" }] }];
@@ -100,6 +130,87 @@ test("Pi RPC event adapter projects only the RPC subscriber and preserves diagno
   assert.ok(Buffer.byteLength(String((received[0]?.message as Record<string, unknown>).errorMessage)) <= 16 * 1024);
   assert.equal(JSON.stringify(received[0]).includes("untrusted provider response"), false);
   assert.deepEqual(event.message.content, [{ type: "text", text: "untrusted provider response" }]);
+});
+
+test("Worker context controls pin exact task data and compact once between tool turns", async () => {
+  const pinned = "<harness-pinned-task-data>EXACT_OBJECTIVE_AND_AC</harness-pinned-task-data>";
+  const events: Record<string, unknown>[] = [];
+  const branch = [{ id: "entry-1" }];
+  const compactedMessages = [{ role: "compactionSummary", summary: "private", timestamp: 1 }];
+  let compactions = 0;
+  let preparedSettings: Record<string, unknown> | null = null;
+  const session = {
+    model: { provider: "test", id: "model", contextWindow: 100_000 },
+    thinkingLevel: "high",
+    modelRuntime: { async getAuth() { return undefined; } },
+    sessionManager: {
+      getBranch() { return branch; },
+      appendCompaction() { return "compaction-1"; },
+      buildSessionContext() { return { messages: compactedMessages }; },
+    },
+    agent: {
+      state: { messages: [{ role: "user", content: [{ type: "text", text: "history" }] }], systemPrompt: "trusted repository policy" },
+      streamFunction: () => undefined,
+      async transformContext(messages: unknown[]) { return [...messages]; },
+      async prepareNextTurnWithContext(_turn?: unknown) { return undefined; },
+    },
+  };
+  const pi = {
+    calculateContextTokens(usage: { totalTokens: number }) { return usage.totalTokens; },
+    estimateTokens() { return 1; },
+    prepareCompaction(_entries: unknown[], settings: Record<string, unknown>) {
+      preparedSettings = settings;
+      return { firstKeptEntryId: "entry-1" };
+    },
+    async compact() {
+      compactions += 1;
+      return {
+        summary: "PRIVATE_SUMMARY",
+        firstKeptEntryId: "entry-1",
+        tokensBefore: 80_000,
+        estimatedTokensAfter: 12_000,
+      };
+    },
+  };
+  installWorkerContextControls(
+    pi,
+    session,
+    pinned,
+    { triggerPercent: 75, maxCompactions: 1, keepRecentTokens: 20_000, overflowContinuation: false },
+    (event: Record<string, unknown>) => events.push(event),
+  );
+
+  const original = [{ role: "user", content: [{ type: "text", text: "recent" }] }];
+  const firstRequest = await session.agent.transformContext(original);
+  const secondRequest = await session.agent.transformContext(original);
+  assert.equal(JSON.stringify(firstRequest).split("EXACT_OBJECTIVE_AND_AC").length - 1, 1);
+  assert.deepEqual(firstRequest, secondRequest);
+  assert.deepEqual(original, [{ role: "user", content: [{ type: "text", text: "recent" }] }]);
+  assert.match(session.agent.state.systemPrompt, /harness-worker-contract/);
+  assert.match(session.agent.state.systemPrompt, /worker_submit exactly once/);
+
+  const turn = {
+    message: { usage: { totalTokens: 80_000 } },
+    context: { systemPrompt: "trusted", tools: [], messages: original },
+  };
+  const nextTurn = session.agent.prepareNextTurnWithContext as unknown as (
+    value: typeof turn,
+  ) => Promise<{ context: { messages: unknown[]; systemPrompt?: string } } | undefined>;
+  const afterCompact = await nextTurn(turn);
+  const afterCeiling = await nextTurn(turn);
+  assert.equal(compactions, 1);
+  assert.deepEqual(preparedSettings, { enabled: true, reserveTokens: 16_384, keepRecentTokens: 20_000 });
+  assert.ok(afterCompact);
+  assert.deepEqual(afterCompact.context.messages, compactedMessages);
+  assert.ok(afterCeiling);
+  assert.match(String(afterCompact.context.systemPrompt), /harness-worker-contract/);
+  assert.match(String(afterCeiling.context.systemPrompt), /harness-worker-contract/);
+  const postCompactRequest = await session.agent.transformContext(compactedMessages);
+  assert.equal(JSON.stringify(postCompactRequest).split("EXACT_OBJECTIVE_AND_AC").length - 1, 1);
+  assert.deepEqual(session.agent.state.messages, compactedMessages);
+  assert.deepEqual(events.map((event) => event.type), ["compaction_start", "compaction_end"]);
+  assert.equal(JSON.stringify(events).includes("PRIVATE_SUMMARY"), false);
+  assert.equal(events[1]?.summaryDigest && String(events[1]?.summaryDigest).length, 64);
 });
 
 test("Pi RPC SDK host shares only canonical subscription OAuth and keeps settings in memory", () => {

@@ -36,6 +36,8 @@ test("Pi RPC adapter persists one launch and one dispatch across Controller rest
           ok: true,
           autoRetryDisableAccepted: true,
           autoCompactionEnabled: false,
+          compactionMode: "controlled-threshold",
+          compactionPolicy: fixture.snapshot.compactionPolicy,
           credentialMode: "canonical-oauth",
           isolatedAgentDir: join(plan.runtimeRoot, "pi-agent"),
         });
@@ -52,6 +54,8 @@ test("Pi RPC adapter persists one launch and one dispatch across Controller rest
     assert.equal(launches, 1);
 
     const plan = readJson<PiRpcPlan>(join(fixture.runtimeRoot, "plan.json"));
+    assert.match(plan.pinnedTaskData?.content ?? "", /Implement the task with exact acceptance criteria/);
+    assert.equal(digest(plan.pinnedTaskData?.content ?? ""), plan.pinnedTaskData?.digest);
     const identity = receiptIdentity(plan);
     writeAtomicJson(join(plan.runtimeRoot, "accepted.json"), { ...identity, ok: true, dispatchId: fixture.attempt.id });
     await runtime.prompt({
@@ -255,8 +259,20 @@ test("durable runner disables retry and compaction before dispatch and settles t
     attempt: process.env.FAKE_PI_ATTEMPT_ID,
     malformed: process.env.FAKE_PI_MALFORMED_AFTER_PROMPT,
     modelSecret: process.env.FAKE_PI_MODEL_SECRET,
+    controlledCompaction: process.env.FAKE_PI_CONTROLLED_COMPACTION,
+    ponytail: process.env.FAKE_PI_EXPECT_PONYTAIL_ENV,
   };
   try {
+    const ponytailRoot = join(fixture.root, "ponytail");
+    const ponytailExtension = join(ponytailRoot, "pi-extension", "index.js");
+    mkdirSync(dirname(ponytailExtension), { recursive: true });
+    writeFileSync(ponytailExtension, "export default function ponytail() {}\n");
+    writeFileSync(join(ponytailRoot, "package.json"), JSON.stringify({
+      name: "@dietrichgebert/ponytail",
+      version: "4.9.0",
+      pi: { extensions: ["./pi-extension/index.js"] },
+    }));
+    fixture.snapshot.resources.push(executionResource("extension", ponytailExtension));
     const plan = fixture.plan({
       executable: process.execPath,
       argv: [
@@ -295,6 +311,8 @@ test("durable runner disables retry and compaction before dispatch and settles t
     process.env.FAKE_PI_ATTEMPT_ID = fixture.attempt.id;
     const modelSecret = "MODEL_HEADER_SECRET_SENTINEL";
     process.env.FAKE_PI_MODEL_SECRET = modelSecret;
+    process.env.FAKE_PI_CONTROLLED_COMPACTION = "1";
+    process.env.FAKE_PI_EXPECT_PONYTAIL_ENV = "1";
 
     const execution = new SyncCommandRunner().run(process.execPath, [
       resolve("dist/src/pi-rpc-runner.js"),
@@ -307,6 +325,7 @@ test("durable runner disables retry and compaction before dispatch and settles t
     assert.equal(readJson<{ ok: boolean; autoRetryDisableAccepted: boolean; autoCompactionEnabled: boolean }>(join(plan.runtimeRoot, "ready.json")).ok, true);
     assert.equal(readJson<{ autoRetryDisableAccepted: boolean }>(join(plan.runtimeRoot, "ready.json")).autoRetryDisableAccepted, true);
     assert.equal(readJson<{ autoCompactionEnabled: boolean }>(join(plan.runtimeRoot, "ready.json")).autoCompactionEnabled, false);
+    assert.equal(readJson<{ compactionMode: string }>(join(plan.runtimeRoot, "ready.json")).compactionMode, "controlled-threshold");
     assert.equal(readJson<{ credentialMode: string }>(join(plan.runtimeRoot, "ready.json")).credentialMode, "canonical-oauth");
     const isolatedAgentDir = join(plan.runtimeRoot, "pi-agent");
     assert.equal(readJson<{ isolatedAgentDir: string }>(join(plan.runtimeRoot, "ready.json")).isolatedAgentDir, isolatedAgentDir);
@@ -317,6 +336,17 @@ test("durable runner disables retry and compaction before dispatch and settles t
     assert.equal(existsSync(join(isolatedAgentDir, "models.json")), false);
     assert.equal(readJson<{ ok: boolean }>(join(plan.runtimeRoot, "accepted.json")).ok, true);
     assert.equal(readJson<{ ok: boolean; agentSettled: boolean }>(join(plan.runtimeRoot, "terminal.json")).agentSettled, true);
+    assert.deepEqual(readJson<{ controlledCompaction: Record<string, unknown> }>(join(plan.runtimeRoot, "terminal.json")).controlledCompaction, {
+      count: 1,
+      triggerPercent: 75,
+      contextTokens: 80_000,
+      contextWindow: 100_000,
+      outcome: "completed",
+      tokensBefore: 80_000,
+      estimatedTokensAfter: 12_000,
+      summaryDigest: "a".repeat(64),
+      willRetry: false,
+    });
     assert.equal(readJson<{ ok: boolean }>(join(plan.runtimeRoot, "terminated.json")).ok, true);
     assert.equal(JSON.parse(readFileSync(fixture.attempt.resultPath, "utf8")).attemptId, fixture.attempt.id);
     for (const path of filesUnder(plan.runtimeRoot)) assert.equal(readFileSync(path, "utf8").includes(modelSecret), false, path);
@@ -326,6 +356,8 @@ test("durable runner disables retry and compaction before dispatch and settles t
     restoreEnv("FAKE_PI_ATTEMPT_ID", previous.attempt);
     restoreEnv("FAKE_PI_MALFORMED_AFTER_PROMPT", previous.malformed);
     restoreEnv("FAKE_PI_MODEL_SECRET", previous.modelSecret);
+    restoreEnv("FAKE_PI_CONTROLLED_COMPACTION", previous.controlledCompaction);
+    restoreEnv("FAKE_PI_EXPECT_PONYTAIL_ENV", previous.ponytail);
     rmSync(fixture.root, { recursive: true, force: true });
   }
 });
@@ -396,6 +428,8 @@ test("durable runner accepts Reviewer code-review with canonical subscription OA
   };
   try {
     fixture.snapshot.context!.lane = "reviewer";
+    fixture.snapshot.compactionMode = "disabled";
+    delete fixture.snapshot.compactionPolicy;
     fixture.snapshot.credentialMode = "canonical-oauth";
     fixture.snapshot.thinking = "max";
     fixture.snapshot.tools = ["read", "subagent", "review_submit"];
@@ -490,6 +524,102 @@ test("durable runner rejects Reviewer UI requests during an active agent or with
     } finally {
       rmSync(fixture.root, { recursive: true, force: true });
     }
+  }
+});
+
+test("durable runner still rejects every Worker UI request", () => {
+  const fixture = rpcFixture();
+  try {
+    const plan = fixture.plan({
+      executable: process.execPath,
+      argv: [
+        resolve("test/fixtures/fake-pi-rpc.js"),
+        "--no-session", "--no-context-files", "--no-prompt-templates", "--no-themes",
+        "--provider", "test", "--model", "model", "--mode", "rpc",
+      ],
+    });
+    writeExclusiveJson(join(plan.runtimeRoot, "plan.json"), plan);
+    writeExclusiveJson(join(plan.runtimeRoot, "dispatch.json"), {
+      version: 1,
+      attemptId: plan.attemptId,
+      generation: plan.generation,
+      planDigest: plan.planDigest,
+      dispatchId: plan.attemptId,
+      promptDigest: fixture.attempt.promptDigest,
+      message: "/skill:implement [harness-dispatch:worker-1]\nimplement",
+    });
+    const execution = new SyncCommandRunner().run(process.execPath, [
+      resolve("dist/src/pi-rpc-runner.js"),
+      "--sdk-entry", resolve("test/fixtures/pi-rpc-sdk-entry.js"),
+      "--plan", join(plan.runtimeRoot, "plan.json"),
+    ], {
+      cwd: fixture.root,
+      timeoutMs: 10_000,
+      env: {
+        ...process.env,
+        FAKE_PI_RESULT_PATH: fixture.attempt.resultPath,
+        FAKE_PI_JOB_ID: "job-1",
+        FAKE_PI_ATTEMPT_ID: fixture.attempt.id,
+        FAKE_PI_WORKER_UI_REQUEST: "1",
+      },
+    });
+    assert.equal(execution.ok, true, execution.stderr);
+    assert.equal(readJson<{ ok: boolean }>(join(plan.runtimeRoot, "terminal.json")).ok, false);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("durable runner records a content-free controlled compaction failure", () => {
+  const fixture = rpcFixture();
+  try {
+    const plan = fixture.plan({
+      executable: process.execPath,
+      argv: [
+        resolve("test/fixtures/fake-pi-rpc.js"),
+        "--no-session", "--no-context-files", "--no-prompt-templates", "--no-themes",
+        "--provider", "test", "--model", "model", "--mode", "rpc",
+      ],
+    });
+    writeExclusiveJson(join(plan.runtimeRoot, "plan.json"), plan);
+    writeExclusiveJson(join(plan.runtimeRoot, "dispatch.json"), {
+      version: 1,
+      attemptId: plan.attemptId,
+      generation: plan.generation,
+      planDigest: plan.planDigest,
+      dispatchId: plan.attemptId,
+      promptDigest: fixture.attempt.promptDigest,
+      message: "/skill:implement [harness-dispatch:worker-1]\nimplement",
+    });
+    const execution = new SyncCommandRunner().run(process.execPath, [
+      resolve("dist/src/pi-rpc-runner.js"),
+      "--sdk-entry", resolve("test/fixtures/pi-rpc-sdk-entry.js"),
+      "--plan", join(plan.runtimeRoot, "plan.json"),
+    ], {
+      cwd: fixture.root,
+      timeoutMs: 10_000,
+      env: {
+        ...process.env,
+        FAKE_PI_RESULT_PATH: fixture.attempt.resultPath,
+        FAKE_PI_JOB_ID: "job-1",
+        FAKE_PI_ATTEMPT_ID: fixture.attempt.id,
+        FAKE_PI_CONTROLLED_COMPACTION: "fail",
+      },
+    });
+    assert.equal(execution.ok, true, execution.stderr);
+    const terminal = readJson<{ ok: boolean; controlledCompaction: Record<string, unknown> }>(join(plan.runtimeRoot, "terminal.json"));
+    assert.equal(terminal.ok, false);
+    assert.deepEqual(terminal.controlledCompaction, {
+      count: 1,
+      triggerPercent: 75,
+      contextTokens: 80_000,
+      contextWindow: 100_000,
+      outcome: "failed",
+      willRetry: false,
+    });
+    assert.equal(JSON.stringify(terminal).includes("summary"), false);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
   }
 });
 
@@ -998,7 +1128,7 @@ function rpcFixture(): {
     version: 1,
     adapter: "pi-rpc",
     executable: "/opt/pi",
-    runtimeVersion: "0.84.0",
+    runtimeVersion: "0.84.2",
     argv: ["--no-session", "--no-context-files", "--no-prompt-templates", "--no-themes", "--provider", "test", "--model", "model", "--mode", "rpc"],
     provider: "test",
     model: "model",
@@ -1006,7 +1136,13 @@ function rpcFixture(): {
     tools: ["read", "bash", "worker_submit"],
     sessionMode: "ephemeral",
     retryMode: "disabled",
-    compactionMode: "disabled",
+    compactionMode: "controlled-threshold",
+    compactionPolicy: {
+      triggerPercent: 75,
+      maxCompactions: 1,
+      keepRecentTokens: 20_000,
+      overflowContinuation: false,
+    },
     credentialMode: "canonical-oauth",
     dockerHost: null,
     resources: [
@@ -1043,6 +1179,72 @@ function rpcFixture(): {
     promptDigest: digest("implement"),
     executionSnapshot: snapshot,
     planDigest: "b".repeat(64),
+    contextEnvelope: {
+      version: 1,
+      identity: {
+        jobId: "job-1",
+        sourceJobRevision: 1,
+        attemptId: "worker-1",
+        lane: "worker",
+        round: 1,
+        taskDigest: "f".repeat(64),
+        preparedAt: "2026-08-09T00:00:00.000Z",
+      },
+      authority: {
+        roleResources: [],
+        repositoryPolicy: {
+          trustAnchorSha: "a".repeat(40),
+          entries: [],
+          bundleDigest: "c".repeat(64),
+          manifestDigest: "d".repeat(64),
+        },
+      },
+      task: {
+        repo: "owner/repo",
+        issueNumber: 1,
+        mapNumber: null,
+        title: "Task",
+        objective: "Implement the task with exact acceptance criteria.",
+        labels: ["ready-for-agent"],
+        issueUpdatedAt: "2026-08-09T00:00:00.000Z",
+        digest: "f".repeat(64),
+        trust: "untrusted-task-data",
+      },
+      target: {
+        branch: "agent/issue-1",
+        baseSha: "a".repeat(40),
+        expectedHeadSha: null,
+        expectedRemoteHeadSha: null,
+      },
+      handoff: null,
+      evidence: {
+        trust: "untrusted-evidence",
+        refs: [],
+        reviewEvidencePath: null,
+        validationArgv: null,
+      },
+      runtime: {
+        snapshotDigest: "0".repeat(64),
+        adapter: "pi-rpc",
+        runtimeVersion: "0.84.2",
+        provider: "test",
+        model: "model",
+        thinking: "high",
+        tools: ["read", "bash", "worker_submit"],
+        sessionMode: "ephemeral",
+        retryMode: "disabled",
+        compactionMode: "controlled-threshold",
+        compactionPolicy: {
+          triggerPercent: 75,
+          maxCompactions: 1,
+          keepRecentTokens: 20_000,
+          overflowContinuation: false,
+        },
+        credentialMode: "canonical-oauth",
+      },
+      writeback: { tool: "worker_submit", statuses: ["completed", "blocked", "failed"] },
+    },
+    contextEnvelopeDigest: "1".repeat(64),
     handle,
     result: null,
     reconciliationAttempts: 0,
@@ -1051,6 +1253,7 @@ function rpcFixture(): {
   };
   const plan = (overrides: Partial<Pick<ExecutionSnapshot, "executable" | "argv">> = {}): PiRpcPlan => {
     const effectiveSnapshot = { ...snapshot, ...overrides };
+    const pinnedContent = `<harness-pinned-task-data>${attempt.id}</harness-pinned-task-data>`;
     return {
       version: 1,
       attemptId: attempt.id,
@@ -1061,6 +1264,9 @@ function rpcFixture(): {
       cwd: root,
       resultPath: attempt.resultPath,
       runtimeRoot,
+      ...(effectiveSnapshot.context?.lane === "worker" ? {
+        pinnedTaskData: { version: 1, digest: digest(pinnedContent), content: pinnedContent },
+      } : {}),
       snapshot: effectiveSnapshot,
     };
   };
@@ -1074,6 +1280,8 @@ function reviewerPlan(fixture: ReturnType<typeof rpcFixture>): { plan: PiRpcPlan
   const modelsContent = '{"providers":{"custom":{"apiKey":"REVIEWER_SECRET","models":[]}}}\n';
   writeFileSync(modelsPath, modelsContent, { mode: 0o600 });
   fixture.snapshot.context!.lane = "reviewer";
+  fixture.snapshot.compactionMode = "disabled";
+  delete fixture.snapshot.compactionPolicy;
   fixture.snapshot.credentialMode = "canonical-model-config";
   fixture.snapshot.thinking = "max";
   fixture.snapshot.tools = ["read", "subagent", "review_submit"];

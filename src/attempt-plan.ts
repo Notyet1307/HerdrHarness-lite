@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { lstatSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
+import { isWorkerControlledCompactionPolicy } from "./compatibility.js";
 import { digest, type Attempt, type AttemptRuntimeAdapter, type ExecutionContext, type ExecutionResource, type ExecutionSnapshot } from "./model.js";
 
 export function buildExecutionSnapshot(input: {
@@ -10,11 +11,18 @@ export function buildExecutionSnapshot(input: {
   argv: string[];
   retryMode?: ExecutionSnapshot["retryMode"];
   compactionMode?: ExecutionSnapshot["compactionMode"];
+  compactionPolicy?: ExecutionSnapshot["compactionPolicy"];
   credentialMode?: ExecutionSnapshot["credentialMode"];
   dockerHost?: string | null;
   context?: ExecutionContext;
   extraResources?: Array<{ kind: "agent" | "runtime" | "model-config"; path: string }>;
 }): ExecutionSnapshot {
+  const compactionMode = input.compactionMode ?? "runtime-default";
+  if (compactionMode === "controlled-threshold"
+    ? !isWorkerControlledCompactionPolicy(input.compactionPolicy)
+    : input.compactionPolicy !== undefined) {
+    throw new Error("controlled compaction mode requires the exact qualified policy");
+  }
   return {
     version: 1,
     adapter: input.adapter,
@@ -27,7 +35,8 @@ export function buildExecutionSnapshot(input: {
     tools: requiredFlag(input.argv, "--tools").split(",").map((tool) => tool.trim()),
     sessionMode: input.argv.includes("--no-session") ? "ephemeral" : "fresh-persistent",
     retryMode: input.retryMode ?? "runtime-default",
-    compactionMode: input.compactionMode ?? "runtime-default",
+    compactionMode,
+    ...(input.compactionPolicy ? { compactionPolicy: { ...input.compactionPolicy } } : {}),
     credentialMode: input.credentialMode ?? (input.adapter === "pi-rpc" ? "canonical-oauth" : "runtime-default"),
     dockerHost: input.dockerHost ?? null,
     resources: [

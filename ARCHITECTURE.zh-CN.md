@@ -89,7 +89,7 @@ IssueSnapshot -> TaskSnapshot -> Job -> Attempt
 
 - adapter、Pi executable 与 exact inspected version；
 - 完整 argv、provider、model、thinking、tools；
-- session、retry、compaction、credential 模式；
+- session、retry、compaction、credential 模式，以及可选的受控压缩策略；
 - Docker host；
 - skill、extension、agent、runtime、model config 等资源及 digest；
 - trusted context manifest/bundle 与 Attempt-private agent directory。
@@ -109,6 +109,8 @@ IssueSnapshot -> TaskSnapshot -> Job -> Attempt
 - Harness-owned writeback contract。
 
 凭据内容不进入 envelope、result 或 receipt。
+
+Worker RPC 的请求上下文分四层：Harness/仓库角色约束留在 trusted system prompt；Objective、AC、TypedHandoff 与精确 Git target 进入 digest 绑定的 untrusted pinned task-data；探索过程进入可压缩 history；工具白名单、Git fixed point、ledger、policy 与 human gate 继续由模型外强制。Pinned block 通过 Pi request-local context transform 在每次模型请求前原样注入，不写入 session history，也不进入 compaction summary。
 
 ### TypedHandoff
 
@@ -192,7 +194,7 @@ Claim 通过 GitHub Issue label 形成外部事实，并以 claim intent / confi
 
 ### Worker
 
-Worker 接收 TaskSnapshot Objective、base/branch、trusted repository context、可选 TypedHandoff 和 `worker_submit` contract。它可以在独立 worktree 中读写、测试、提交；不能 push、创建 PR、启动完整 review 或宣告交付完成。
+Worker 接收 TaskSnapshot Objective、base/branch、trusted repository context、可选 TypedHandoff 和 `worker_submit` contract。RPC Worker 的稳定角色约束保留在 system prompt，精确任务事实由 request-local pinned block 提供；两者都不依赖 compaction summary。Worker 可以在独立 worktree 中读写、测试、提交；不能 push、创建 PR、启动完整 review 或宣告交付完成。
 
 `worker_submit` 从实际 worktree 解析 HEAD，不信任模型提供 SHA。Controller 仍验证 clean tree、branch、base/head 与 post-PR remote fixed point。
 
@@ -231,7 +233,9 @@ Analyst 绑定当前 Job 和 task digest，只在 blocked flow 中读取有界 E
 
 Worker 与顶层 Reviewer 都可选择 `herdr-pi-cli` 或 `pi-rpc`。两者仍在 Herdr pane 中运行；Reviewer 内部的两个 review-axis child 属于固定 `pi-subagents` contract，不是第三种顶层 Attempt adapter。
 
-RPC 路径由 pane 内 foreground runner 持有 Pi stdin/stdout。Controller 通过 Attempt-private、原子落盘的 intent 与 receipt 观察它，不接管 pipe，也不在 dispatch 结果不确定时重放 prompt。RPC runner 明确关闭 Pi auto-retry 与 auto-compaction；exact version compatibility 由 `src/compatibility.ts` 统一定义并 fail closed。
+RPC 路径由 pane 内 foreground runner 持有 Pi stdin/stdout。Controller 通过 Attempt-private、原子落盘的 intent 与 receipt 观察它，不接管 pipe，也不在 dispatch 结果不确定时重放 prompt。RPC runner 明确关闭 Pi auto-retry 与 Pi-owned auto-compaction。Worker 使用 snapshot 固定的 75% threshold、最多一次、保留最近 20,000 token 的 Harness-controlled compaction；它只在工具轮次之间运行，overflow continuation 与 summarization retry 均关闭。Reviewer compaction 保持关闭。Receipt 只保存次数、阈值、触发时 context/window、前后 token 估计和 summary digest，不保存 summary 内容；exact version compatibility 由 `src/compatibility.ts` 统一定义并 fail closed。
+
+Worker 工具文本结果在进入后续模型上下文前还有 24 KiB 总上限，超限时保留头尾并给出原始字节数和 digest。Pi 内建分页/完整输出路径仍是重新读取事实的入口；截断结果和 compaction summary 都不是 workflow truth。
 
 ## 9. 上下文信任模型
 
@@ -241,10 +245,13 @@ Worker/Reviewer argv 关闭 ambient skills、extensions、sessions、context fil
 
 - Harness bundled role resources 与 base-SHA policy bundle 是 trusted authority；
 - Issue Objective、TypedHandoff、EvidencePack 和 operator statement 是 untrusted data；
+- Worker RPC 在每次模型请求前重新注入 exact pinned task-data；compaction 只能有损摘要探索过程，不能替代 Objective、AC、target 或 writeback contract；
 - candidate HEAD 新增或修改的 `AGENTS.md`、`CLAUDE.md` 或同类文件是审查对象，不是 Reviewer 指令；
 - trusted policy 对其他文件的引用不会自动授予那些文件指令权威；
 - context/resource/prompt digest 在副作用前复核，漂移即 blocked；
 - blocked Agent 的旧 transcript 不进入新的 Attempt。
+
+Worker 可选加载的 Ponytail 必须是 manifest 声明的 `@dietrichgebert/ponytail` `4.9.0`，且只能排在 bundled `worker-tools.js` 之后。Harness 对其强制 `full`、隐藏 status、静默 startup；任何 Worker `extension_ui_request` / response 仍 fail closed。Reviewer 不加载 Ponytail。
 
 ## 10. 当前执行链路
 
