@@ -289,8 +289,10 @@ export function projectPiRpcEvent(event: PiRpcEvent): PiRpcEvent {
   }
   if (type === "message_update") {
     const source = record(event.assistantMessageEvent);
+    const message = record(event.message);
     return {
       type,
+      message: { role: message.role, usage: message.usage },
       assistantMessageEvent: {
         ...(typeof source.type === "string" ? { type: source.type } : {}),
         ...metadata,

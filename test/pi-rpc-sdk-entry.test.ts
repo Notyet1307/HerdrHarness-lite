@@ -39,6 +39,30 @@ test("Pi RPC event adapter bounds a large agent_end without mutating Pi session 
   assert.equal(event.messages[1]?.content[0]?.text.length, 1024 * 1024);
 });
 
+test("Pi RPC event adapter keeps Pi 0.84.2 message_update serialization fields", () => {
+  const event = {
+    type: "message_update",
+    message: {
+      role: "assistant",
+      usage: { input: 10, output: 2, cacheRead: 0, cacheWrite: 0, totalTokens: 12 },
+      content: [{ type: "text", text: "PRIVATE_CUMULATIVE_SNAPSHOT" }],
+    },
+    assistantMessageEvent: {
+      type: "text_delta",
+      delta: "safe delta",
+      partial: "PRIVATE_PARTIAL_SNAPSHOT",
+    },
+  };
+
+  const projected = projectPiRpcEvent(event);
+  const message = projected.message as Record<string, unknown>;
+  assert.equal(message.role, "assistant");
+  assert.deepEqual(message.usage, event.message.usage);
+  assert.equal((projected.assistantMessageEvent as Record<string, unknown>).type, "text_delta");
+  assert.equal((projected.assistantMessageEvent as Record<string, unknown>).partial, undefined);
+  assert.equal(JSON.stringify(projected).includes("PRIVATE_"), false);
+});
+
 test("Pi RPC event adapter projects only the RPC subscriber and preserves diagnostic fields", () => {
   const listeners: Array<(event: Record<string, unknown>) => void> = [];
   const messages = [{ role: "assistant", content: [{ type: "text", text: "private session text" }] }];
