@@ -43,6 +43,10 @@ test("Pi review adapter uses fresh foreground Attempt-private project reviewers"
   assert.equal(/\btasks\s*:/.test(invocation), false);
   assert.match(skill, /arbitrary JavaScript and legacy top-level `tasks` are\s+rejected/);
   assert.match(skill, /trusted standards text copied from the injected bundle/);
+  assert.match(skill, /Objective injected\s+from the bound AttemptContextEnvelope is the only task specification input/);
+  for (const forbidden of ["docs/agents/issue-tracker.md", "gh issue", "fetch the issue"]) {
+    assert.equal(skill.toLowerCase().includes(forbidden), false);
+  }
 });
 
 test("Pi child reviewer has a strict non-writing, non-recursive tool list", () => {
@@ -94,6 +98,9 @@ test("example config pins the Worker and Reviewer Pi role contracts", () => {
     provider: "baizhi-chat",
     model: "deepseek-v4-flash",
   });
+  const active = exampleConfig.reviewerProviderProfiles.profiles[exampleConfig.reviewerProviderProfiles.active]!;
+  assert.deepEqual(flagValues(exampleConfig.reviewerArgv, "--provider"), [active.provider]);
+  assert.deepEqual(flagValues(exampleConfig.reviewerArgv, "--model"), [active.model]);
   assert.match(readFileSync("pi/skills/code-review/SKILL.md", "utf8"), /candidate Head is review subject\s+data/);
 });
 

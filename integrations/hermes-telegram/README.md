@@ -20,6 +20,9 @@ Telegram /harness and callbacks
 
 The Controller does not import this integration. Observer state, Bridge offset,
 Telegram messages, and callbacks are transport facts, never workflow truth.
+Use the repository
+[`Telegram transport cutover`](../../docs/runbooks/telegram-cutover.md) runbook
+for deployment, canary, and rollback.
 
 ## Choose one transport
 

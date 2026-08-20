@@ -1,650 +1,322 @@
-# HerdrHarness 精简架构与 Block 处理逻辑
+# HerdrHarness Lite 当前架构
 
-## 1. 结论
+本文只描述当前 `src/`、`test/`、配置解析和集成代码已经实现的系统。运行时事实以代码、测试、配置验证和外部系统的实时读数为准。
 
-本文最初用于指导 V2 精简；当前主线已经完成该迁移。现在的优化重点不是再建一套状态机，而是收敛恢复控制面：Core 从现有 `Job/Incident/Analysis` 与实时 policy 派生唯一 `OperatorAction[]`，CLI、Hermes 和人工 gate 复用它；外部结果短暂迟到时先有界重观察同一 Attempt，不立即制造新 Incident；`run/tick` 由状态目录排他 lease 保证单活。
+## 1. 范围与非目标
 
-建议建立 V2 核心，保留现有项目中最有价值的五项设计：
+HerdrHarness Lite 是一个单槽、持久化、fail-closed 的 GitHub Issue 交付控制器。它从符合准入条件的 Issue 中选择一个任务，绑定事实与执行计划，驱动 fresh Worker 和 fresh Reviewer，验证 Git fixed point，发布 PR，等待 required checks 与 merge，最后归档。
 
-1. 单写控制器与持久 ledger；
-2. GitHub Issue Map/block 识别；
-3. 每次 agent attempt 有不可变 ID 和结构化结果文件；
-4. Herdr 状态只表示进程生命周期，Git 与结果文件共同决定任务是否完成；
-5. block 后必须经过证据、Analyst 建议、人工审批，且恢复只能启动与获批动作匹配的 fresh Worker 或 fresh Reviewer。
+当前范围：
 
-以下能力移出核心：FCM、设备配对、Tailmux companion、通知、展示、低层 `repair` 命令、多个含义重叠的 `bind/work/watch/monitor` 入口。它们可以作为 observer 或 operator adapter 返回，但不能参与状态决策。
+- 一个 Controller 实例管理一个配置 lane；
+- 一个 lane 同时最多有一个 active Job；
+- GitHub Issue 与 strict Map frontier 负责待办选择；
+- Herdr 承载 worktree、pane 和 agent 生命周期；
+- Worker 与 Reviewer 可分别使用 `herdr-pi-cli` 或 `pi-rpc` Attempt adapter；
+- JSON ledger 保存 workflow truth；
+- Analyst、Observer 和 Telegram 只提供诊断、观察或受控操作入口。
 
----
+非目标：
 
-## 2. 第一性原理：只保留变量、关系、约束
+- 通用多代理平台或任意深度 agent tree；
+- 多任务并行调度器；
+- 用 Pi session、Herdr 状态或通知状态替代交付 ledger；
+- 让 Analyst、Observer、Telegram 或候选仓库指令获得 workflow authority；
+- 通过恢复旧的 blocked Agent 上下文继续执行；
+- 依靠工具 allowlist 充当操作系统 sandbox。
 
-### 2.1 变量
+## 2. 权威事实源
 
-| 变量 | 含义 | 权威来源 |
-|---|---|---|
-| `IssueGraph` | Issue、Map、parent/sub-issue、blockedBy、label、state | GitHub |
-| `Job` | Harness 对一个 issue 的持久执行实例 | Ledger |
-| `Attempt` | 某一次 worker/reviewer 执行，具有不可变 ID | Ledger + result file |
-| `Worktree` | 该 Job 的隔离代码空间与分支 | Git + Herdr |
-| `Incident` | 一次不可自动继续的阻塞事实 | Harness |
-| `EvidencePack` | Analyst 可见的有限、只读、带 digest 的证据 | Harness |
-| `Analysis` | Codex Analyst 的建议，不是权限 | Analyst adapter |
-| `Approval` | 人对一个精确 Incident/Analysis 的授权 | Human gate |
-| `OperatorAction` | Core 对当前精确绑定派生的可执行人工操作；不是持久生命周期状态 | Policy projection |
-| `PullRequest` | 经 reviewer 验证的 head 的交付对象 | GitHub |
+解释冲突时按以下顺序取事实：
 
-### 2.2 关系
+1. `src/` 的 TypeScript 实现；
+2. `test/` 的行为测试；
+3. 配置解析与运行时 preflight；
+4. 当前集成实现；
+5. 本文；
+6. README。
 
-```text
-Issue 1 ── 0..N Job（V1 实际只允许未完成 Job 为 1）
-Job   1 ── 1 AnalystSession
-Job   1 ── N Attempt
-Job   1 ── 0..1 ActiveIncident
-Incident 1 ── 0..1 Analysis
-Analysis 1 ── 0..1 Approval
-Approval 1 ── 1 RecoveryAction
-Job facts 1 ── 0..N derived OperatorAction
-```
+不同系统各自拥有不同事实，不能互相替代：
 
-关键绑定关系：
+| 事实 | 权威来源 |
+| --- | --- |
+| Job revision、Attempt、Incident、Analysis、Approval | Harness ledger |
+| Issue 状态、claim label、PR、required checks、merge | GitHub |
+| base/head、祖先关系、clean tree、提交 fixed point | Git |
+| Worker/Reviewer 结果 | Harness-owned durable result channel |
+| pane、agent、进程存活 | Herdr / Pi runtime |
+| 通知 offset、消息、callback | Observer / Bridge / Telegram |
 
-```text
-Approval = f(job_id, job_revision, incident_id, analysis_id, action)
-OperatorAction = f(job_id, job_revision, incident_id, analysis_id, attempt_id, head_sha, pr_head_sha, policy)
-```
+Herdr `idle/done`、Pi runtime event、Reviewer child 完成或验证命令结束都不是交付完成。完成至少需要身份绑定的 durable result 与对应 Git/GitHub 验证。
 
-其中任意一项变化，审批立即失效。
-
-### 2.3 约束
-
-1. **单写者**：只有 controller 能修改 Job；`run/tick` 先取得排他 lease，observer、Analyst、Pi、移动端都不能写状态。
-2. **GitHub 决定能否领取**：OPEN、ready label、无 assignee、无 OPEN blocker。
-3. **Git 决定代码事实**：branch、base/head ancestry、commit、dirty、push 状态不能由模型自报代替。
-4. **Herdr 只负责运行与观察**：workspace/tab/pane/agent 生命周期不是交付验收。
-5. **模型输出没有权限**：Pi/Codex 只能产出结果或建议，不能直接迁移 controller 状态。
-6. **恢复不复用旧上下文**：审批后关闭旧 pane，按获批动作创建新的 Worker 或 Reviewer attempt；旧 agent 不会收到新的控制指令。
-7. **不确定即停止**：stale revision、身份不一致、HEAD 变化、证据缺失、仅有未知 agent 状态时全部 fail closed；若 pane 关闭后仍有合法 result 与 Git 固定点，则交付事实可以独立收敛。
-
----
-
-## 3. 当前项目为什么会变复杂
-
-### 3.1 命令面已经代替了状态机
-
-当前 `src/cli.ts` 同时暴露 onboarding、bind、run、audit、publish、wait、work、watch、monitor、status、diagnose、repair、approve、cancel、push-device 等入口。每个入口都需要重新判断 ledger、锁、Git、Herdr、Analyst 的状态，导致“同一状态由多个命令解释”。
-
-精简后只保留：
+## 3. 核心记录
 
 ```text
-run / tick     controller 唯一推进入口
-status         只读；--operator 只展示 Core 派生的当前可执行操作
-decide         按精确 option ID 委托给现有人工 gate
-reassess       只刷新 held incident 的证据与 Analyst 判断，不授权恢复
-approve        唯一重试授权入口
-cancel         可选的显式终止入口
+IssueSnapshot -> TaskSnapshot -> Job -> Attempt
+                                  |      |-- ExecutionSnapshot
+                                  |      |-- AttemptContextEnvelope
+                                  |      `-- TypedHandoff (可选输入)
+                                  |-- Incident -> EvidencePack -> Analysis
+                                  |                         `-> Approval
+                                  `-- OperatorAction（实时投影，不持久化）
 ```
 
-### 3.2 `run-once` 和 `audit-once` 承担了过多横切责任
+### IssueSnapshot 与 TaskSnapshot
 
-当前执行模块同时处理：配置、锁、SQLite、项目归属、Git 固定点、Herdr pane、prompt dispatch、结果文件、Codex Analyst、intervention、恢复 brief、revision CAS。审计模块又重复一遍相似流程，并额外承担 review/rework 循环。
+`IssueSnapshot` 是 GitHub 当前返回的 Issue 图快照，包含状态、labels、assignees、blockers、父子关系和更新时间。
 
-问题不是文件数量，而是**领域规则与 CLI/Herdr/Git/Analyst 细节没有隔离**。任何一项能力变化，都会影响多个阶段。
+任务被选择时，Controller 生成 `TaskSnapshot`，绑定仓库、Issue、Map、标题、Objective、labels、排序后的 blocker closure、Issue 更新时间和 digest。它是该 Job 的 claim-time 任务事实，不会在每个 Attempt 中重新抓取另一份 Issue。
 
-### 3.3 重复实现 Herdr 已有的 agent 生命周期
+### Job
 
-当前 runtime 在创建 worktree 后，自行执行：
+`Job` 是一个 Issue 的持久工作流记录，包含 revision、任务、base、branch、worktree、Analyst session、Attempts、review round、Incident、Analysis、Approval、PR、CI failure、rework 次数和终态信息。每次演进都通过 `evolveJob` 增加 revision。
+
+### Attempt
+
+`Attempt` 是一次 fresh Worker 或 Reviewer 执行。它绑定 lane、round、base、预期 HEAD、result path、phase、prompt digest、执行快照、上下文 envelope、Herdr handle 和 durable result。blocked 或已完成 Attempt 不会被恢复为新的写入执行；重试创建 fresh Attempt。
+
+### Incident、EvidencePack、Analysis、Approval 与 OperatorAction
+
+- `Incident` 记录阻塞类别、lane、Attempt、摘要、可允许动作以及可选的自动恢复候选。
+- `EvidencePack` 是 digest 绑定、大小受限、标为 untrusted 的 Issue、Git、测试、result、runtime 和文件摘录证据。
+- `Analysis` 在代码中保存为 `AnalystAdvice`；它只能建议 `hold`、`retry_fresh_worker` 或 `retry_fresh_reviewer`，不能授权执行。
+- `Approval` 绑定精确 job revision、Incident、Analysis、actor、reason 与 action；policy 自动授权也形成可审计 Approval。
+- `OperatorAction` 由当前 Job 实时投影，带精确 binding 与 effect，不作为另一份状态持久化。CLI `decide` 消费当前仍有效的 action。
+
+### ExecutionSnapshot
+
+`ExecutionSnapshot` 在 runtime side effect 前绑定：
+
+- adapter、Pi executable 与 exact inspected version；
+- 完整 argv、provider、model、thinking、tools；
+- session、retry、compaction、credential 模式；
+- Docker host；
+- skill、extension、agent、runtime、model config 等资源及 digest；
+- trusted context manifest/bundle 与 Attempt-private agent directory。
+
+这些字段进入 `planDigest`。启动前发现 runtime、资源、环境、context、prompt 或 plan 漂移时，Controller fail closed。
+
+### AttemptContextEnvelope
+
+`AttemptContextEnvelope` 是按角色裁剪的唯一 prompt 输入投影，显式区分：
+
+- identity；
+- provenance-bound trusted authority；
+- untrusted TaskSnapshot / Objective；
+- exact Git target；
+- untrusted TypedHandoff 与 evidence refs；
+- runtime view；
+- Harness-owned writeback contract。
+
+凭据内容不进入 envelope、result 或 receipt。
+
+### TypedHandoff
+
+`TypedHandoff` 用于 review changes、approved recovery 和 CI rework。它绑定来源 revision、task/result/evidence/Incident/Analysis/Approval 以及目标 lane、base、expected HEAD、expected remote HEAD。它是有界的 untrusted task data，不能扩大工具、runtime 或 repository policy 权威。
+
+## 4. 当前状态集合
+
+### JobState
 
 ```text
-pane list
--> 找 shell pane
--> pane split
--> pane run Pi
--> 轮询等待 agent 被识别
--> prompt
--> 再轮询状态
+claimed
+worker_ready
+worker_running
+reviewer_ready
+reviewer_running
+publish_ready
+awaiting_merge
+blocked
+recovery_approved
+done
+cancelled
 ```
 
-这会把 Herdr 的内部识别行为变成 Harness 的业务依赖。精简适配器改为：
+### AttemptPhase
 
 ```text
-herdr worktree create
-herdr tab list / pane list（恢复未落账的自有 pane）
-herdr tab create
-herdr agent start --kind pi
-herdr agent prompt --wait
-herdr agent wait
-herdr agent get / read（wait 失败或 blocked 时只读诊断）
-herdr pane close（成功验收后）
+prepared
+pane_ready
+agent_ready
+running
+settled
 ```
 
-Harness 只记录 Herdr 返回的 workspace/pane/agent identity。
-
-### 3.4 Map 前沿语义不完全一致
-
-当前 Map 逻辑对不同阻塞形式采用了不同策略：首个 OPEN child 没有 ready 标签时会停止 Map；但 child 已有 ready 标签、同时存在 blocker 或 assignee 时，会继续寻找后续 child。这样会出现“有些阻塞禁止越过，有些阻塞允许越过”的不稳定顺序语义。
-
-V2 使用严格规则：**第一个 OPEN child 就是唯一 frontier；它不可执行时，整个 Map 等待，绝不越过。**
-
-### 3.5 Analyst 与审批安全性较好，但与观察/推送耦合
-
-当前 Codex Analyst 已经具备 restricted profile、只读 sandbox、固定 session handle、reserve-before-launch 和 fail-closed；`approve.ts` 也会重新读取精确 analysis，再委派给唯一 `repair` seam；`repair.ts` 会核对 revision、Incident、pane 和项目来源，并清除旧 agent provenance。**这些安全设计应保留。**
-
-真正的问题是 Analyst lifecycle、本地 monitor、远端 diagnose、Tailmux approval、FCM push、device pairing 都围绕同一 blocked job 继续增长，甚至 Analyst 模块直接依赖 push delivery。它们应拆为：
+### BlockClass
 
 ```text
-Core: Incident -> Evidence -> Analysis -> Approval -> Recovery
-Observer: status/notification/mobile display
-Adapter: Codex session、FCM、Tailmux transport
+agent_decision
+agent_blocked
+review_uncertain
+reviewer_preflight_dirty
+infrastructure_exhausted
+integrity_violation
+stale_task
+ci_failure
+ci_rework_exhausted
+analyst_unavailable
 ```
 
-Observer 可以丢失，Core 不可丢失；Observer 不能拥有状态迁移权限。
+这些字符串由 `src/model.ts` 定义。新增、删除或重解释任何值都属于 ledger 与恢复语义变更，不能只改文档。
 
----
+## 5. 单写 Controller 与持久化
 
-## 4. 目标架构
+`HarnessController.tick()` 是自动状态迁移入口。它读取当前 state，按 `JobState` 执行一个分支，并在一次 tick 中最多持久化一次状态迁移后返回。`run` 只是持有 lease 并循环调用 `tick()`。
 
-```mermaid
-flowchart LR
-    GH[GitHub Issue/PR] -->|IssueGraph| EL[Eligibility]
-    EL --> CT[Single-writer Controller]
-    CT <--> ST[(Ledger / StateStore)]
-    CT --> HR[Herdr Adapter]
-    HR --> PW[Pi Worker]
-    HR --> PR[Pi Reviewer]
-    PW --> RF[Attempt Result JSON]
-    PR --> RF
-    CT --> GT[Git Adapter]
-    RF --> CT
-    GT --> CT
+`JsonStateStore` 使用：
 
-    CT -->|BLOCKED event| EV[Bounded Evidence Collector]
-    EV --> CA[Codex Analyst]
-    CA -->|Advice only| CT
-    HU[Human Approval] -->|Exact approval tuple| CT
+- `state.json` 保存当前 ledger；
+- `events.jsonl` 记录状态事件；
+- state-directory 文件锁与 Controller lease 防止同一目录并发写；
+- expected revision 做 CAS；
+- 临时文件与 atomic rename 提交 state，append-only 写入 event；
+- 保存前后的 invariant validation 拒绝非法 ledger。
 
-    CT -->|Reviewed head| GH
-    ST --> OB[Optional observers]
-    OB --> FCM[FCM / Tailmux / UI]
-```
+生产 `state.json` 只能通过 Controller、policy 与 recovery API 演进，不能人工编辑。不同机器或 lane 不得同时写同一 state directory 或 worktree。
 
-### 4.1 责任边界
+## 6. 任务准入与 strict Map frontier
 
-| 组件 | 负责 | 不负责 |
-|---|---|---|
-| GitHub adapter | Issue graph、claim label、PR、merge observation | agent 生命周期、恢复决策 |
-| Eligibility | 纯 Map/block/ready 计算 | GitHub mutation、ledger write |
-| Controller | 唯一状态迁移、effect 调用、CAS | 模型推理、UI、通知 |
-| Herdr adapter | worktree/tab/agent start/prompt/wait/close | 任务完成判定 |
-| Pi worker | 修改、验证、提交 | push、PR、审批、controller write |
-| Pi reviewer | 独立只读审查 | 修改代码、复用 worker 结论 |
-| Git adapter | SHA、ancestry、branch、dirty、push 验真 | 任务语义判断 |
-| Codex Analyst | 证据分析、提出 bounded resolution brief | shell recovery、状态迁移、审批 |
-| Human gate | 对精确建议授权 | 任意跳转状态、向旧 agent 注入命令 |
-| Observer | 展示、通知 | 任何写操作 |
+普通 Issue 只有同时满足以下条件才可领取：
 
----
+- state 为 `OPEN`；
+- 包含 configured ready label；
+- 无 assignee；
+- 无 OPEN blocker；
+- 当前没有 active Job，且 Issue 不在 `done` terminal ledger 中；已取消任务允许重新入队。
 
-## 5. 状态机
+Map 是带 sub-issues 的排序容器，本身永不 claim。唯一 frontier 是第一个 OPEN child；该 child 不可执行、缺失、父关系不一致或仍被阻塞时，整个 Map 等待，Controller 不越过它选择后续 child。选择完成后还会在 claim 前重读 GitHub 事实并做 runtime preflight。
 
-```mermaid
-stateDiagram-v2
-    [*] --> claimed: durable selection intent
-    claimed --> claimed: confirm GitHub claim + start Analyst
-    claimed --> worker_ready: create Herdr worktree
+Claim 通过 GitHub Issue label 形成外部事实，并以 claim intent / confirmation 在 ledger 中收敛崩溃窗口。claim label 不能替代 ledger，ledger 也不能假设 label mutation 已成功。
 
-    worker_ready --> worker_running: prepare fresh Pi worker
-    worker_running --> reviewer_ready: result + Git verification pass
-    worker_running --> blocked: decision / failure / identity uncertainty
+## 7. 角色权限
 
-    reviewer_ready --> reviewer_running: prepare fresh read-only Pi reviewer
-    reviewer_running --> publish_ready: pass + read-only verification
-    reviewer_running --> worker_ready: actionable findings, rounds remain
-    reviewer_running --> blocked: uncertain / rounds exhausted / integrity failure
+### Worker
 
-    publish_ready --> awaiting_merge: push reviewed head + create/reuse PR
-    awaiting_merge --> done: merged
-    awaiting_merge --> blocked: PR closed unmerged / head drift
+Worker 接收 TaskSnapshot Objective、base/branch、trusted repository context、可选 TypedHandoff 和 `worker_submit` contract。它可以在独立 worktree 中读写、测试、提交；不能 push、创建 PR、启动完整 review 或宣告交付完成。
 
-    blocked --> blocked: bounded Analyst evidence turns
-    blocked --> blocked: exact hold reassessment creates successor incident
-    blocked --> recovery_approved: exact human approval
-    recovery_approved --> worker_ready: approved fresh Worker retry
-    recovery_approved --> reviewer_ready: approved Reviewer infrastructure retry
+`worker_submit` 从实际 worktree 解析 HEAD，不信任模型提供 SHA。Controller 仍验证 clean tree、branch、base/head 与 post-PR remote fixed point。
 
-    done --> [*]: archive and free slot
-```
+### Reviewer
 
-每个 `tick` 最多完成一次持久状态迁移。外部调用失败时，不假设成功；下一轮根据 ledger 和外部身份重新协调。
+Reviewer 是 fresh、read-only、exact-HEAD 审查者。它接收 AttemptContextEnvelope 中的 Objective 作为本 Attempt 唯一 Spec 输入、Harness 生成的 Git evidence、trusted standards bundle 和固定 validation argv。Objective 是 untrusted task data，不能扩权；不足时 Reviewer 返回 `blocked`，不会自行抓取另一份 Issue。
 
-每个 attempt 还具有内部阶段：
+Reviewer 必须：
+
+- 先做 `review_preflight`；
+- 在只读 exact-HEAD source snapshot 上启动 fresh Standards / Spec 双轴 child；
+- 只在 disposable writable copy 中运行一次 `review_validate`；
+- 通过 `review_submit` 写身份绑定结果；
+- 保持 candidate repository 中的 instruction files 只是审查对象。
+
+Reviewer skill 只允许双轴完成、固定验证成功且无 blocking finding 时提交 `pass`。运行时工具强制双轴、preflight 与验证成功；Controller 再独立强制身份、exact HEAD 与 clean-tree gate。
+
+### Analyst
+
+Analyst 绑定当前 Job 和 task digest，只在 blocked flow 中读取有界 EvidencePack。它没有 shell、Git、Herdr、ledger write 或 approval 权限；引用 pack 外证据、越界 action 或无效 brief 会被降为 `hold`。
+
+### 人类
+
+人类通过 `status --operator` 查看当前实时投影，再用 `decide --option` 提供 actor 与 reason。recovery gate 只记录精确授权，不直接复用旧 Agent、修改 Git 或跳过 Reviewer。过期 revision、Incident、Analysis 或 option 必须被拒绝。
+
+## 8. 外部边界
+
+| 边界 | 可提供 | 不能证明 |
+| --- | --- | --- |
+| GitHub | Issue 图、claim、PR、checks、merge | 本地 HEAD、Agent result |
+| Git | base/head、祖先、diff、clean tree | PR checks、workflow approval |
+| Herdr | worktree、pane、agent 生命周期 | 任务完成或审查通过 |
+| Pi CLI / RPC | 角色执行与 runtime observation | durable delivery truth |
+| Ledger | workflow state、revision、Incident、Approval | GitHub 或 Git 的实时外部事实 |
+| Observer / Telegram | 状态投递、受控 action transport | workflow authority |
+
+Worker 与顶层 Reviewer 都可选择 `herdr-pi-cli` 或 `pi-rpc`。两者仍在 Herdr pane 中运行；Reviewer 内部的两个 review-axis child 属于固定 `pi-subagents` contract，不是第三种顶层 Attempt adapter。
+
+RPC 路径由 pane 内 foreground runner 持有 Pi stdin/stdout。Controller 通过 Attempt-private、原子落盘的 intent 与 receipt 观察它，不接管 pipe，也不在 dispatch 结果不确定时重放 prompt。RPC runner 明确关闭 Pi auto-retry 与 auto-compaction；exact version compatibility 由 `src/compatibility.ts` 统一定义并 fail closed。
+
+## 9. 上下文信任模型
+
+Worker/Reviewer argv 关闭 ambient skills、extensions、sessions、context files、prompt templates 与 themes。Controller 从 Job 的 trusted base SHA 读取允许的 repository policy，按固定优先级选择并导出路径、source SHA 与 digest 绑定的 manifest/bundle；显式空清单也是可验证结果。
+
+信任规则：
+
+- Harness bundled role resources 与 base-SHA policy bundle 是 trusted authority；
+- Issue Objective、TypedHandoff、EvidencePack 和 operator statement 是 untrusted data；
+- candidate HEAD 新增或修改的 `AGENTS.md`、`CLAUDE.md` 或同类文件是审查对象，不是 Reviewer 指令；
+- trusted policy 对其他文件的引用不会自动授予那些文件指令权威；
+- context/resource/prompt digest 在副作用前复核，漂移即 blocked；
+- blocked Agent 的旧 transcript 不进入新的 Attempt。
+
+## 10. 当前执行链路
+
+### 正常链路
 
 ```text
-prepared -> pane_ready -> agent_ready -> running -> settled
+select + preflight
+  -> durable claim
+  -> task-bound Analyst session
+  -> isolated worktree
+  -> fresh Worker Attempt
+  -> durable Worker result + Git verification
+  -> fresh Reviewer Attempt
+  -> durable Reviewer result + exact-HEAD gate
+  -> PR / native auto-merge request
+  -> required checks + merged observation
+  -> done + archive + best-effort claim cleanup
 ```
 
-pane identity 与 agent identity 分阶段落账；`running` 在 prompt 前落账，因此 prompt 返回丢失或进程崩溃都不会触发同一 dispatch 重放。成功结果经 Git 验证后关闭该 attempt 自有 pane；若关闭后、状态保存前崩溃，下一轮允许用 durable result 继续验收，并把 `pane_not_found` 视为幂等关闭。blocked、failed 或不确定的 pane 留到精确人工恢复时再关闭。本阶段不自动删除 worktree。
-
-Pane/start/wait 的瞬时错误或非 blocked agent 暂缺 result 时，Controller 只持久增加同一 Attempt 的 reconciliation 计数并再观察一次；成功阶段迁移会清零该计数。重复失败才创建 `infrastructure_exhausted`。已批准 fresh retry 在消费前还会最后观察一次原 Attempt；合法迟到结果回到普通结果与 Git 验证链，prompt 始终不会重放。
-
----
-
-## 6. Issue、Map 与 Block 领取逻辑
-
-### 6.1 Standalone Issue
-
-只有同时满足以下条件才可领取：
-
-```text
-state == OPEN
-AND labels contains ready-for-agent
-AND assignees is empty
-AND blockedBy has no OPEN issue
-AND issue not in durable ledger/history
-AND issue is not a Map
-AND issue is not a child of a Map
-```
-
-### 6.2 Map
-
-Map 是容器，不是执行任务：
-
-```text
-Map 必须 OPEN + ready-for-agent
-找到 subIssues 中第一个 state == OPEN 的 child
-仅检查这个 child
-```
-
-该 child 必须：
-
-```text
-OPEN
-+ ready-for-agent
-+ no assignee
-+ no OPEN blocker
-+ parent 唯一且等于该 Map
-+ 自身不是 Map
-+ 不在 ledger
-```
-
-如果该 child 不满足，Map 等待；不能领取后续 child。
-
-### 6.3 领取过程
-
-```text
-1. 纯选择，写入 durable claim intent
-2. 再读取 GitHub frontier
-3. 目标、updatedAt、Map 关系一致
-4. 将 ready-for-agent 替换为 agent:claimed
-5. 启动 task-bound Analyst
-6. claimConfirmed=true
-```
-
-先写 claim intent，再改 GitHub label，因此即便在 label mutation 后崩溃，重启也能通过 ledger + `agent:claimed` 恢复，不会重复领取其他任务。
-
-V1 明确约束为单 controller。未来如需多机器并发，claim 必须升级为 GitHub Project 字段或外部租约 CAS，不能只依赖通用 label。
-
----
-
-## 7. Block 分类与处理逻辑
-
-### 7.1 入队 Block 与运行时 Block 必须分开
-
-#### A. GitHub dependency block
-
-Issue 的 `blockedBy` 中存在 OPEN issue：
-
-```text
-不领取
-不创建 Job
-不启动 Analyst
-不产生 Incident
-```
-
-它只是队列不可执行，不是 Harness 故障。
-
-#### B. Runtime block
-
-Job 已领取后发生不可自动继续的事件：
-
-```text
-创建 Incident
-冻结当前 attempt
-收集证据
-调用该 Job 已绑定的 Analyst
-等待人工 gate
-```
-
-### 7.2 分类矩阵
-
-| BlockClass | 示例 | Analyst 可建议 retry | 人可批准 retry | 默认处理 |
-|---|---|---:|---:|---|
-| `agent_decision` | worker 明确需要业务选择 | 是 | 是 | 证据 + gate |
-| `agent_blocked` | agent 失败、无有效完成结果 | 是 | 是 | 证据 + fresh worker |
-| `review_uncertain` | reviewer 证据不足、轮次耗尽 | 是 | 是 | 证据 + gate |
-| `infrastructure_exhausted` | Herdr dispatch/wait 无法确认 | 是 | 是 | Worker 事故重启 fresh Worker；Reviewer 事故复核同一 HEAD 后重启 fresh Reviewer |
-| `integrity_violation` | SHA/branch/dirty/push/身份不一致 | 否 | 否 | hold，人工检查环境 |
-| `stale_task` | Issue/Map frontier/目标已变化 | 否 | 否 | 重新选择，不复用旧任务 |
-| `analyst_unavailable` | task-bound Analyst 未成功绑定 | 否 | 否 | hold/cancel |
-
-模型即使对 `integrity_violation` 返回 retry，Harness 也会强制降级为 hold。
-
-### 7.3 Block 状态内的证据循环
-
-```mermaid
-sequenceDiagram
-    participant C as Controller
-    participant E as Evidence Collector
-    participant A as Codex Analyst
-    participant H as Human
-
-    C->>E: initial(job, incident)
-    E-->>C: bounded evidence pack
-    C->>A: turn(pack)
-    alt Analyst needs more evidence
-        A-->>C: whitelisted requests
-        C->>E: collect(requests)
-        E-->>C: bounded items
-        C->>A: next turn(updated pack)
-    else Analyst has advice
-        A-->>C: retry_fresh_worker, retry_fresh_reviewer, or hold
-    end
-    C-->>H: immutable analysis + digest
-    H->>C: approval(job revision, incident, analysis, action)
-```
-
-Analyst 只能请求：
-
-```text
-issue_context
-attempt_result
-git_status
-git_diff
-test_output
-file_excerpt
-```
-
-Harness 负责路径限制、长度限制和读取；Analyst 不能提交 shell 命令。
-
-Analyst 返回 `hold` 后，Controller 不会自动重试。只有 Worker 或 Reviewer `infrastructure_exhausted` 的运行环境发生变化时，人才能用精确 revision/incident/analysis 和 bounded reason 请求 `reassess`。Harness 将旧 incident/analysis 绑定写入审计记录，把 operator statement 标为 untrusted，创建同 lane 的 successor incident 后重新调用 Analyst；该动作本身不包含 retry 权限。
-
-### 7.4 人工 Gate
-
-人工看到的是 Core 派生的 `OperatorAction[]`，当前只有四种本质操作：批准 fresh retry、重新分析、提供耗尽轮次的维护者决策、取消并重新入队。操作 ID 绑定当前 revision、Incident、Analysis、Attempt 与 Git fixed point；任一事实变化都会使旧 ID 失效。`decide` 只是路由层，下面仍由 `approveRecovery`、`reassessIncident`、`resolveDecision`、`cancelHeldJob` 各自复核完整边界。
-
-批准请求必须精确匹配：
-
-```text
-expected_revision
-incident_id
-analysis_id
-analysis.action 是 retry_fresh_worker 或 retry_fresh_reviewer
-incident.allowedActions includes analysis.action
-actor
-reason
-```
-
-批准只把状态变为 `recovery_approved`。真正恢复由下一次 controller tick 执行：
-
-```text
-重新校验 approval binding
--> close old pane
--> consume approval
--> clear active incident
--> retry_fresh_worker: copy bounded resolutionBrief, state=worker_ready
--> retry_fresh_reviewer: 复核同一 HEAD 与 clean tree, state=reviewer_ready
--> create a brand-new attempt ID and Pi agent
-```
-
-明确禁止：
-
-```text
-向旧 blocked pane 继续 prompt
-直接修改 ledger 为 implementing
-执行 Analyst 给出的任意命令
-绕过 Git 固定点
-把底层 repair seam 暴露为可随意选择恢复阶段的常规入口
-```
-
----
-
-## 8. Worker 与 Reviewer 逻辑
-
-### 8.1 Worker
-
-Worker 使用 Pi，拥有 worktree 写权限，但必须遵守：
-
-```text
-dispatch 强制从 /skill:implement 开始
-显式加载 Matt Pocock implement、Harness bundled tdd adapter 与 focused-self-check
-只处理一个 issue
-不 push
-不创建 PR
-运行验证
-只针对当前 attempt diff 执行一次 focused self-check，不启动 subagent
-提交最终 clean state
-写入 exact attempt result JSON
-```
-
-Harness 接受完成需要同时满足：
-
-```text
-result.jobId / attemptId / lane 正确
-status == completed
-reported head == worktree HEAD
-attempt base 是 head 祖先
-至少一个新 commit
-branch 未变化
-tracked worktree clean
-远端尚无该 branch
-```
-
-### 8.2 Reviewer
-
-每轮 reviewer 都是 fresh Pi agent，且只读：
-
-```text
-dispatch 强制从 /skill:code-review 开始
-先从真实 Reviewer 进程内执行 review_preflight
-在当前 turn 内用锁定为 0.42.1 的 pi-subagents `workflowScript` 前台并行检查 Standards 与 Spec
-两个 child 均为 fresh、无写工具、无 skills、无递归 subagent
-reviewedHeadSha == 当前 head
-review 后 HEAD 不变
-tracked worktree clean
-除该 Job 已知 result JSON 外没有 untracked 文件
-```
-
-Herdr 只管理顶层 Worker/Reviewer Pi。子审查器由顶层 Pi 在同一 foreground turn 内拥有；Agent 定义与 subagent config 来自 Attempt 私有只读 registry，child cwd 固定到该 registry，brief 只提供只读 candidate snapshot 的绝对 source root，未覆写模型来自父 Pi。双轴只允许 Harness 可解析并重写的固定 `return await runs.all(<JSON>);` manifest，旧 `tasks` API 和任意 JavaScript 都 fail closed。`thinking=max` 显式固定，工具、skills、扩展和递归深度按只读职责收窄；只读 Pi wrapper 在每个 child 前复核 Attempt 绑定的 runtime version，并显式提供空 append-system prompt，排除动态 `APPEND_SYSTEM.md`。禁止 async child，避免顶层 Pi 提前完成而留下未被 Harness 生命周期覆盖的后台执行。
-
-Controller 直接校验原生 role argv：解析每个 `SKILL.md` 的真实 `name`，用 installer `.skill-lock.json` 核对 Matt Pocock `implement` 来源；Worker 必须使用 Harness bundled `tdd` 与 `focused-self-check`，且不得加载 `code-review`/`subagent`，Reviewer 必须使用唯一 bundled `code-review`。精确工具集合、Worker 的 `thinking=high|xhigh|max` 与 Reviewer 的 `thinking=max` 缺一不可。除可选 `provider/model` 外，额外 extension、system prompt、session 复用和 positional prompt 等参数全部拒绝。因此 fresh attempt 不能被路径伪装或配置降级，且没有引入另一套 profile DSL。
-
-任务选择前会对两个角色做轻量 Provider 真实探测；配置要求 Docker 时，同时解析当前本地 Unix socket 并验证 daemon/Compose V2。attempt pane 创建前重检当前角色，并把同一个 socket 显式绑定给 Worker 或 Reviewer 验证副本。Reviewer 内部必须先通过 `review_preflight`，才能启动双轴 child 或执行完整验证；预检失败不会被解释为代码审查通过。
-
-结果：
-
-- `pass`：进入 publish；
-- `changes` 且 findings 可执行、轮次未耗尽：创建 fresh worker；
-- `changes` 无 findings：block；
-- `blocked/failed`：block；
-- 超出 `maxReviewRounds`：block。
-
-普通 review rework 不需要人工审批，因为它属于预定义质量闭环；只有不确定或轮次耗尽才进入 Incident。
-
----
-
-## 9. 如何吸收 Herdr 与 Orca，而不是复制它们
-
-### 9.1 从 Herdr 吸收
-
-- 原生 worktree workspace；
-- 每个 attempt 一个 tab/pane/agent；
-- `agent start / prompt --wait / wait / get / read / pane close`；
-- agent status 作为生命周期观测；
-- JSON identity 作为外部句柄。
-
-不让 Herdr承担：Job ledger、Map 语义、审核通过、审批权限、PR 验收。
-
-### 9.2 从 Orca 吸收
-
-- 一个任务一个隔离 worktree；
-- worker 与 reviewer 角色分离；
-- Git/GitHub 是交付主线；
-- 阶段门明确，失败不隐式越过；
-- agent orchestration 是可观察的流程，不是黑盒聊天。
-
-不复制 Orca 的完整 UI、终端产品形态或全部后台服务。Herdr 已经提供本地交互与 pane 管理，Harness 只需补齐任务治理和证据 gate。
-
-### 9.3 三层关系
-
-```text
-Orca 提供编排思想
-Herdr 提供本地执行原语
-Harness 提供任务治理、证据与权限边界
-```
-
----
-
-## 10. 精简代码结构
-
-```text
-Domain
-  model.ts
-  eligibility.ts
-  policy.ts
-  prompts.ts
-
-Application
-  controller.ts
-  recovery.ts
-
-Ports
-  ports.ts
-
-Adapters
-  github-gh.ts
-  git-cli.ts
-  herdr-cli.ts
-  json-command-analyst.ts
-  local-evidence.ts
-  json-store.ts
-
-Entry
-  cli.ts
-```
-
-核心模块不能导入 `gh`、`git`、Herdr CLI 或 Codex CLI；只能依赖端口。通知与移动端只能订阅 ledger/event，不进入 controller。
-
----
-
-## 11. 现有代码迁移映射
-
-| 当前模块/能力 | V2 处理 |
-|---|---|
-| `picker.ts` | 规则收敛到纯 `eligibility.ts`；采用严格 Map frontier |
-| `bind.ts` | 并入 controller 的 durable selection/claim 两阶段 |
-| `work.ts` | 只保留状态 dispatcher，命令面合并为 `run/tick` |
-| `run-once.ts` | worker stage 迁入 controller；Git/Herdr/Analyst 通过 port |
-| `audit-once.ts` | reviewer stage；删除与 worker 重复的启动、等待、锁代码 |
-| `runtime.ts` | 收敛为薄 `herdr-cli.ts`，使用原生 agent 命令 |
-| `orchestrator.ts` | attempt identity/result contract 保留；不再包办状态机 |
-| `ledger.ts` | 推荐保留 SQLite，实现 `StateStore` 接口 |
-| `codex-analyst.ts` | 保留为 `AnalystPort` adapter；不被 run/audit 直接导入 |
-| `diagnose/monitor` | 变为 observer 或 analyst transport，不迁移状态 |
-| `approve.ts` | 保留“精确 analysis 再校验”的思想，收敛为唯一 `approveRecovery` gate |
-| `repair.ts` | 其 revision/Incident/pane 复核逻辑保留为内部 RecoveryService；从常规命令面隐藏并收窄为审批允许的动作 |
-| `push-device/FCM/pairing` | 独立 notification plugin，仅读 event stream |
-| `watch.ts` | `run` 循环；每次调用同一个 `tick` |
-| `publish/wait-merge` | 保留为轻量 GitHub adapter stage |
-
-迁移时不要一次性重写全部：先用新 controller 驱动 fake adapters，通过行为测试；再依次接入现有 SQLite、GitHub、Herdr、Pi、Codex；最后迁移通知与远程展示。
-
----
-
-## 12. 参考实现验证结果
-
-执行：
-
-```bash
-npm run verify
-```
-
-结果：
-
-```text
-TypeScript strict typecheck: PASS
-Tests: 98 passed, 0 failed
-```
-
-覆盖：
-
-1. Map 严格 frontier；
-2. OPEN/ready/assignee/blocker；
-3. 已领取 issue 去重；
-4. claim label mutation 后崩溃恢复；
-5. worker + reviewer + PR + merge；
-6. reviewer findings -> fresh worker -> fresh reviewer；
-7. block -> 证据请求 -> Analyst 建议；
-8. stale approval 拒绝；
-9. integrity block 强制 hold；
-10. approval 后关闭旧 agent、创建新 attempt；
-11. Herdr 0.8 原生命令、响应 identity、错误分类与 pane-ready 竞态，不使用 `pane run` 模拟 agent；
-12. prompt at-most-once、关闭后崩溃恢复、成功 pane 关闭与官方 `agent get/read` 诊断。
-13. Worker focused self-check、Reviewer 强制双轴 skill dispatch、Pi package 资源、fail-fast role argv、Provider/Docker/Reviewer 环境预检与 untracked 文件 gate。
-14. Controller 排他 lease、同 Attempt 有界 reconciliation、批准消费前迟到结果收敛、统一 OperatorAction 投影与精确 option 路由。
-
-历史真实验证：在 `Notyet1307/harness-sandbox@fd9defa` 上，以 Herdr 0.8.0、Pi 0.83.0、Pi integration v8 完成独立命名 session canary；Pi 到达 `done`、写出预期 durable result、tracked tree 未改，自有 attempt pane 关闭后已从 workspace 消失。另以 issue #12 从基线 `b0fd0b0` 运行角色 canary：当时的 Worker 生成本地 `1285f52` 并完成旧版双轴自审，fresh Reviewer 再完成独立 `2/2` 双轴审查并返回 `pass`。该记录只证明旧版链路；当前 Worker 已改为 focused self-check，仍需下一次真实 canary 补充运行证据。
-
-完整 controller 随后以 issue #14 做了真实端到端 canary。第一次运行因 Reviewer 的 `.pi-subagents` 产物进入 worktree 而 fail closed；产物目录与 gate 绑定修复后，从 `fd9defa` 重跑，Worker 生成 `b0c0f7e`，fresh Reviewer 对同一 SHA 返回 `pass`，Controller 发布 PR #15、观察到 merge commit `7454feb`，再迁移到 `done` 并归档；Codex Analyst receipt 最终为 `closed`。最终 tracked tree clean，仅保留该 Job 已知的 `.harness` result JSON。GitHub issue、claim、Analyst、Herdr worktree、Worker、Reviewer、PR、merge observation 与 archive 的完整主链路已经验收。
-
-限制：worktree 自动删除明确不在本阶段范围内。代码已经将该缺口隔离在 adapter 生命周期之外，不影响本次 controller 主链路结论。
-
----
-
-## 13. 推荐落地顺序
-
-### 阶段一：冻结现有 main
-
-只修严重 bug，不再添加 observer、推送或新 repair 分支。
-
-### 阶段二：引入 V2 Core
-
-把本参考实现放到新分支或 `packages/harness-core-v2`，保持现有生产链不变，先运行测试。
-
-### 阶段三：接真实适配器
-
-顺序固定：
-
-```text
-SQLite StateStore
--> GitHubGh
--> GitCli
--> HerdrCli
--> Pi worker/reviewer 原生 argv、强制 skill dispatch 与 foreground subagents
--> existing Codex Analyst adapter
-```
-
-每接一个 adapter，就用一个真实 sandbox issue 验证，不同时迁多个边界。
-
-### 阶段四：影子运行
-
-V1 负责实际领取，V2 只读计算 next action；对比 20 个轮询周期或若干真实 issue，确认选择和状态一致。
-
-### 阶段五：切换领取权
-
-V2 获得 `agent:claimed` mutation 权；V1 只保留只读 status。稳定后再把 FCM/Tailmux 订阅到 V2 event stream。
-
----
-
-## 14. 最终判断
-
-目标不应是“做一个功能很多的 AgentOps 平台”，而应是：
-
-```text
-一个 GitHub Issue
-一个隔离 worktree
-一个 task-bound Analyst
-一系列不可变 worker/reviewer attempts
-一个单写 ledger
-一个精确的人工恢复 gate
-```
-
-只要这六个对象及其关系保持清晰，未来增加多仓库、多 worker slot、不同 agent provider、移动端观察或通知，都只会增加 adapter，不会再次污染核心状态机。
+Attempt 内部按 `prepared -> pane_ready -> agent_ready -> running -> settled` 推进。prompt dispatch 前先持久化 `running`；dispatch 结果不确定时只观察同一 Attempt，不重复发送。
+
+### Review rework
+
+Reviewer 返回 actionable `changes` 时，Controller 把 findings 生成 target=Worker 的 `TypedHandoff`，关闭旧 Attempt，创建 fresh Worker。新 Worker 完成后必须再创建 fresh Reviewer，不能复用上一轮 Reviewer 结论。
+
+### CI rework
+
+required check 失败时，Controller 记录 HEAD-bound CI evidence、取消 auto-merge 并进入 blocked。每次回修都需要新的精确人类授权，生成 CI handoff，交给 fresh Worker，再走 fresh Reviewer。次数达到代码中的上限后保持 fail closed。
+
+### Blocked recovery
+
+runtime 外部结果短暂迟到时，同一 Attempt 只做一次 bounded reconciliation，且不重放 prompt。窄范围 pre-dispatch Worker 或 same-HEAD Reviewer infrastructure incident 可由 policy 自动授权一次 fresh retry；其余情况依次需要 Incident、EvidencePack、Analyst advice 与精确 human gate。恢复会关闭旧 pane，并创建 fresh Worker 或 Reviewer。
+
+Analyst `hold` 不授权 retry。`reassess` 只创建新的可审计 Incident/Analysis cycle，也不直接授权执行。
+
+## 11. `src/` 模块映射
+
+| 模块 | 当前职责 |
+| --- | --- |
+| `model.ts` | 领域记录、状态集合、digest 与 invariants |
+| `controller.ts` | 单槽生命周期编排与外部 gate 顺序 |
+| `eligibility.ts` | Issue 准入与 strict Map frontier |
+| `policy.ts` | Incident、EvidencePack、result validation、automatic recovery 与 OperatorAction 投影 |
+| `recovery.ts` | approval、reassessment、decision resolution、cancellation 的精确 CAS gate |
+| `ports.ts` | GitHub、Git、Herdr、runtime、Analyst、evidence、store 等外部接口 |
+| `attempt-plan.ts` | ExecutionSnapshot、resource digest 与 plan integrity |
+| `attempt-context.ts` | role-scoped AttemptContextEnvelope |
+| `handoff.ts` | review/recovery/CI TypedHandoff 生成与绑定 |
+| `prompts.ts` | 只从 bound envelope 渲染 Worker/Reviewer prompt |
+| `compatibility.ts` | Pi RPC 与 `pi-subagents` exact compatibility facts |
+| `reviewer-provider-profile.ts` | active Reviewer provider profile 的验证与 selector 替换 |
+| `controller-lease.ts` / `controller-heartbeat.ts` | 单活 lease 与 liveness heartbeat |
+| `pi-rpc-*` | durable RPC plan/spool/runner/SDK host/diagnostics |
+| `hermes-status.ts` / `hermes-approval.ts` / `hermes-observer.ts` | Telegram/Hermes compatibility transport |
+| `adapters/json-store.ts` | ledger lock、CAS、atomic write 与 event append |
+| `adapters/github-gh.ts` | GitHub Issue/claim/PR/checks/merge |
+| `adapters/git-cli.ts` | worktree、Git fixed point、trusted context、Reviewer snapshots |
+| `adapters/herdr-cli.ts` | Herdr worktree/pane/agent lifecycle |
+| `adapters/pi-rpc-runtime.ts` | Controller-facing durable RPC adapter |
+| `adapters/local-evidence.ts` | bounded Analyst evidence |
+| `adapters/json-command-analyst.ts` | task-bound Analyst JSON protocol |
+
+## 12. 尚未退休的兼容边界
+
+以下路径仍被当前代码或部署接口引用，不能按“历史噪声”删除：
+
+- `HarnessState.version: 1` 是当前磁盘 schema；
+- 旧 ledger 可缺少 dependency closure、ExecutionSnapshot、context envelope、reconciliation counter、Approval basis 或 CI fields；
+- 无执行快照的 running Attempt 只允许观察，未启动 Attempt 不允许产生新副作用；
+- `pendingBrief` 只读存在，用于拒绝旧自由文本续跑；新状态只写 `pendingHandoff`；
+- policy 保留旧 Incident 形态的有界 reassessment migration；
+- `approve`、`reassess`、`resolve-decision`、`cancel` 仍是 CLI compatibility entrypoints；
+- Hermes plugin、Hermes-named scripts/config、fleet config 与 Observer state migration 仍可能被既有部署使用。
+
+删除这些边界前必须先盘点真实 ledger、进程参数、配置和 transport 流量，并提供迁移、测试与回滚证据。
