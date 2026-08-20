@@ -19,7 +19,7 @@ Controller 选择 OPEN、带 ready label、无人领取、无 OPEN blocker 的�
 - Reviewer 保持 fresh、read-only、exact-HEAD、双轴和独立验证。
 - Runtime event、Herdr status、child completion 与短 probe 都只是观察事实。
 - Analyst 只有建议权；policy 或精确 human gate 才能授权恢复。
-- Pi RPC auto-retry 与 auto-compaction 保持关闭。
+- Pi RPC auto-retry 与 Pi 自有 auto-compaction 保持关闭。只有 Worker RPC 可使用 snapshot 绑定、最多一次的受控阈值压缩；Reviewer 压缩仍关闭。
 - 凭据不进入 result、receipt、ledger、文档或复制出的 credential 文件。
 
 ## 前置依赖与精确安装
@@ -45,6 +45,8 @@ npm run build
 - Worker/Reviewer provider 与 model selector。
 
 保持 example 中完整 role argv、ambient-discovery hardening flags、tools、thinking 和 extension 顺序。裸 `reviewerArgv` 的可见 provider/model 应与 active Reviewer profile 一致。`stateDir` 不得位于 source checkout 或 worktree root 内。
+
+Worker 可选的第二个 extension 只能是 `@dietrichgebert/ponytail` `4.9.0`。声明后 Harness 强制 full mode，同时静默 status/startup UI；Worker UI request 的拒绝策略不会放宽。
 
 运行前验证外部访问：
 

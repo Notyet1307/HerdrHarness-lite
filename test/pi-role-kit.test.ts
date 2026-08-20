@@ -76,7 +76,7 @@ test("example config pins the Worker and Reviewer Pi role contracts", () => {
     assert.equal(exampleConfig.workerArgv.includes(flag), true);
     assert.equal(exampleConfig.reviewerArgv.includes(flag), true);
   }
-  assert.deepEqual(flagValues(exampleConfig.workerArgv, "--extension").map(lastPathPart), ["worker-tools.js"]);
+  assert.deepEqual(flagValues(exampleConfig.workerArgv, "--extension").map(lastPathPart), ["worker-tools.js", "index.js"]);
   assert.deepEqual(flagValues(exampleConfig.reviewerArgv, "--extension").map(lastPathPart), [
     "reviewer-subagent-config.js",
     "index.ts",

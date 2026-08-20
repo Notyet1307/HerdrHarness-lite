@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { Buffer } from "node:buffer";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -38,10 +39,17 @@ test("Worker submit tool resolves Git HEAD instead of trusting a model-supplied 
     process.env.HERDR_HARNESS_WORKER_DESCRIPTOR = descriptorPath;
 
     const tools = new Map<string, Tool>();
+    const handlers = new Map<string, (event: Record<string, unknown>) => Promise<Record<string, unknown> | undefined>>();
     const extension = await import(pathToFileURL(resolve("pi/extensions/worker-tools.js")).href) as {
-      default(pi: { registerTool(tool: Tool & { name: string }): void }): void;
+      default(pi: {
+        registerTool(tool: Tool & { name: string }): void;
+        on(event: string, handler: (value: Record<string, unknown>) => Promise<Record<string, unknown> | undefined>): void;
+      }): void;
     };
-    extension.default({ registerTool(tool) { tools.set(tool.name, tool); } });
+    extension.default({
+      registerTool(tool) { tools.set(tool.name, tool); },
+      on(event, handler) { handlers.set(event, handler); },
+    });
     const submit = tools.get("worker_submit");
     assert.ok(submit);
 
@@ -65,6 +73,26 @@ test("Worker submit tool resolves Git HEAD instead of trusting a model-supplied 
     });
     assert.equal(submit.parameters.required.includes("headSha"), false);
     assert.equal("headSha" in submit.parameters.properties, false);
+    const originalToolOutput = `HEAD\n${"😀".repeat(40_000)}\nTAIL`;
+    const bounded = await handlers.get("tool_result")?.({
+      type: "tool_result",
+      toolName: "bash",
+      toolCallId: "large-output",
+      input: {},
+      content: [{ type: "text", text: originalToolOutput }],
+      details: { fullOutputPath: "/tmp/full-output" },
+      isError: false,
+      usage: { totalTokens: 1 },
+    });
+    const boundedText = String((bounded?.content as Array<{ text: string }> | undefined)?.[0]?.text ?? "");
+    assert.ok(Buffer.byteLength(boundedText) <= 24 * 1024);
+    assert.match(boundedText, /^HEAD/);
+    assert.match(boundedText, /TAIL$/);
+    assert.equal(boundedText.includes("�"), false);
+    assert.match(boundedText, /Harness bounded tool output: originalBytes=\d+, sha256=[0-9a-f]{64}/);
+    assert.deepEqual(bounded?.details, { fullOutputPath: "/tmp/full-output" });
+    assert.equal(bounded?.isError, false);
+    assert.deepEqual(bounded?.usage, { totalTokens: 1 });
     await assert.rejects(() => submit.execute("submit-again", {
       status: "completed",
       summary: "overwrite",

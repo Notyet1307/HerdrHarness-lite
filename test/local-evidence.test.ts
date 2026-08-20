@@ -21,6 +21,8 @@ test("advanced evidence separates dirty worktree progress and exposes only safe 
       attemptId,
       ok: true,
       credentialMode: "canonical-oauth",
+      compactionMode: "controlled-threshold",
+      compactionPolicy: { triggerPercent: 75, maxCompactions: 1, keepRecentTokens: 20_000, overflowContinuation: false },
       accessToken: "MUST_NOT_LEAK",
     }));
     writeFileSync(join(runtime, "terminal.json"), JSON.stringify({
@@ -32,6 +34,17 @@ test("advanced evidence separates dirty worktree progress and exposes only safe 
       failureCode: "provider_network",
       retryable: true,
       phase: "tool_error_recovery",
+      controlledCompaction: {
+        count: 1,
+        triggerPercent: 75,
+        contextTokens: 80_000,
+        contextWindow: 100_000,
+        outcome: "completed",
+        tokensBefore: 80_000,
+        estimatedTokensAfter: 12_000,
+        summaryDigest: "a".repeat(64),
+        willRetry: false,
+      },
     }));
 
     const outputs = new Map([
@@ -100,6 +113,9 @@ test("advanced evidence separates dirty worktree progress and exposes only safe 
     assert.ok(runtimeEvidence);
     assert.match(runtimeEvidence.summary, /provider_network/);
     assert.match(runtimeEvidence.summary, /canonical-oauth/);
+    assert.match(runtimeEvidence.summary, /controlled-threshold/);
+    assert.match(runtimeEvidence.summary, /"tokensBefore":80000/);
+    assert.match(runtimeEvidence.summary, new RegExp(`"summaryDigest":"${"a".repeat(64)}"`));
     assert.equal(runtimeEvidence.summary.includes("MUST_NOT_LEAK"), false);
   } finally {
     rmSync(root, { recursive: true, force: true });

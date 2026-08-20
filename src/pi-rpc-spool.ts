@@ -13,6 +13,11 @@ export type PiRpcPlan = {
   cwd: string;
   resultPath: string;
   runtimeRoot: string;
+  pinnedTaskData?: {
+    version: 1;
+    digest: string;
+    content: string;
+  };
   snapshot: ExecutionSnapshot & { adapter: "pi-rpc" };
 };
 

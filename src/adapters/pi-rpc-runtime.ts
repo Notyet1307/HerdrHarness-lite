@@ -20,6 +20,7 @@ import {
   PiRpcRuntimeFailure,
   safePiRpcDiagnosticFrom,
 } from "../pi-rpc-diagnostics.js";
+import { renderPinnedWorkerTaskData } from "../prompts.js";
 
 const READY_TIMEOUT_MS = 30_000;
 const ACCEPT_TIMEOUT_MS = 30_000;
@@ -62,6 +63,8 @@ type OwnerReceipt = RuntimeReceipt & { runnerPid: number };
 type ReadyReceipt = RuntimeReceipt & {
   autoRetryDisableAccepted: true;
   autoCompactionEnabled: false;
+  compactionMode: ExecutionSnapshot["compactionMode"];
+  compactionPolicy?: ExecutionSnapshot["compactionPolicy"];
   credentialMode: ExecutionSnapshot["credentialMode"];
   isolatedAgentDir: string;
 };
@@ -231,6 +234,9 @@ export class PiRpcRuntime implements AttemptRuntimePort {
       return persisted;
     }
     if (!input.cwd || !sameJson(input.argv, snapshot.argv)) throw new Error("Pi RPC launch differs from the execution snapshot");
+    const pinnedContent = snapshot.context?.lane === "worker" && snapshot.compactionMode === "controlled-threshold"
+      ? renderPinnedWorkerTaskData(input.attempt)
+      : null;
     return {
       version: 1,
       attemptId: input.attempt.id,
@@ -241,6 +247,9 @@ export class PiRpcRuntime implements AttemptRuntimePort {
       cwd: input.cwd,
       resultPath: input.attempt.resultPath,
       runtimeRoot,
+      ...(pinnedContent ? {
+        pinnedTaskData: { version: 1, digest: digest(pinnedContent), content: pinnedContent },
+      } : {}),
       snapshot: snapshot as PiRpcPlan["snapshot"],
     };
   }
@@ -323,6 +332,8 @@ function assertRuntimePolicy(receipt: ReadyReceipt, plan: PiRpcPlan): void {
   if (
     receipt.autoRetryDisableAccepted !== true
     || receipt.autoCompactionEnabled !== false
+    || receipt.compactionMode !== plan.snapshot.compactionMode
+    || !sameJson(receipt.compactionPolicy, plan.snapshot.compactionPolicy)
     || receipt.credentialMode !== plan.snapshot.credentialMode
     || receipt.isolatedAgentDir !== join(plan.runtimeRoot, "pi-agent")
   ) {

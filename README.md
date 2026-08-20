@@ -19,7 +19,7 @@ This project is not a general multi-agent platform, a parallel scheduler, an OS 
 - Reviewer remains fresh, read-only, exact-HEAD, two-axis, and independently validated.
 - Runtime events, Herdr status, child completion, and short probes are observations, not delivery truth.
 - Analyst advises only; policy or an exact human gate authorizes recovery.
-- Pi RPC auto-retry and auto-compaction remain disabled.
+- Pi RPC auto-retry and Pi-owned auto-compaction remain disabled. Worker RPC alone may use the snapshot-bound, one-shot controlled threshold compaction; Reviewer compaction stays disabled.
 - Credentials never enter results, receipts, the ledger, documentation, or copied credential files.
 
 ## Prerequisites and exact installation
@@ -45,6 +45,8 @@ Copy [`harness.config.example.json`](./harness.config.example.json) to a private
 - Worker/Reviewer provider and model selectors.
 
 Preserve the example's complete role argv, ambient-discovery hardening flags, tools, thinking levels, and extension order. Keep the visible `reviewerArgv` provider/model aligned with the active Reviewer profile. Never place the state directory inside the source checkout or worktree root.
+
+The optional second Worker extension is exactly `@dietrichgebert/ponytail` `4.9.0`. When declared, Harness forces full mode while suppressing status/startup UI; it never relaxes the Worker UI-request deny policy.
 
 Validate external access before running:
 

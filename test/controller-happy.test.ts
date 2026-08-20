@@ -168,6 +168,7 @@ test("config accepts the declared Ponytail Pi extension only as the second Worke
     writeFileSync(extension, "export default function ponytail() {}\n");
     writeFileSync(join(root, "package.json"), JSON.stringify({
       name: "@dietrichgebert/ponytail",
+      version: "4.9.0",
       pi: { extensions: ["./pi-extension/index.js"] },
     }));
     new HarnessController({
@@ -182,6 +183,23 @@ test("config accepts the declared Ponytail Pi extension only as the second Worke
       ids: new SequenceIds(),
       preflight: new FakeRuntimePreflight(),
     });
+    writeFileSync(join(root, "package.json"), JSON.stringify({
+      name: "@dietrichgebert/ponytail",
+      version: "4.9.1",
+      pi: { extensions: ["./pi-extension/index.js"] },
+    }));
+    assert.throws(() => new HarnessController({
+      config: { ...config, workerArgv: [...validWorkerArgv, "--extension", extension] },
+      store: new MemoryStore(),
+      github: new FakeGitHub([]),
+      git: new FakeGit(),
+      herdr: new FakeHerdr([]),
+      analyst: new FakeAnalyst(),
+      evidence: new FakeEvidence(),
+      clock: new FakeClock(),
+      ids: new SequenceIds(),
+      preflight: new FakeRuntimePreflight(),
+    }), /ponytail/i);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -469,6 +487,7 @@ test("Pi RPC canary preflights and routes only Worker through its isolated runti
   const herdr = new FakeHerdr([{ lane: "reviewer", status: "pass" }]);
   const workerRpc = new FakeHerdr([{ lane: "worker", status: "completed", headSha: "b".repeat(40) }]);
   const preflight = new FakeRuntimePreflight();
+  preflight.version = "0.84.2";
   const controller = new HarnessController({
     config: { ...config, workerRuntime: "pi-rpc", workerArgv: rpcWorkerArgv },
     store,
@@ -491,6 +510,15 @@ test("Pi RPC canary preflights and routes only Worker through its isolated runti
   assert.deepEqual(herdr.prompts.map((prompt) => prompt.skill), ["code-review"]);
   assert.equal(store.state.activeJob?.attempts[0]?.executionSnapshot?.adapter, "pi-rpc");
   assert.equal(store.state.activeJob?.attempts[0]?.executionSnapshot?.retryMode, "disabled");
+  assert.equal(store.state.activeJob?.attempts[0]?.executionSnapshot?.compactionMode, "controlled-threshold");
+  assert.deepEqual(store.state.activeJob?.attempts[0]?.executionSnapshot?.compactionPolicy, {
+    triggerPercent: 75,
+    maxCompactions: 1,
+    keepRecentTokens: 20_000,
+    overflowContinuation: false,
+  });
+  assert.equal(/Objective:/.test(workerRpc.prompts[0]?.text ?? ""), false);
+  assert.match(workerRpc.prompts[0]?.text ?? "", /pinned task data is injected before every model request/i);
   assert.equal(store.state.activeJob?.attempts[1]?.executionSnapshot?.adapter, "herdr-pi-cli");
   assert.deepEqual(store.state.activeJob?.attempts[0]?.executionSnapshot?.argv.slice(-2), ["--mode", "rpc"]);
   const rpcProbes = preflight.providerCalls.filter((call) => call.lane === "worker");
@@ -509,6 +537,7 @@ test("Pi RPC Worker admission failure makes no durable selection or claim", asyn
   const store = new MemoryStore();
   const github = new FakeGitHub([issue({ number: 38, title: "RPC admission" })]);
   const preflight = new FakeRuntimePreflight();
+  preflight.version = "0.84.2";
   preflight.providerFailure = new Error("subscription OAuth unavailable");
   const controller = new HarnessController({
     config: { ...config, workerRuntime: "pi-rpc", workerArgv: rpcWorkerArgv },
@@ -533,6 +562,33 @@ test("Pi RPC Worker admission failure makes no durable selection or claim", asyn
   assert.equal(preflight.providerCalls[0]?.lane, "worker");
   assert.equal(preflight.providerCalls[0]?.agentDir, "/state/preflight/pi-rpc-worker-agent");
   assert.equal(preflight.providerCalls[0]?.rpcHost?.kind, "runtime");
+});
+
+test("controlled Worker compaction rejects older Pi before claim", async () => {
+  const store = new MemoryStore();
+  const github = new FakeGitHub([issue({ number: 380, title: "RPC version gate" })]);
+  const preflight = new FakeRuntimePreflight();
+  preflight.version = "0.84.1";
+  const controller = new HarnessController({
+    config: { ...config, workerRuntime: "pi-rpc", workerArgv: rpcWorkerArgv },
+    store,
+    github,
+    git: new FakeGit(),
+    herdr: new FakeHerdr([]),
+    piRpc: new FakeHerdr([]),
+    analyst: new FakeAnalyst(),
+    evidence: new FakeEvidence(),
+    clock: new FakeClock(),
+    ids: new SequenceIds(),
+    preflight,
+  });
+
+  const output = await controller.tick();
+
+  assert.equal(output.action, "preflight_failed");
+  assert.match(output.message, /requires Pi 0\.84\.2/);
+  assert.equal(store.state.activeJob, null);
+  assert.deepEqual(github.claims, []);
 });
 
 test("Pi RPC routes Reviewer through the durable runtime with one bound custom model config", async () => {

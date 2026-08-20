@@ -1,10 +1,19 @@
 #!/usr/bin/env node
+import { createHash } from "node:crypto";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 let buffer = "";
 let autoCompactionEnabled = true;
 let splitStateResponse = true;
+
+if (process.env.FAKE_PI_EXPECT_PONYTAIL_ENV === "1" && (
+  process.env.PONYTAIL_DEFAULT_MODE !== "full"
+  || process.env.PONYTAIL_HIDE_STATUS !== "1"
+  || process.env.PONYTAIL_QUIET_STARTUP !== "1"
+)) {
+  throw new Error("missing headless Ponytail environment");
+}
 
 if (process.env.FAKE_PI_MALFORMED_SECRET_PHASE === "before-ready") {
   process.stdout.write(`${process.env.FAKE_PI_MALFORMED_SECRET}\n`);
@@ -83,7 +92,46 @@ function respond(command) {
   if (command.type !== "prompt") return;
 
   emit({ type: "agent_start" });
+  if (process.env.FAKE_PI_WORKER_UI_REQUEST === "1") {
+    emit({ type: "extension_ui_request", id: "worker-ui", method: "setStatus", widgetKey: "ponytail" });
+  }
   emit({ type: "turn_start" });
+  if (["1", "fail"].includes(process.env.FAKE_PI_CONTROLLED_COMPACTION)) {
+    emitProjected({
+      type: "compaction_start",
+      source: "harness-controlled",
+      reason: "threshold",
+      count: 1,
+      triggerPercent: 75,
+      contextTokens: 80_000,
+      contextWindow: 100_000,
+      willRetry: false,
+    });
+    emitProjected(process.env.FAKE_PI_CONTROLLED_COMPACTION === "fail" ? {
+      type: "compaction_end",
+      source: "harness-controlled",
+      reason: "threshold",
+      count: 1,
+      triggerPercent: 75,
+      contextTokens: 80_000,
+      contextWindow: 100_000,
+      willRetry: false,
+      outcome: "failed",
+    } : {
+      type: "compaction_end",
+      source: "harness-controlled",
+      reason: "threshold",
+      count: 1,
+      triggerPercent: 75,
+      contextTokens: 80_000,
+      contextWindow: 100_000,
+      willRetry: false,
+      outcome: "completed",
+      tokensBefore: 80_000,
+      estimatedTokensAfter: 12_000,
+      summaryDigest: "a".repeat(64),
+    });
+  }
   if (process.env.FAKE_PI_WAIT_FOR_ABORT === "1") return;
   if (["success", "error"].includes(process.env.FAKE_PI_TOOL_BEFORE_FAILURE)) {
     emit({ type: "tool_execution_start", toolCallId: "tool-1", toolName: "read", args: {} });
@@ -170,6 +218,15 @@ function writePrivateAuth() {
 
 function emit(value) {
   process.stdout.write(`${JSON.stringify(value)}\n`);
+}
+
+function emitProjected(value) {
+  const serialized = JSON.stringify(value);
+  emit({
+    ...value,
+    payloadBytes: Buffer.byteLength(serialized),
+    payloadDigest: createHash("sha256").update(serialized).digest("hex"),
+  });
 }
 
 function emitAcrossUtf8Boundary(value) {

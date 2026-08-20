@@ -10,7 +10,7 @@
 ## 决策
 
 1. Worker/Reviewer prompt 每个 Attempt 只 dispatch 一次；结果不确定时只观察，不重放。
-2. RPC runner 关闭 Pi auto-retry 与 auto-compaction。Controller 只保留一次 bounded same-Attempt reconciliation。
+2. RPC runner 关闭 Pi auto-retry 与 Pi-owned auto-compaction。Worker 仅允许 ADR 0003 定义的同一连续运行内受控压缩；它不是 prompt replay 或 workflow retry。Controller 只保留一次 bounded same-Attempt reconciliation。
 3. 任何 workflow retry 都创建 fresh Worker 或 Reviewer；旧 pane 在新 Attempt 前关闭。
 4. review changes、approved recovery 与 CI rework 统一使用 `TypedHandoff`。
 5. Handoff 必须绑定来源 job revision、task/result/evidence/Incident/Analysis/Approval，以及目标 lane、base、expected HEAD 与 expected remote HEAD。

@@ -53,6 +53,7 @@ export type PiRpcFailureDiagnostic = {
 
 export const PI_RPC_PROVIDER_APIS = [
   "anthropic-messages",
+  "openai-codex-responses",
   "openai-responses",
   "openai-completions",
   "unknown",

@@ -45,6 +45,8 @@
     "--no-themes",
     "--extension",
     "/absolute/path/to/HerdrHarness-lite/pi/extensions/worker-tools.js",
+    "--extension",
+    "/absolute/path/to/.pi/agent/git/github.com/DietrichGebert/ponytail/pi-extension/index.js",
     "--skill",
     "/absolute/path/to/.agents/skills/implement",
     "--skill",

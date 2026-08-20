@@ -8,13 +8,20 @@ import { digest } from "./model.js";
 import { executionResource, executionResourceDigest } from "./attempt-plan.js";
 import {
   readJson,
+  readJsonIfExists,
   preparePiRpcAgentDir,
+  sameJson,
   spoolPath,
   type PiRpcPlan,
   writeAtomicJson,
   writeExclusiveJson,
 } from "./pi-rpc-spool.js";
-import { isQualifiedPiRpcVersion } from "./compatibility.js";
+import {
+  isQualifiedPiRpcVersion,
+  isSupportedPonytailExtension,
+  isWorkerControlledCompactionPolicy,
+  QUALIFIED_CONTROLLED_COMPACTION_PI_VERSION,
+} from "./compatibility.js";
 import {
   classifyProviderFailure,
   classifyPiRpcRunnerFailure,
@@ -220,6 +227,8 @@ async function main(argv: string[]): Promise<void> {
   let toolExecutionCount = 0;
   let toolErrorCount = 0;
   let transcriptBytes = 0;
+  let controlledCompactionPhase: "idle" | "started" | "completed" = "idle";
+  let controlledCompactionReceipt: JsonObject | null = null;
 
   const persistEvent = (event: JsonObject): void => {
     const reportedType = typeof event.type === "string" ? event.type : "";
@@ -274,24 +283,35 @@ async function main(argv: string[]): Promise<void> {
     if (type === "extension_ui_request" && !allowedReviewerLifecycleCleanup(plan, event, settled, agentStarts)) {
       policyViolation = "forbidden Pi RPC control event";
     }
+    if (type === "compaction_start" || type === "compaction_end") {
+      const accepted = acceptControlledCompactionEvent(plan, event, controlledCompactionPhase);
+      controlledCompactionPhase = accepted.phase;
+      if (accepted.receipt) controlledCompactionReceipt = accepted.receipt;
+      if (accepted.error) policyViolation = accepted.error;
+    }
     if ([
-      "auto_retry_start", "auto_retry_end", "compaction_start", "compaction_end", "queue_update",
+      "auto_retry_start", "auto_retry_end", "queue_update",
       "extension_ui_response",
       "summarization_retry_scheduled", "summarization_retry_attempt_start", "summarization_retry_finished",
     ].includes(type)) {
       policyViolation = "forbidden Pi RPC control event";
     }
-    if (type === "agent_settled") settled = true;
+    if (type === "agent_settled") {
+      if (controlledCompactionPhase === "started") policyViolation = "controlled compaction did not finish before settlement";
+      settled = true;
+    }
   };
 
   try {
     const isolatedAgentDir = preparePiRpcAgentDir(plan.snapshot);
+    const pinnedTaskDataPath = preparePinnedTaskData(plan);
     child = spawn(process.execPath, [
       sdkEntryPath,
       "--pi-executable", plan.snapshot.executable,
       "--expected-version", plan.snapshot.runtimeVersion,
       ...credentialHostArgs(plan),
       "--private-agent-dir", isolatedAgentDir,
+      ...runtimeControlHostArgs(plan, pinnedTaskDataPath),
       "--",
       ...plan.snapshot.argv,
     ], {
@@ -302,6 +322,11 @@ async function main(argv: string[]): Promise<void> {
         ...(plan.snapshot.context!.lane === "reviewer"
           ? { [REVIEW_ORIGINAL_AGENT_DIR_ENV]: plan.snapshot.context!.agentDir }
           : {}),
+        ...(hasSupportedPonytail(plan) ? {
+          PONYTAIL_DEFAULT_MODE: "full",
+          PONYTAIL_HIDE_STATUS: "1",
+          PONYTAIL_QUIET_STARTUP: "1",
+        } : {}),
       },
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -324,6 +349,8 @@ async function main(argv: string[]): Promise<void> {
       piPid: child.pid,
       autoRetryDisableAccepted: true,
       autoCompactionEnabled: false,
+      compactionMode: plan.snapshot.compactionMode,
+      ...(plan.snapshot.compactionPolicy ? { compactionPolicy: plan.snapshot.compactionPolicy } : {}),
       credentialMode: plan.snapshot.credentialMode,
       isolatedAgentDir,
     });
@@ -371,6 +398,7 @@ async function main(argv: string[]): Promise<void> {
     failureStage = "credential-postflight";
     credentialHostArgs(plan);
     preparePiRpcAgentDir(plan.snapshot);
+    preparePinnedTaskData(plan);
     const assistantTerminalFailure = assistantFailure as AssistantFailure | null;
     const terminalError = policyViolation ?? assistantTerminalFailure?.error ?? null;
     const ok = terminalError === null && !terminationRequested && settled;
@@ -388,6 +416,7 @@ async function main(argv: string[]): Promise<void> {
         childExit,
       } : {}),
       agentSettled: settled,
+      ...(controlledCompactionReceipt ? { controlledCompaction: controlledCompactionReceipt } : {}),
     });
     writeAtomicJson(spoolPath(plan.runtimeRoot, "terminated.json"), { ...identity, ok: true, reason: "settled and child exited" });
   } catch (error) {
@@ -422,6 +451,7 @@ async function main(argv: string[]): Promise<void> {
       agentEndObserved,
       lastEventType,
       eventCount,
+      ...(controlledCompactionReceipt ? { controlledCompaction: controlledCompactionReceipt } : {}),
       stdoutEnded: client?.outputFinished ?? false,
       ...(cleanupFailureCode ? { cleanupFailureCode } : {}),
     });
@@ -505,6 +535,17 @@ function validatePlan(plan: PiRpcPlan): void {
     ? plan.snapshot.credentialMode === "canonical-oauth"
     : lane === "reviewer"
       && (plan.snapshot.credentialMode === "canonical-oauth" || plan.snapshot.credentialMode === "canonical-model-config");
+  const validCompaction = lane === "worker"
+    ? plan.snapshot.runtimeVersion === QUALIFIED_CONTROLLED_COMPACTION_PI_VERSION
+      && plan.snapshot.compactionMode === "controlled-threshold"
+      && isWorkerControlledCompactionPolicy(plan.snapshot.compactionPolicy)
+      && plan.pinnedTaskData?.version === 1
+      && /^[0-9a-f]{64}$/i.test(plan.pinnedTaskData.digest)
+      && digest(plan.pinnedTaskData.content) === plan.pinnedTaskData.digest
+    : lane === "reviewer"
+      && plan.snapshot.compactionMode === "disabled"
+      && plan.snapshot.compactionPolicy === undefined
+      && plan.pinnedTaskData === undefined;
   if (
     plan.version !== 1
     || !plan.attemptId
@@ -514,7 +555,7 @@ function validatePlan(plan: PiRpcPlan): void {
     || plan.snapshot.adapter !== "pi-rpc"
     || !isQualifiedPiRpcVersion(plan.snapshot.runtimeVersion)
     || plan.snapshot.retryMode !== "disabled"
-    || plan.snapshot.compactionMode !== "disabled"
+    || !validCompaction
     || (lane !== "worker" && lane !== "reviewer")
     || !validCredentialMode
     || !plan.snapshot.provider
@@ -525,6 +566,136 @@ function validatePlan(plan: PiRpcPlan): void {
     || !plan.snapshot.argv.includes("rpc")
   ) throw new Error("invalid Pi RPC runtime plan");
   credentialHostArgs(plan);
+}
+
+function acceptControlledCompactionEvent(
+  plan: PiRpcPlan,
+  event: JsonObject,
+  phase: "idle" | "started" | "completed",
+): { phase: "idle" | "started" | "completed"; receipt: JsonObject | null; error: string | null } {
+  const policy = plan.snapshot.compactionPolicy;
+  const type = event.type;
+  const baseValid = plan.snapshot.context?.lane === "worker"
+    && plan.snapshot.compactionMode === "controlled-threshold"
+    && isWorkerControlledCompactionPolicy(policy)
+    && event.source === "harness-controlled"
+    && event.reason === "threshold"
+    && event.count === 1
+    && event.triggerPercent === policy?.triggerPercent
+    && event.willRetry === false
+    && typeof event.payloadDigest === "string"
+    && /^[0-9a-f]{64}$/.test(event.payloadDigest)
+    && Number.isSafeInteger(event.payloadBytes)
+    && Number(event.payloadBytes) >= 0;
+  if (!baseValid) return { phase, receipt: null, error: "invalid controlled compaction event" };
+  if (type === "compaction_start") {
+    const allowed = new Set([
+      "type", "source", "reason", "count", "triggerPercent", "contextTokens", "contextWindow", "willRetry",
+      "payloadBytes", "payloadDigest",
+    ]);
+    const contextTokens = Number(event.contextTokens);
+    const contextWindow = Number(event.contextWindow);
+    if (phase !== "idle" || Object.keys(event).some((key) => !allowed.has(key))
+      || !Number.isSafeInteger(contextTokens) || contextTokens <= 0
+      || !Number.isSafeInteger(contextWindow) || contextWindow <= 0
+      || contextTokens * 100 < contextWindow * policy!.triggerPercent) {
+      return { phase, receipt: null, error: "invalid controlled compaction start" };
+    }
+    return { phase: "started", receipt: null, error: null };
+  }
+  const allowed = new Set([
+    "type", "source", "reason", "count", "triggerPercent", "contextTokens", "contextWindow", "willRetry", "outcome", "tokensBefore",
+    "estimatedTokensAfter", "summaryDigest", "payloadBytes", "payloadDigest",
+  ]);
+  const tokensBefore = Number(event.tokensBefore);
+  const estimatedTokensAfter = Number(event.estimatedTokensAfter);
+  const contextTokens = Number(event.contextTokens);
+  const contextWindow = Number(event.contextWindow);
+  if (type !== "compaction_end" || phase !== "started" || Object.keys(event).some((key) => !allowed.has(key))) {
+    return { phase, receipt: null, error: "controlled compaction changed shape" };
+  }
+  if (event.outcome === "failed") {
+    const failureKeys = new Set([
+      "type", "source", "reason", "count", "triggerPercent", "contextTokens", "contextWindow", "willRetry", "outcome", "payloadBytes", "payloadDigest",
+    ]);
+    if (Object.keys(event).some((key) => !failureKeys.has(key))
+      || !Number.isSafeInteger(contextTokens) || contextTokens <= 0
+      || !Number.isSafeInteger(contextWindow) || contextWindow <= 0
+      || contextTokens * 100 < contextWindow * policy!.triggerPercent) {
+      return { phase, receipt: null, error: "controlled compaction failure changed shape" };
+    }
+    return {
+      phase: "completed",
+      receipt: {
+        count: 1,
+        triggerPercent: policy!.triggerPercent,
+        contextTokens,
+        contextWindow,
+        outcome: "failed",
+        willRetry: false,
+      },
+      error: "controlled compaction failed",
+    };
+  }
+  if (event.outcome !== "completed"
+    || !Number.isSafeInteger(contextTokens) || contextTokens <= 0
+    || !Number.isSafeInteger(contextWindow) || contextWindow <= 0
+    || contextTokens * 100 < contextWindow * policy!.triggerPercent
+    || !Number.isSafeInteger(tokensBefore) || tokensBefore < 0
+    || !Number.isSafeInteger(estimatedTokensAfter) || estimatedTokensAfter < 0
+    || typeof event.summaryDigest !== "string" || !/^[0-9a-f]{64}$/.test(event.summaryDigest)) {
+    return { phase, receipt: null, error: "controlled compaction completion changed shape" };
+  }
+  return {
+    phase: "completed",
+    receipt: {
+      count: 1,
+      triggerPercent: policy!.triggerPercent,
+      contextTokens,
+      contextWindow,
+      outcome: "completed",
+      tokensBefore,
+      estimatedTokensAfter,
+      summaryDigest: event.summaryDigest,
+      willRetry: false,
+    },
+    error: null,
+  };
+}
+
+function preparePinnedTaskData(plan: PiRpcPlan): string | null {
+  if (!plan.pinnedTaskData) return null;
+  const path = spoolPath(plan.runtimeRoot, "pinned-task-data.json");
+  const value = {
+    version: 1,
+    attemptId: plan.attemptId,
+    planDigest: plan.planDigest,
+    digest: plan.pinnedTaskData.digest,
+    content: plan.pinnedTaskData.content,
+  };
+  const existing = readJsonIfExists<typeof value>(path);
+  if (existing && !sameJson(existing, value)) throw new Error("Pi RPC pinned task data changed after preparation");
+  if (!existing) writeExclusiveJson(path, value);
+  return path;
+}
+
+function runtimeControlHostArgs(plan: PiRpcPlan, pinnedTaskDataPath: string | null): string[] {
+  if (plan.snapshot.context?.lane !== "worker") return [];
+  if (!pinnedTaskDataPath || !plan.pinnedTaskData || !plan.snapshot.compactionPolicy) {
+    throw new Error("controlled Worker runtime has no pinned task data or compaction policy");
+  }
+  return [
+    "--pinned-task-data-path", pinnedTaskDataPath,
+    "--pinned-task-data-digest", plan.pinnedTaskData.digest,
+    "--controlled-compaction-policy", JSON.stringify(plan.snapshot.compactionPolicy),
+  ];
+}
+
+function hasSupportedPonytail(plan: PiRpcPlan): boolean {
+  return plan.snapshot.context?.lane === "worker"
+    && plan.snapshot.resources.some((resource) => (
+      resource.kind === "extension" && isSupportedPonytailExtension(resource.path)
+    ));
 }
 
 function allowedReviewerLifecycleCleanup(plan: PiRpcPlan, event: JsonObject, settled: boolean, agentStarts: number): boolean {
