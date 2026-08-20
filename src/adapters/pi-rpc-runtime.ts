@@ -14,7 +14,7 @@ import {
   type PiRpcPlan,
   writeExclusiveJson,
 } from "../pi-rpc-spool.js";
-import { assertQualifiedPiRpcVersion } from "../pi-rpc-compat.js";
+import { assertQualifiedPiRpcVersion } from "../compatibility.js";
 import {
   formatSafePiRpcDiagnostic,
   PiRpcRuntimeFailure,

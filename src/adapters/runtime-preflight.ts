@@ -5,7 +5,7 @@ import { accessSync, constants, existsSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { preparePiRpcAgentDirAt } from "../pi-rpc-spool.js";
-import { assertQualifiedPiRpcVersion } from "../pi-rpc-compat.js";
+import { assertQualifiedPiRpcVersion } from "../compatibility.js";
 import { executionResourceDigest } from "../attempt-plan.js";
 
 const PROVIDER_MARKER = "HERDR_HARNESS_PROVIDER_OK";

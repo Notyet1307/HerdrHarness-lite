@@ -3,6 +3,7 @@ import { Buffer } from "node:buffer";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { attemptPlanDigest, buildExecutionSnapshot, executionPlanMatches, executionResource } from "./attempt-plan.js";
 import { buildAttemptContextEnvelope } from "./attempt-context.js";
+import { SUPPORTED_PI_SUBAGENTS_VERSION } from "./compatibility.js";
 import { selectNextTask } from "./eligibility.js";
 import { approvedRecoveryHandoff, bindPendingHandoff, reviewChangesHandoff } from "./handoff.js";
 import {
@@ -74,7 +75,6 @@ const REVIEW_DESCRIPTOR_ENV = "HERDR_HARNESS_REVIEW_DESCRIPTOR";
 const REVIEW_CANONICAL_AGENT_DIR_ENV = "HERDR_HARNESS_REVIEW_CANONICAL_PI_AGENT_DIR";
 const PI_AGENT_DIR_ENV = "PI_CODING_AGENT_DIR";
 const REVIEW_SUBAGENT_CEILING_ENV = "PI_SUBAGENT_CAPABILITY_CEILING_V1";
-const SUPPORTED_PI_SUBAGENTS_VERSION = "0.42.1";
 const REVIEW_SUBAGENT_CEILING = Buffer.from(JSON.stringify({
   version: 1,
   allowedTools: ["find", "grep", "ls", "read"],

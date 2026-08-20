@@ -563,6 +563,7 @@ test("Pi RPC routes Reviewer through the durable runtime with one bound custom m
 
     assert.deepEqual(herdr.prompts.map((prompt) => prompt.skill), ["implement"]);
     assert.deepEqual(reviewerRpc.prompts.map((prompt) => prompt.skill), ["code-review"]);
+    assert.match(reviewerRpc.prompts[0]?.text ?? "", /Objective:\nImplement Reviewer RPC/);
     const reviewer = store.state.activeJob?.attempts.find((attempt) => attempt.lane === "reviewer");
     assert.equal(reviewer?.executionSnapshot?.adapter, "pi-rpc");
     assert.equal(reviewer?.executionSnapshot?.credentialMode, "canonical-model-config");

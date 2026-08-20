@@ -14,7 +14,7 @@ import {
   writeAtomicJson,
   writeExclusiveJson,
 } from "./pi-rpc-spool.js";
-import { isQualifiedPiRpcVersion } from "./pi-rpc-compat.js";
+import { isQualifiedPiRpcVersion } from "./compatibility.js";
 import {
   classifyProviderFailure,
   classifyPiRpcRunnerFailure,
