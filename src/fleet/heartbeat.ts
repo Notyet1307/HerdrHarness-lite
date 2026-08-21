@@ -1,0 +1,51 @@
+import { randomUUID } from "node:crypto";
+import { spawn } from "node:child_process";
+import { mkdirSync, renameSync, writeFileSync } from "node:fs";
+import { dirname, isAbsolute, join, resolve } from "node:path";
+
+const DEFAULT_INTERVAL_MS = 5_000;
+
+export function fleetHeartbeatPath(stateDir: string): string {
+  if (!isAbsolute(stateDir)) throw new Error("Fleet heartbeat stateDir must be absolute");
+  return join(stateDir, "fleet-supervisor-heartbeat.json");
+}
+
+export function startFleetHeartbeat(stateDir: string, intervalMs = DEFAULT_INTERVAL_MS): { stop(): void } {
+  const path = fleetHeartbeatPath(stateDir);
+  writeHeartbeat(path, process.pid);
+  const child = spawn(process.execPath, [
+    resolve(import.meta.dirname, "heartbeat.js"),
+    "pulse",
+    path,
+    String(process.pid),
+    String(intervalMs),
+  ], { stdio: "ignore" });
+  if (!child.pid) throw new Error("Fleet heartbeat process did not start");
+  child.unref();
+  return { stop: () => { child.kill("SIGTERM"); } };
+}
+
+function writeHeartbeat(path: string, parentPid: number): void {
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  const temporary = `${path}.${randomUUID()}.tmp`;
+  writeFileSync(temporary, `${JSON.stringify({ version: 1, parentPid, updatedAt: new Date().toISOString() })}\n`, { flag: "wx", mode: 0o600 });
+  renameSync(temporary, path);
+}
+
+function pulse(path: string, parentPid: number, intervalMs: number): void {
+  if (!isAbsolute(path) || !Number.isInteger(parentPid) || parentPid < 1 || !Number.isInteger(intervalMs) || intervalMs < 10) {
+    throw new Error("invalid Fleet heartbeat arguments");
+  }
+  while (process.ppid === parentPid) {
+    writeHeartbeat(path, parentPid);
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, intervalMs);
+  }
+}
+
+if (process.argv[2] === "pulse") {
+  try { pulse(process.argv[3] ?? "", Number(process.argv[4]), Number(process.argv[5])); }
+  catch (error) {
+    process.stderr.write(`FAIL: ${error instanceof Error ? error.message : String(error)}\n`);
+    process.exitCode = 1;
+  }
+}

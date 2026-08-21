@@ -19,11 +19,13 @@ const EMPTY_STATE: HarnessState = { version: 1, activeJob: null, terminalJobs: [
 export class JsonStateStore implements StateStore {
   private readonly statePath: string;
   private readonly eventPath: string;
+  private readonly degradationPath: string;
   private readonly lockPath: string;
 
   constructor(private readonly stateDir: string) {
     this.statePath = join(stateDir, "state.json");
     this.eventPath = join(stateDir, "events.jsonl");
+    this.degradationPath = join(stateDir, "events.degraded.json");
     this.lockPath = join(stateDir, "controller.lock");
   }
 
@@ -53,17 +55,34 @@ export class JsonStateStore implements StateStore {
       const temp = `${this.statePath}.tmp`;
       writeFileSync(temp, `${JSON.stringify(next, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
       renameSync(temp, this.statePath);
-      appendFileSync(
-        this.eventPath,
-        `${JSON.stringify({
-          savedAt: new Date().toISOString(),
-          expectedActiveRevision,
-          activeJobId: next.activeJob?.id ?? null,
-          activeRevision: next.activeJob?.revision ?? null,
-          activeState: next.activeJob?.state ?? null,
-        })}\n`,
-        { encoding: "utf8", mode: 0o600 },
-      );
+
+      // state.json is the authority. Once the atomic rename succeeds, an audit
+      // append failure must not tell the Controller that the transition rolled
+      // back and thereby invite replay of an external side effect.
+      try {
+        appendFileSync(
+          this.eventPath,
+          `${JSON.stringify({
+            savedAt: new Date().toISOString(),
+            expectedActiveRevision,
+            activeJobId: next.activeJob?.id ?? null,
+            activeRevision: next.activeJob?.revision ?? null,
+            activeState: next.activeJob?.state ?? null,
+          })}\n`,
+          { encoding: "utf8", mode: 0o600 },
+        );
+      } catch (error) {
+        try {
+          writeFileSync(this.degradationPath, `${JSON.stringify({
+            version: 1,
+            stateCommittedAt: new Date().toISOString(),
+            auditAppendError: error instanceof Error ? error.message : String(error),
+          }, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+        } catch {
+          // The authoritative transition is already committed. The Controller
+          // must continue from state.json rather than replaying it.
+        }
+      }
     } finally {
       closeSync(fd);
       try {
