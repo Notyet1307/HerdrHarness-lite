@@ -4,12 +4,13 @@
 
 ## 1. 范围与非目标
 
-HerdrHarness Lite 是一个单槽、持久化、fail-closed 的 GitHub Issue 交付控制器。它从符合准入条件的 Issue 中选择一个任务，绑定事实与执行计划，驱动 fresh Worker 和 fresh Reviewer，验证 Git fixed point，发布 PR，等待 required checks 与 merge，最后归档。
+HerdrHarness Lite 的单项目核心是一个单槽、持久化、fail-closed 的 GitHub Issue 交付控制器。每个项目独立选择并交付一个符合准入条件的任务，绑定事实与执行计划，驱动 fresh Worker 和 fresh Reviewer，验证 Git fixed point，发布 PR，等待 required checks 与 merge，最后归档。可选 Fleet Supervisor 在项目进程层同时运行多个隔离的单项目 Controller，但不会合并它们的 workflow authority。
 
 当前范围：
 
 - 一个 Controller 实例管理一个配置 lane；
 - 一个 lane 同时最多有一个 active Job；
+- 可选 Fleet Supervisor 同时监督多个配置 lane；每个 lane 仍拥有独立 repo、source、state、worktree、lease 和 Herdr session；
 - GitHub Issue 与 strict Map frontier 负责待办选择；
 - Herdr 承载 worktree、pane 和 agent 生命周期；
 - Worker 与 Reviewer 可分别使用 `herdr-pi-cli` 或 `pi-rpc` Attempt adapter；
@@ -19,7 +20,7 @@ HerdrHarness Lite 是一个单槽、持久化、fail-closed 的 GitHub Issue 交
 非目标：
 
 - 通用多代理平台或任意深度 agent tree；
-- 多任务并行调度器；
+- 同一项目内部的多任务并行调度器；项目级并发由 Fleet 通过独立 Controller 进程提供；
 - 用 Pi session、Herdr 状态或通知状态替代交付 ledger；
 - 让 Analyst、Observer、Telegram 或候选仓库指令获得 workflow authority；
 - 通过恢复旧的 blocked Agent 上下文继续执行；
@@ -46,6 +47,7 @@ HerdrHarness Lite 是一个单槽、持久化、fail-closed 的 GitHub Issue 交
 | Worker/Reviewer 结果 | Harness-owned durable result channel |
 | pane、agent、进程存活 | Herdr / Pi runtime |
 | 通知 offset、消息、callback | Observer / Bridge / Telegram |
+| 项目进程生命周期、退避、熔断、Supervisor 存活 | Fleet state / lease / heartbeat |
 
 Herdr `idle/done`、Pi runtime event、Reviewer child 完成或验证命令结束都不是交付完成。完成至少需要身份绑定的 durable result 与对应 Git/GitHub 验证。
 
@@ -163,7 +165,7 @@ analyst_unavailable
 
 ## 5. 单写 Controller 与持久化
 
-`HarnessController.tick()` 是自动状态迁移入口。它读取当前 state，按 `JobState` 执行一个分支，并在一次 tick 中最多持久化一次状态迁移后返回。`run` 只是持有 lease 并循环调用 `tick()`。
+`HarnessController.tick()` 是自动状态迁移入口。它读取当前 state，按 `JobState` 执行一个分支，并在一次 tick 中最多持久化一次状态迁移后返回。`src/controller.ts` 只保留公开 facade 与状态分发；task、Attempt、runtime、delivery、recovery 和 config 逻辑分别位于 `src/controller/` 的聚焦模块。单项目 `run` 持有 lease 并循环调用 `tick()`，同时通过 signal latch 响应 `SIGINT`/`SIGTERM`，使 heartbeat 与 lease 走正常 `finally` 清理路径。
 
 `JsonStateStore` 使用：
 
@@ -292,7 +294,15 @@ Analyst `hold` 不授权 retry。`reassess` 只创建新的可审计 Incident/An
 | 模块 | 当前职责 |
 | --- | --- |
 | `model.ts` | 领域记录、状态集合、digest 与 invariants |
-| `controller.ts` | 单槽生命周期编排与外部 gate 顺序 |
+| `controller.ts` | 公开 `HarnessController` facade 与 `JobState` 分发 |
+| `controller/task-lifecycle.ts` | 选择、claim、worktree 与归档 |
+| `controller/attempt-*` | Attempt 准备、驱动、完整性、收口与 bounded reconciliation |
+| `controller/runtime-preflight.ts` | Provider、Docker、Pi 与 execution snapshot gate |
+| `controller/delivery.ts` | PR、CI、base refresh 与 merge observation |
+| `controller/recovery-flow.ts` | EvidencePack、Analyst、late result、CI reconciliation 与 fresh retry |
+| `controller/config-validation.ts` | 单项目路径、runtime 与 Pi role contract |
+| `fleet-cli.ts` / `fleet/*` | 多项目配置隔离、进程监督、退避、熔断、状态与聚合观察 |
+| `shutdown-signal.ts` | 单项目长运行循环的可中断 poll 与正常资源释放 |
 | `eligibility.ts` | Issue 准入与 strict Map frontier |
 | `policy.ts` | Incident、EvidencePack、result validation、automatic recovery 与 OperatorAction 投影 |
 | `recovery.ts` | approval、reassessment、decision resolution、cancellation 的精确 CAS gate |
@@ -324,6 +334,22 @@ Analyst `hold` 不授权 retry。`reassess` 只创建新的可审计 Incident/An
 - `pendingBrief` 只读存在，用于拒绝旧自由文本续跑；新状态只写 `pendingHandoff`；
 - policy 保留旧 Incident 形态的有界 reassessment migration；
 - `approve`、`reassess`、`resolve-decision`、`cancel` 仍是 CLI compatibility entrypoints；
-- Hermes plugin、Hermes-named scripts/config、fleet config 与 Observer state migration 仍可能被既有部署使用。
+- Hermes plugin、Hermes-named scripts/config、Telegram fleet config 与 Observer state migration 仍可能被既有部署使用。
+
+## 13. 项目级 Fleet Supervisor
+
+Fleet 的并发单位是项目配置 lane，不是单个 Issue。每个启用项目由原单项目 CLI 的独立子进程运行，继续使用自己的 Controller ledger、Controller lease、heartbeat、Git checkout、worktree root 和 Herdr session。
+
+启动任何子进程前，Fleet fail closed 校验重复 project ID、配置路径、GitHub repo、Herdr session，以及 Fleet/项目内部和项目之间所有 `localPath`、`stateDir`、`worktreeRoot` 的相等、父子或符号链接重叠。
+
+Fleet 只持久化项目进程生命周期：`pending`、`starting`、`running`、`adopted`、`backoff`、`tripped`、`stopping`、`stopped`、`disabled`、`unselected`、`error`。它不能 claim Issue、创建 Attempt、批准 recovery、push、publish 或 merge。
+
+已存在且持有有效 Controller lease 的项目进入 `adopted`，Fleet 只观察其存活，不创建第二写者。Fleet 自己拥有的子进程异常退出时，仅该项目进入指数退避或熔断；兄弟项目不会被取消。Supervisor 只在退出时终止自己拥有的子进程，不杀死 adopted Controller。
+
+Fleet 加载时绑定每个项目配置的 digest，并把该 digest 交给单项目 CLI 在产生项目副作用前复核。运行中的 Supervisor 不热加载项目配置；配置漂移只会让新 child fail closed，修改后必须重启 Fleet 重新验证全部隔离边界。
+
+项目的重启历史和熔断状态按项目配置 digest 恢复；其他项目或 Fleet 全局配置变化不能隐式重置该项目的故障预算。child stdout/stderr 只以带项目身份的 envelope 转发，不复制进持久 Fleet state。
+
+Fleet 状态位于独立 `fleet-state.json`，项目业务真相仍位于各项目 `state.json`。Supervisor 在启动 child 前要求初始 Fleet checkpoint 成功；运行中的观测 checkpoint 失败只告警并继续隔离监督，避免 Fleet 存储降级扩散成兄弟项目失控。两类状态在原子提交成功后，即使后续 audit append 失败，也不得向调用方伪装成状态未提交。
 
 删除这些边界前必须先盘点真实 ledger、进程参数、配置和 transport 流量，并提供迁移、测试与回滚证据。

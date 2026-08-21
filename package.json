@@ -18,6 +18,7 @@
   },
   "bin": {
     "herdr-harness-lite": "./dist/src/cli.js",
+    "herdr-harness-fleet": "./dist/src/fleet-cli.js",
     "codex-analyst-wrapper": "./dist/src/codex-analyst-wrapper.js"
   },
   "pi": {

@@ -14,8 +14,10 @@ import { RuntimePreflightCli } from "./adapters/runtime-preflight.js";
 import { HarnessController } from "./controller.js";
 import { startControllerHeartbeat } from "./controller-heartbeat.js";
 import { acquireControllerLease } from "./controller-lease.js";
+import { digest } from "./model.js";
 import { projectOperatorState } from "./policy.js";
 import { approveRecovery, cancelHeldJob, reassessIncident, resolveDecision } from "./recovery.js";
+import { installProcessShutdownSignal } from "./shutdown-signal.js";
 import type { Clock, HarnessConfig, IdGenerator } from "./ports.js";
 
 const usage = `Usage:
@@ -56,6 +58,10 @@ async function main(argv: string[]): Promise<number> {
   const configPath = flag(argv, "--config");
   if (!configPath) throw new Error("--config is required");
   const config = loadConfig(configPath);
+  const expectedConfigDigest = flag(argv, "--expected-config-digest");
+  if (expectedConfigDigest !== null && digest(config) !== expectedConfigDigest) {
+    throw new Error("project config changed after Fleet validation");
+  }
   const store = new JsonStateStore(config.stateDir);
   const clock = new SystemClock();
   const ids = new UuidIds();
@@ -131,15 +137,17 @@ async function main(argv: string[]): Promise<number> {
     const pollMs = optionalIntegerFlag(argv, "--poll-ms") ?? 15_000;
     const maxCycles = optionalIntegerFlag(argv, "--max-cycles");
     if (pollMs < 100) throw new Error("--poll-ms must be at least 100");
+    const shutdown = installProcessShutdownSignal();
     const heartbeat = startControllerHeartbeat(config.stateDir);
     try {
       let cycle = 0;
       for (;;) {
+        if (shutdown.requested) return 0;
         cycle += 1;
         const output = await controller.tick();
         process.stdout.write(`${JSON.stringify({ cycle, ...output })}\n`);
         if (maxCycles !== null && cycle >= maxCycles) return output.ok ? 0 : 1;
-        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, pollMs);
+        if (await shutdown.wait(pollMs)) return 0;
       }
     } finally {
       heartbeat.stop();

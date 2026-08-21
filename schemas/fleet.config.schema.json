@@ -1,0 +1,112 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://herdr-harness.local/schemas/fleet.config.schema.json",
+  "title": "HerdrHarness Fleet configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "stateDir",
+    "projects"
+  ],
+  "properties": {
+    "version": {
+      "const": 1
+    },
+    "name": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+    },
+    "stateDir": {
+      "type": "string",
+      "minLength": 1
+    },
+    "defaultPollMs": {
+      "type": "integer",
+      "minimum": 100,
+      "maximum": 3600000
+    },
+    "tickConcurrency": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 64
+    },
+    "tickTimeoutMs": {
+      "type": "integer",
+      "minimum": 1000,
+      "maximum": 3600000
+    },
+    "shutdownGraceMs": {
+      "type": "integer",
+      "minimum": 100,
+      "maximum": 300000
+    },
+    "maxLogBytes": {
+      "type": "integer",
+      "minimum": 4096,
+      "maximum": 1048576
+    },
+    "restartPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "initialBackoffMs": {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 3600000
+        },
+        "maxBackoffMs": {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 86400000
+        },
+        "maxRestarts": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "windowMs": {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 86400000
+        },
+        "stableAfterMs": {
+          "type": "integer",
+          "minimum": 1000,
+          "maximum": 86400000
+        }
+      }
+    },
+    "projects": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "config"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+          },
+          "config": {
+            "type": "string",
+            "minLength": 1
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "pollMs": {
+            "type": "integer",
+            "minimum": 100,
+            "maximum": 3600000
+          }
+        }
+      }
+    }
+  }
+}

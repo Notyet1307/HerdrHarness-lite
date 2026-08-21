@@ -8,6 +8,7 @@ declare const process: {
   env: Record<string, string | undefined>;
   stdout: { write(value: string): void };
   stderr: { write(value: string): void };
+  on(event: "SIGINT" | "SIGTERM", callback: () => void): void;
   exitCode?: number;
 };
 
@@ -61,7 +62,10 @@ declare module "node:child_process" {
       setEncoding(encoding: "utf8"): void;
       on(event: "data" | "end", callback: (...args: any[]) => void): void;
     };
-    stderr: { on(event: "data", callback: (...args: any[]) => void): void };
+    stderr: {
+      setEncoding(encoding: "utf8"): void;
+      on(event: "data", callback: (...args: any[]) => void): void;
+    };
     on(event: "exit" | "error", callback: (...args: any[]) => void): void;
     unref(): void;
     kill(signal?: "SIGTERM" | "SIGKILL"): boolean;

@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "name": "engineering-fleet",
+  "stateDir": "/var/lib/herdr-harness/fleet",
+  "defaultPollMs": 15000,
+  "tickConcurrency": 4,
+  "tickTimeoutMs": 600000,
+  "shutdownGraceMs": 15000,
+  "maxLogBytes": 65536,
+  "restartPolicy": {
+    "initialBackoffMs": 1000,
+    "maxBackoffMs": 60000,
+    "maxRestarts": 5,
+    "windowMs": 300000,
+    "stableAfterMs": 120000
+  },
+  "projects": [
+    {
+      "id": "product-api",
+      "config": "./configs/product-api.harness.json",
+      "enabled": true,
+      "pollMs": 15000
+    },
+    {
+      "id": "product-console",
+      "config": "./configs/product-console.harness.json",
+      "enabled": true,
+      "pollMs": 20000
+    }
+  ]
+}
