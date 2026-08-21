@@ -193,6 +193,9 @@ function attemptSummary(attempt: Attempt): unknown {
             ? { compactionPolicy: attempt.executionSnapshot.compactionPolicy }
             : {}),
           credentialMode: attempt.executionSnapshot.credentialMode,
+          runtimeTimeouts: attempt.executionSnapshot.runtimeTimeouts ?? null,
+          runtimeDeadlineAt: attempt.executionSnapshot.runtimeDeadlineAt ?? null,
+          validationTimeoutMs: attempt.executionSnapshot.validationTimeoutMs ?? null,
         }
       : null,
   };
@@ -200,7 +203,10 @@ function attemptSummary(attempt: Attempt): unknown {
 
 function receiptSummary(runtime: string): Record<string, unknown> {
   return Object.fromEntries(
-    ["owner", "ready", "accepted", "terminal", "terminated"].map((name) => [
+    [
+      "owner", "ready", "accepted", "runtime-progress", "terminating", "terminal", "terminated",
+      "validation-progress", "validation-terminate", "validation-terminating", "validation-terminated",
+    ].map((name) => [
       name,
       readSelectedJson(join(runtime, `${name}.json`)),
     ]),
@@ -216,7 +222,8 @@ function readSelectedJson(path: string): unknown {
       "autoRetryDisableAccepted", "autoCompactionEnabled", "domain", "code", "stage", "failureStage", "failureDomain",
       "failureCode", "retryable", "providerApi", "phase", "turnCount", "assistantMessageCount",
       "toolExecutionCount", "toolErrorCount", "transcriptSizeBucket", "diagnosticFingerprint", "childExit",
-      "agentSettled", "reason", "updatedAt", "parentPid",
+      "agentSettled", "reason", "updatedAt", "parentPid", "lastProgressAt", "lastProgressType", "eventCount",
+      "elapsedMs", "resultPresent", "runnerPid", "childPid", "digest", "exitCode", "signal", "timeout",
     ];
     const controlledCompaction = safeCompactionReceipt(value.controlledCompaction);
     return {

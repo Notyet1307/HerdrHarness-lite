@@ -1,11 +1,31 @@
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
-import type { AgentHandle, AgentStatus, AttemptResult, WorktreeHandle } from "../model.js";
+import type { AgentHandle, AgentStatus, Attempt, AttemptResult, WorktreeHandle } from "../model.js";
 import type { HerdrPort } from "../ports.js";
-import { type CommandRunner, requireSuccess, SyncCommandRunner } from "./command.js";
+import { makeSafeRuntimeDiagnostic, PiRpcRuntimeFailure } from "../pi-rpc-diagnostics.js";
+import { snapshotRuntimeTimeouts } from "../runtime-timeouts.js";
+import { ensurePrivateDirectory, readJsonIfExists, rpcRuntimeRoot, spoolPath, writeAtomicJson, writeExclusiveJson } from "../pi-rpc-spool.js";
+import { type CommandResult, type CommandRunner, requireSuccess, SyncCommandRunner } from "./command.js";
 
 const SHELL_READY_RETRY_MS = 100;
 const SHELL_READY_TIMEOUT_MS = 30_000;
+const HERDR_COMMAND_TIMEOUT_MS = 30_000;
+const HERDR_PROGRESS_POLL_MS = 1_000;
+
+type HerdrProgressReceipt = {
+  version: 1;
+  attemptId: string;
+  adapter: "herdr-pi-cli";
+  lastProgressAt: string;
+  lastProgressType: string;
+  eventCount: number;
+  elapsedMs: number;
+  resultPresent: boolean;
+  runnerPid: null;
+  childPid: null;
+  outputDigest: string | null;
+  digest: string;
+};
 
 /**
  * Thin Herdr adapter. It intentionally uses Herdr's native worktree/tab/agent
@@ -66,18 +86,19 @@ export class HerdrCli implements HerdrPort {
 
   async createAttemptPane(input: {
     worktree: WorktreeHandle;
-    attempt: { id: string; lane: "worker" | "reviewer" };
+    attempt: { id: string; lane: "worker" | "reviewer"; startedAt?: string; executionSnapshot?: Attempt["executionSnapshot"] };
     cwd?: string;
     env?: Record<string, string>;
   }): Promise<AgentHandle> {
     const agentName = attemptAgentName(input.attempt.id, input.attempt.lane);
     const label = `${input.attempt.lane} ${input.attempt.id}`;
     const cwd = input.cwd ?? input.worktree.path;
+    const timeoutMs = boundedAttemptTimeout(input.attempt);
     const env = input.env ?? {};
     for (const [name, value] of Object.entries(env)) {
       if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) || /[\0\r\n]/.test(value)) throw new Error("invalid Herdr attempt environment");
     }
-    const existing = this.findAttemptPane(input.worktree, agentName, label, cwd);
+    const existing = this.findAttemptPane(input.worktree, agentName, label, cwd, timeoutMs);
     if (existing) return existing;
     const createArgs = [
       "tab",
@@ -93,7 +114,7 @@ export class HerdrCli implements HerdrPort {
     for (const [name, value] of Object.entries(env).sort(([left], [right]) => left.localeCompare(right))) {
       createArgs.push("--env", `${name}=${value}`);
     }
-    const tab = this.invoke(createArgs);
+    const tab = this.invoke(createArgs, timeoutMs);
     expectType(tab, "tab_created");
     const tabInfo = object(tab.tab);
     const pane = object(tab.root_pane ?? tab.pane);
@@ -115,8 +136,9 @@ export class HerdrCli implements HerdrPort {
     agentName: string,
     label: string,
     expectedCwd: string,
+    timeoutMs: number,
   ): AgentHandle | null {
-    const tabList = this.invoke(["tab", "list", "--workspace", worktree.workspaceId]);
+    const tabList = this.invoke(["tab", "list", "--workspace", worktree.workspaceId], timeoutMs);
     expectType(tabList, "tab_list");
     const tabs = array(tabList.tabs).map(object).filter((tab) => (
       text(tab.workspace_id) === worktree.workspaceId && text(tab.label) === label
@@ -127,7 +149,7 @@ export class HerdrCli implements HerdrPort {
     const tabId = text(tab.tab_id);
     if (!tabId || tab.pane_count !== 1) throw new Error(`Herdr attempt tab ${agentName} has invalid topology`);
 
-    const paneList = this.invoke(["pane", "list", "--workspace", worktree.workspaceId]);
+    const paneList = this.invoke(["pane", "list", "--workspace", worktree.workspaceId], timeoutMs);
     expectType(paneList, "pane_list");
     const panes = array(paneList.panes).map(object).filter((pane) => (
       text(pane.workspace_id) === worktree.workspaceId && text(pane.tab_id) === tabId
@@ -140,8 +162,17 @@ export class HerdrCli implements HerdrPort {
     return { agentName, paneId, tabId, workspaceId: worktree.workspaceId };
   }
 
-  async startAgent(input: { handle: AgentHandle; argv: string[] }): Promise<void> {
-    const existing = this.tryGetAgent(input.handle.agentName);
+  async startAgent(input: { handle: AgentHandle; attempt?: Attempt; argv: string[] }): Promise<void> {
+    let timeoutMs = SHELL_READY_TIMEOUT_MS;
+    if (input.attempt) {
+      try {
+        timeoutMs = Math.min(SHELL_READY_TIMEOUT_MS, remainingTotalMs(input.attempt));
+      } catch (error) {
+        await this.terminateBounded(input.handle, input.attempt, "attempt_deadline");
+        throw error;
+      }
+    }
+    const existing = this.tryGetAgent(input.handle.agentName, timeoutMs);
     if (existing) {
       if (!sameHandle(existing, input.handle)) {
         throw new Error(`existing Herdr agent ${input.handle.agentName} has a different identity`);
@@ -164,7 +195,8 @@ export class HerdrCli implements HerdrPort {
     let startedValue: Record<string, unknown> | null = null;
     const retryAttempts = SHELL_READY_TIMEOUT_MS / SHELL_READY_RETRY_MS;
     for (let retryIndex = 0; retryIndex < retryAttempts; retryIndex += 1) {
-      const result = this.runner.run(this.bin, this.args(startArgs));
+      const remaining = input.attempt ? remainingTotalMs(input.attempt) : SHELL_READY_TIMEOUT_MS;
+      const result = this.runner.run(this.bin, this.args(startArgs), { timeoutMs: Math.min(SHELL_READY_TIMEOUT_MS, remaining) });
       if (result.ok) {
         startedValue = unwrap(JSON.parse(result.stdout) as unknown);
         break;
@@ -175,6 +207,14 @@ export class HerdrCli implements HerdrPort {
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, SHELL_READY_RETRY_MS);
     }
     if (!startedValue) throw new Error("Herdr agent start returned no result");
+    if (input.attempt) {
+      try {
+        remainingTotalMs(input.attempt);
+      } catch (error) {
+        await this.terminateBounded(input.handle, input.attempt, "attempt_deadline");
+        throw error;
+      }
+    }
     expectType(startedValue, "agent_started");
     const started = agentIdentity(startedValue.agent, input.handle.agentName);
     if (
@@ -188,24 +228,45 @@ export class HerdrCli implements HerdrPort {
     if (object(startedValue.agent).interactive_ready !== true) throw new Error("Herdr agent is not ready for interactive input");
   }
 
-  async runInPane(input: { handle: AgentHandle; command: string; argv: string[] }): Promise<void> {
+  async runInPane(input: { handle: AgentHandle; command: string; argv: string[]; timeoutMs?: number }): Promise<void> {
     if (!input.command.trim() || /[\0\r\n]/.test(input.command) || input.argv.some((value) => /[\0\r\n]/.test(value))) {
       throw new Error("invalid Herdr pane command");
     }
     requireSuccess(
-      this.runner.run(this.bin, this.args(["pane", "run", input.handle.paneId, "exec", input.command, ...input.argv])),
+      this.runner.run(this.bin, this.args(["pane", "run", input.handle.paneId, "exec", input.command, ...input.argv]), { timeoutMs: input.timeoutMs ?? HERDR_COMMAND_TIMEOUT_MS }),
       "herdr pane run",
     );
   }
 
   async prompt(input: {
     handle: AgentHandle;
+    attempt?: Attempt;
     dispatchId: string;
     skill: "implement" | "code-review";
     text: string;
   }): Promise<void> {
     const body = `/skill:${input.skill} [harness-dispatch:${input.dispatchId}]\n${input.text}`;
-    const value = this.invoke(["agent", "prompt", input.handle.agentName, body, "--wait"]);
+    const timeoutMs = input.attempt ? Math.min(HERDR_COMMAND_TIMEOUT_MS, remainingTotalMs(input.attempt)) : HERDR_COMMAND_TIMEOUT_MS;
+    let value: Record<string, unknown>;
+    try {
+      value = this.invoke([
+        "agent", "prompt", input.handle.agentName, body,
+        "--wait", "--until", "working", "--timeout", String(timeoutMs),
+      ], timeoutMs, input.attempt, "runtime_stall");
+    } catch (error) {
+      if (input.attempt && error instanceof PiRpcRuntimeFailure) {
+        await this.terminateBounded(input.handle, input.attempt, error.diagnostic.code === "attempt_deadline" ? "attempt_deadline" : "runtime_stall");
+      }
+      throw error;
+    }
+    if (input.attempt) {
+      try {
+        remainingTotalMs(input.attempt);
+      } catch (error) {
+        await this.terminateBounded(input.handle, input.attempt, "attempt_deadline");
+        throw error;
+      }
+    }
     expectType(value, "agent_prompted");
     const agent = agentIdentity(value.agent, input.handle.agentName);
     if (
@@ -216,19 +277,82 @@ export class HerdrCli implements HerdrPort {
     ) {
       throw new Error("Herdr prompt returned a different agent identity");
     }
-    if (!agent.status || !["idle", "done", "blocked"].includes(agent.status)) {
+    if (agent.status !== "working") {
       throw new Error(`Herdr prompt returned an unsettled agent status: ${agent.status ?? "missing"}`);
     }
+    if (input.attempt) persistHerdrProgress(input.attempt, "dispatch_accepted", null, true);
   }
 
   async wait(input: {
     handle: AgentHandle;
+    attempt?: Attempt;
     resultPath: string;
     expectedJobId: string;
     expectedAttemptId: string;
     expectedLane: "worker" | "reviewer";
   }): Promise<{ agentStatus: AgentStatus; result: AttemptResult | null; diagnostic: string | null }> {
-    const result = this.runner.run(this.bin, this.args(["agent", "wait", input.handle.agentName]));
+    if (input.attempt) return this.waitBounded({ ...input, attempt: input.attempt });
+    const result = this.runner.run(this.bin, this.args(["agent", "wait", input.handle.agentName]), { timeoutMs: HERDR_COMMAND_TIMEOUT_MS });
+    return this.observeWaitResult(input, result);
+  }
+
+  async terminate(input: {
+    handle: AgentHandle;
+    attempt: Attempt;
+    reason: "completed" | "recovery" | "cancelled";
+  }): Promise<void> {
+    await this.terminateBounded(input.handle, input.attempt, input.reason);
+  }
+
+  private async waitBounded(input: {
+    handle: AgentHandle;
+    attempt: Attempt;
+    resultPath: string;
+    expectedJobId: string;
+    expectedAttemptId: string;
+    expectedLane: "worker" | "reviewer";
+  }): Promise<{ agentStatus: AgentStatus; result: AttemptResult | null; diagnostic: string | null }> {
+    const timeouts = snapshotRuntimeTimeouts(input.attempt.executionSnapshot!, input.attempt.lane);
+    let progress = readHerdrProgress(input.attempt) ?? persistHerdrProgress(input.attempt, "runner_started", null, false);
+    for (;;) {
+      if (existsSync(input.resultPath) && !progress.resultPresent) {
+        progress = persistHerdrProgress(input.attempt, "durable_result", progress.outputDigest, true);
+      }
+      const now = Date.now();
+      const lastProgress = Date.parse(progress.lastProgressAt);
+      const totalRemaining = attemptDeadlineMs(input.attempt) - now;
+      const noProgressRemaining = timeouts.noProgressTimeoutMs - (now - lastProgress);
+      const deadline = totalRemaining <= 0 ? "attempt_deadline" : noProgressRemaining <= 0 ? "runtime_stall" : null;
+      if (deadline) {
+        await this.terminateBounded(input.handle, input.attempt, deadline);
+        throw attemptTimeout(input.attempt, deadline);
+      }
+      const pollMs = Math.max(1, Math.min(HERDR_PROGRESS_POLL_MS, totalRemaining, noProgressRemaining));
+      const result = this.runner.run(this.bin, this.args([
+        "agent", "wait", input.handle.agentName, "--timeout", String(pollMs),
+      ]), { timeoutMs: Math.min(totalRemaining, pollMs + 1_000) });
+      if (!result.ok && isTimeout(result)) {
+        if (Date.now() >= attemptDeadlineMs(input.attempt)) continue;
+        const outputDigest = this.outputProgressDigest(input.handle.agentName, Math.max(1, totalRemaining));
+        if (outputDigest && outputDigest !== progress.outputDigest) {
+          progress = persistHerdrProgress(input.attempt, "herdr_output_update", outputDigest, true);
+        }
+        continue;
+      }
+      if (Date.now() >= attemptDeadlineMs(input.attempt)) {
+        await this.terminateBounded(input.handle, input.attempt, "attempt_deadline");
+        throw attemptTimeout(input.attempt, "attempt_deadline");
+      }
+      const observation = this.observeWaitResult(input, result);
+      persistHerdrProgress(input.attempt, "terminal_receipt", progress.outputDigest, true);
+      return observation;
+    }
+  }
+
+  private observeWaitResult(input: {
+    handle: AgentHandle;
+    resultPath: string;
+  }, result: CommandResult): { agentStatus: AgentStatus; result: AttemptResult | null; diagnostic: string | null } {
     let attemptResult: AttemptResult | null = null;
     if (existsSync(input.resultPath)) {
       attemptResult = JSON.parse(readFileSync(input.resultPath, "utf8")) as AttemptResult;
@@ -265,13 +389,87 @@ export class HerdrCli implements HerdrPort {
   }
 
   async close(handle: AgentHandle): Promise<void> {
-    const result = this.runner.run(this.bin, this.args(["pane", "close", handle.paneId]));
+    this.closeWithTimeout(handle, HERDR_COMMAND_TIMEOUT_MS);
+  }
+
+  private async terminateBounded(
+    handle: AgentHandle,
+    attempt: Attempt,
+    reason: "completed" | "recovery" | "cancelled" | "runtime_stall" | "attempt_deadline",
+  ): Promise<void> {
+    const root = herdrRuntimeRoot(attempt);
+    ensurePrivateDirectory(root);
+    const identity = { version: 1, attemptId: attempt.id, adapter: "herdr-pi-cli" as const };
+    const terminated = readJsonIfExists<typeof identity & { ok: boolean }>(spoolPath(root, "terminated.json"));
+    if (terminated?.ok === true) return;
+    const intent = { ...identity, reason };
+    const intentPath = spoolPath(root, "terminate.json");
+    const existing = readJsonIfExists<typeof intent>(intentPath);
+    if (existing && JSON.stringify(existing) !== JSON.stringify(intent)) throw new Error("Herdr terminate intent changed after persistence");
+    if (!existing) writeExclusiveJson(intentPath, intent);
+    writeAtomicJson(spoolPath(root, "terminating.json"), { ...identity, ok: true, reason });
+    const timeouts = snapshotRuntimeTimeouts(attempt.executionSnapshot!, attempt.lane);
+    const closeTimeoutMs = Math.min(HERDR_COMMAND_TIMEOUT_MS, timeouts.sigtermGraceMs + (2 * timeouts.sigkillGraceMs));
+    try {
+      this.closeWithTimeout(handle, closeTimeoutMs);
+    } catch (error) {
+      writeAtomicJson(spoolPath(root, "terminated.json"), { ...identity, ok: false, reason: "owned pane close unconfirmed" });
+      throw error;
+    }
+    if (!await this.waitAgentGone(handle, Math.max(1, timeouts.sigkillGraceMs))) {
+      writeAtomicJson(spoolPath(root, "terminated.json"), { ...identity, ok: false, reason: "owned agent exit unconfirmed" });
+      throw new Error("Herdr owned agent exit is not confirmed after pane close");
+    }
+    if (reason === "runtime_stall" || reason === "attempt_deadline") {
+      const diagnostic = timeoutDiagnostic(reason);
+      writeAtomicJson(spoolPath(root, "terminal.json"), { ...identity, ok: false, error: reason, ...diagnostic });
+    }
+    writeAtomicJson(spoolPath(root, "terminated.json"), { ...identity, ok: true, reason: "owned pane close confirmed" });
+  }
+
+  private closeWithTimeout(handle: AgentHandle, timeoutMs: number): void {
+    const result = this.runner.run(this.bin, this.args(["pane", "close", handle.paneId]), { timeoutMs });
     if (!result.ok && herdrErrorCode(result.stderr) === "pane_not_found") return;
     requireSuccess(result, "herdr pane close");
   }
 
-  private tryGetAgent(agentName: string): (AgentHandle & { status: string | null }) | null {
-    const result = this.runner.run(this.bin, this.args(["agent", "get", agentName]));
+  private async waitAgentGone(handle: AgentHandle, timeoutMs: number): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const remaining = Math.max(1, deadline - Date.now());
+      const result = this.runner.run(this.bin, this.args(["agent", "get", handle.agentName]), {
+        timeoutMs: Math.min(HERDR_COMMAND_TIMEOUT_MS, remaining),
+      });
+      if (!result.ok && ["agent_not_found", "agent_not_running"].includes(herdrErrorCode(result.stderr) ?? "")) return true;
+      if (Date.now() >= deadline) return false;
+      await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, Math.min(50, Math.max(1, deadline - Date.now()))));
+    }
+  }
+
+  private outputProgressDigest(agentName: string, remainingTotalMs: number): string | null {
+    const result = this.runner.run(this.bin, this.args([
+      "agent", "read", agentName, "--source", "recent-unwrapped", "--lines", "120", "--format", "text",
+    ]), { timeoutMs: Math.min(HERDR_COMMAND_TIMEOUT_MS, remainingTotalMs) });
+    if (!result.ok) return null;
+    let output: string;
+    try {
+      const value = unwrap(JSON.parse(result.stdout) as unknown);
+      if (typeof value.text !== "string") return null;
+      output = value.text;
+    } catch {
+      return null;
+    }
+    const normalized = output
+      .split("\n")
+      .map((line) => line.replace(/\b\d{2}:\d{2}:\d{2}(?:\.\d+)?\b/g, "").trim())
+      .filter((line) => line && !/\b(?:queue|heartbeat|poll(?:ing)?|waiting for agent)\b/i.test(line))
+      .join("\n")
+      .slice(-64 * 1024);
+    return normalized ? textDigest(normalized) : null;
+  }
+
+  private tryGetAgent(agentName: string, timeoutMs = HERDR_COMMAND_TIMEOUT_MS): (AgentHandle & { status: string | null }) | null {
+    const result = this.runner.run(this.bin, this.args(["agent", "get", agentName]), { timeoutMs });
     if (!result.ok && herdrErrorCode(result.stderr) === "agent_not_found") return null;
     const stdout = requireSuccess(result, "herdr agent get");
     const value = unwrap(JSON.parse(stdout) as unknown);
@@ -283,8 +481,8 @@ export class HerdrCli implements HerdrPort {
 
   private inspectAgent(agentName: string): string {
     const checks = [
-      ["agent get", this.runner.run(this.bin, this.args(["agent", "get", agentName]))],
-      ["agent read", this.runner.run(this.bin, this.args(["agent", "read", agentName, "--source", "recent-unwrapped", "--lines", "120"]))],
+      ["agent get", this.runner.run(this.bin, this.args(["agent", "get", agentName]), { timeoutMs: HERDR_COMMAND_TIMEOUT_MS })],
+      ["agent read", this.runner.run(this.bin, this.args(["agent", "read", agentName, "--source", "recent-unwrapped", "--lines", "120"]), { timeoutMs: HERDR_COMMAND_TIMEOUT_MS })],
     ] as const;
     return checks
       .map(([label, result]) => `${label}: ${(result.ok ? result.stdout : result.stderr).trim() || "(no output)"}`)
@@ -292,8 +490,15 @@ export class HerdrCli implements HerdrPort {
       .slice(-4_000);
   }
 
-  private invoke(args: string[]): Record<string, unknown> {
-    const stdout = requireSuccess(this.runner.run(this.bin, this.args(args)), `herdr ${args.slice(0, 2).join(" ")}`);
+  private invoke(
+    args: string[],
+    timeoutMs = HERDR_COMMAND_TIMEOUT_MS,
+    attempt?: Attempt,
+    timeoutCode: "runtime_stall" | "attempt_deadline" = "attempt_deadline",
+  ): Record<string, unknown> {
+    const result = this.runner.run(this.bin, this.args(args), { timeoutMs });
+    if (attempt && isTimeout(result)) throw attemptTimeout(attempt, timeoutCode);
+    const stdout = requireSuccess(result, `herdr ${args.slice(0, 2).join(" ")}`);
     return unwrap(JSON.parse(stdout) as unknown);
   }
 
@@ -361,4 +566,120 @@ function attemptAgentName(attemptId: string, lane: "worker" | "reviewer"): strin
   hasher.update(attemptId);
   const hash = hasher.digest("hex").slice(0, 28);
   return `hh${lane === "worker" ? "w" : "r"}-${hash}`;
+}
+
+function remainingTotalMs(attempt: Attempt): number {
+  const snapshot = attempt.executionSnapshot;
+  if (!snapshot) throw new Error("Attempt has no bounded runtime snapshot");
+  const remaining = attemptDeadlineMs(attempt) - Date.now();
+  if (remaining <= 0) throw attemptTimeout(attempt, "attempt_deadline");
+  return remaining;
+}
+
+function boundedAttemptTimeout(attempt: {
+  id: string;
+  lane: Attempt["lane"];
+  startedAt?: string;
+  executionSnapshot?: Attempt["executionSnapshot"];
+}): number {
+  if (!attempt.startedAt || !attempt.executionSnapshot) return HERDR_COMMAND_TIMEOUT_MS;
+  return Math.min(HERDR_COMMAND_TIMEOUT_MS, remainingTotalMs(attempt as Attempt));
+}
+
+function isTimeout(result: { stderr: string; error: string | null }): boolean {
+  return herdrErrorCode(result.stderr) === "timeout" || /timed? out|timeout/i.test(`${result.error ?? ""}\n${result.stderr}`);
+}
+
+function attemptStartedMs(attempt: Attempt): number {
+  const started = Date.parse(attempt.startedAt);
+  if (!Number.isFinite(started)) throw new Error("Attempt has an invalid runtime start time");
+  return started;
+}
+
+function attemptDeadlineMs(attempt: Attempt): number {
+  const snapshot = attempt.executionSnapshot;
+  if (!snapshot) throw new Error("Attempt has no bounded runtime snapshot");
+  const deadline = snapshot.runtimeDeadlineAt
+    ? Date.parse(snapshot.runtimeDeadlineAt)
+    : attemptStartedMs(attempt) + snapshotRuntimeTimeouts(snapshot, attempt.lane).totalTimeoutMs;
+  if (!Number.isFinite(deadline)) throw new Error("Attempt has an invalid runtime deadline");
+  return deadline;
+}
+
+function herdrRuntimeRoot(attempt: Attempt): string {
+  if (attempt.executionSnapshot?.adapter !== "herdr-pi-cli") throw new Error("Herdr runtime received a different adapter");
+  return rpcRuntimeRoot(attempt.executionSnapshot);
+}
+
+function readHerdrProgress(attempt: Attempt): HerdrProgressReceipt | null {
+  const path = spoolPath(herdrRuntimeRoot(attempt), "runtime-progress.json");
+  const value = readJsonIfExists<HerdrProgressReceipt>(path);
+  if (!value) return null;
+  const { digest: claimedDigest, ...body } = value;
+  if (
+    Object.keys(value).sort().join(",") !== "adapter,attemptId,childPid,digest,elapsedMs,eventCount,lastProgressAt,lastProgressType,outputDigest,resultPresent,runnerPid,version"
+    || value.version !== 1
+    || value.attemptId !== attempt.id
+    || value.adapter !== "herdr-pi-cli"
+    || !Number.isFinite(Date.parse(value.lastProgressAt))
+    || !/^[a-z][a-z0-9_]{0,63}$/.test(value.lastProgressType)
+    || !Number.isSafeInteger(value.eventCount) || value.eventCount < 0
+    || !Number.isSafeInteger(value.elapsedMs) || value.elapsedMs < 0
+    || typeof value.resultPresent !== "boolean"
+    || value.runnerPid !== null
+    || value.childPid !== null
+    || (value.outputDigest !== null && !/^[0-9a-f]{64}$/.test(value.outputDigest))
+    || !/^[0-9a-f]{64}$/.test(claimedDigest)
+    || textDigest(JSON.stringify(body)) !== claimedDigest
+  ) throw new Error("Herdr runtime progress receipt is invalid");
+  return value;
+}
+
+function persistHerdrProgress(
+  attempt: Attempt,
+  type: string,
+  outputDigest: string | null,
+  refresh: boolean,
+): HerdrProgressReceipt {
+  const root = herdrRuntimeRoot(attempt);
+  ensurePrivateDirectory(root);
+  const existing = readHerdrProgress(attempt);
+  const now = Date.now();
+  const body = {
+    version: 1 as const,
+    attemptId: attempt.id,
+    adapter: "herdr-pi-cli" as const,
+    lastProgressAt: refresh ? new Date(now).toISOString() : existing?.lastProgressAt ?? attempt.startedAt,
+    lastProgressType: refresh ? type : existing?.lastProgressType ?? type,
+    eventCount: (existing?.eventCount ?? 0) + (refresh ? 1 : 0),
+    elapsedMs: Math.max(0, now - attemptStartedMs(attempt)),
+    resultPresent: existsSync(attempt.resultPath),
+    runnerPid: null,
+    childPid: null,
+    outputDigest,
+  };
+  const receipt = { ...body, digest: textDigest(JSON.stringify(body)) };
+  writeAtomicJson(spoolPath(root, "runtime-progress.json"), receipt);
+  return receipt;
+}
+
+function timeoutDiagnostic(code: "runtime_stall" | "attempt_deadline") {
+  return makeSafeRuntimeDiagnostic({
+    domain: code === "runtime_stall" ? "observation" : "execution",
+    code,
+    stage: "agent-run",
+    failureDomain: "runtime",
+    failureCode: code,
+    retryable: false,
+  });
+}
+
+function attemptTimeout(attempt: Attempt, code: "runtime_stall" | "attempt_deadline"): PiRpcRuntimeFailure {
+  return new PiRpcRuntimeFailure(`${attempt.lane} Attempt ended with ${code}`, timeoutDiagnostic(code));
+}
+
+function textDigest(value: string): string {
+  const hasher = createHash("sha256");
+  hasher.update(value);
+  return hasher.digest("hex");
 }

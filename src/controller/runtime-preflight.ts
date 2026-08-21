@@ -107,6 +107,9 @@ export async function verifyExecutionSnapshot(
       compactionMode: expected.compactionMode,
       compactionPolicy: expected.compactionPolicy,
       credentialMode: expected.credentialMode,
+      ...(expected.runtimeTimeouts ? { runtimeTimeouts: expected.runtimeTimeouts } : {}),
+      ...(expected.runtimeDeadlineAt !== undefined ? { runtimeDeadlineAt: expected.runtimeDeadlineAt } : {}),
+      ...(expected.validationTimeoutMs !== undefined ? { validationTimeoutMs: expected.validationTimeoutMs } : {}),
       dockerHost: expected.dockerHost,
       context: expected.context,
       extraResources: expected.resources

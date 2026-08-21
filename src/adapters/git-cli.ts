@@ -22,6 +22,7 @@ import {
 } from "../reviewer-context-budget.js";
 import { type CommandRunner, requireSuccess, SyncCommandRunner } from "./command.js";
 import { runReviewerValidationProcess } from "./reviewer-validation-runner.js";
+import { DEFAULT_TERMINATION_TIMEOUTS } from "../runtime-timeouts.js";
 
 const CONTEXT_CANDIDATES = ["AGENTS.override.md", "AGENTS.md", "AGENTS.MD", "CLAUDE.md", "CLAUDE.MD"] as const;
 const MAX_CONTEXT_BYTES = 128 * 1024;
@@ -394,7 +395,8 @@ export class GitCli implements GitPort {
     }
 
     const sourceSnapshotDigest = this.prepareReviewerValidationWorkspace(input, paths);
-    const plan = validationPlan(input, paths, sourceSnapshotDigest);
+    const timeoutPolicy = validationTimeoutPolicy(input, this.reviewerValidationTimeoutMs);
+    const plan = validationPlan(input, paths, sourceSnapshotDigest, timeoutPolicy);
     publishImmutable(paths.planPath, `${JSON.stringify(plan, null, 2)}\n`);
     const startedAt = new Date().toISOString();
     const startedMs = Date.now();
@@ -403,7 +405,12 @@ export class GitCli implements GitPort {
       scratchPath: paths.scratchPath,
       validationArgv: input.validationArgv,
       dockerHost: input.dockerHost,
-      timeoutMs: this.reviewerValidationTimeoutMs,
+      attemptId: input.attemptId,
+      progressPath: join(input.rootPath, "runtime", "validation-progress.json"),
+      timeoutMs: timeoutPolicy.totalTimeoutMs,
+      noProgressTimeoutMs: timeoutPolicy.noProgressTimeoutMs,
+      sigtermGraceMs: timeoutPolicy.sigtermGraceMs,
+      sigkillGraceMs: timeoutPolicy.sigkillGraceMs,
     });
     const completedAt = new Date().toISOString();
     const deterministic = output.signal === null && output.timeout === false && output.error === null;
@@ -450,9 +457,11 @@ export class GitCli implements GitPort {
     assertReviewerValidationReceipt(receipt, validationIdentity(input));
     const normalized = reviewerValidationResult(receipt);
     if (normalized.status !== input.binding.status) throw new ReviewerValidationIntegrityError("Reviewer validation receipt status drifted");
-    const plan = JSON.parse(privateImmutableFile(paths.planPath)) as unknown;
+    const plan = JSON.parse(privateImmutableFile(paths.planPath)) as { version?: unknown };
     const expectedPlan = isReviewerValidationCheckpoint(receipt)
-      ? validationPlan(input, paths, normalized.sourceSnapshotDigest)
+      ? plan.version === 2
+        ? legacyCheckpointValidationPlan(input, paths, normalized.sourceSnapshotDigest)
+        : validationPlan(input, paths, normalized.sourceSnapshotDigest, validationTimeoutPolicy(input, this.reviewerValidationTimeoutMs))
       : legacyValidationPlan(input, paths, normalized.sourceSnapshotDigest);
     if (JSON.stringify(plan) !== JSON.stringify(expectedPlan)) throw new ReviewerValidationIntegrityError("Reviewer validation plan drifted");
     if (sourceSnapshotDigest(paths.reviewPath) !== normalized.sourceSnapshotDigest) {
@@ -742,7 +751,27 @@ function validationIdentity(input: ReviewerValidationInput) {
   };
 }
 
-function validationPlan(input: ReviewerValidationInput, paths: ReviewerPaths, sourceSnapshotDigest: string) {
+function validationPlan(
+  input: ReviewerValidationInput,
+  paths: ReviewerPaths,
+  sourceSnapshotDigest: string,
+  timeoutPolicy: { totalTimeoutMs: number; noProgressTimeoutMs: number; sigtermGraceMs: number; sigkillGraceMs: number },
+) {
+  return {
+    version: 3,
+    ...validationIdentity(input),
+    validationArgvDigest: digest(input.validationArgv),
+    reviewPath: paths.reviewPath,
+    validationPath: paths.validationPath,
+    scratchPath: paths.scratchPath,
+    privateEvidenceDir: paths.privateEvidenceDir,
+    receiptPath: paths.receiptPath,
+    sourceSnapshotDigest,
+    timeoutPolicy,
+  };
+}
+
+function legacyCheckpointValidationPlan(input: ReviewerValidationInput, paths: ReviewerPaths, sourceSnapshotDigest: string) {
   return {
     version: 2,
     ...validationIdentity(input),
@@ -753,6 +782,15 @@ function validationPlan(input: ReviewerValidationInput, paths: ReviewerPaths, so
     privateEvidenceDir: paths.privateEvidenceDir,
     receiptPath: paths.receiptPath,
     sourceSnapshotDigest,
+  };
+}
+
+function validationTimeoutPolicy(input: ReviewerValidationInput, fallbackTotalTimeoutMs: number) {
+  return {
+    totalTimeoutMs: input.totalTimeoutMs ?? fallbackTotalTimeoutMs,
+    noProgressTimeoutMs: input.noProgressTimeoutMs ?? input.totalTimeoutMs ?? fallbackTotalTimeoutMs,
+    sigtermGraceMs: input.sigtermGraceMs ?? DEFAULT_TERMINATION_TIMEOUTS.sigtermGraceMs,
+    sigkillGraceMs: input.sigkillGraceMs ?? DEFAULT_TERMINATION_TIMEOUTS.sigkillGraceMs,
   };
 }
 

@@ -54,6 +54,7 @@ declare module "node:child_process" {
     args?: readonly string[],
     options?: {
       cwd?: string;
+      detached?: boolean;
       env?: Record<string, string | undefined>;
       stdio?: "ignore" | ["pipe" | "ignore", "pipe", "pipe"];
     },

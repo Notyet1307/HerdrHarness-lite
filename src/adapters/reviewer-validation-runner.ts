@@ -8,16 +8,23 @@ import {
   openSync,
   unlinkSync,
 } from "node:fs";
-import { basename, delimiter, isAbsolute, join, resolve } from "node:path";
+import { basename, delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { digest, type ReviewerValidationOutput } from "../model.js";
+import { ensurePrivateDirectory, writeAtomicJson } from "../pi-rpc-spool.js";
 import { REVIEWER_VALIDATION_OUTPUT_REDACTED } from "../reviewer-validation.js";
+import { validTimeoutMs } from "../runtime-timeouts.js";
 
 export type ReviewerValidationProcessInput = {
   validationPath: string;
   scratchPath: string;
   validationArgv: string[];
   dockerHost: string | null;
+  attemptId: string;
+  progressPath: string;
   timeoutMs: number;
+  noProgressTimeoutMs: number;
+  sigtermGraceMs: number;
+  sigkillGraceMs: number;
 };
 
 export type ReviewerValidationProcessOutput = {
@@ -36,6 +43,13 @@ export async function runReviewerValidationProcess(
   const environment = reviewerValidationEnvironment(input);
   const environmentDigest = digest(environment.env);
   try {
+    if (!validTimeoutMs(input.timeoutMs)
+      || !validTimeoutMs(input.noProgressTimeoutMs)
+      || input.noProgressTimeoutMs > input.timeoutMs
+      || !validTimeoutMs(input.sigtermGraceMs)
+      || !validTimeoutMs(input.sigkillGraceMs)) {
+      throw new Error("Reviewer validation timeout policy is invalid");
+    }
     if (environment.error) throw new Error(environment.error);
     for (const command of validationExecutables(input.validationArgv)) {
       resolveExecutable(command, input.validationPath, environment.env.PATH ?? "");
@@ -58,10 +72,13 @@ export async function runReviewerValidationProcess(
   const [command, ...args] = input.validationArgv;
   const stdout = openOutputCapture();
   const stderr = openOutputCapture();
+  const startedMs = Date.now();
   let child;
   try {
+    ensurePrivateDirectory(dirname(input.progressPath));
     child = spawn(command!, args, {
       cwd: input.validationPath,
+      detached: true,
       env: environment.env,
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -81,67 +98,107 @@ export async function runReviewerValidationProcess(
     let runtimeError: Error | null = null;
     let captureFailed = false;
     let timedOut = false;
+    let timeoutReason: "runtime_stall" | "attempt_deadline" | null = null;
     let interruptedBy: "SIGTERM" | "SIGINT" | null = null;
+    let finished = false;
+    let heartbeatCount = 0;
+    let lastProgressMs = startedMs;
     let forceTimer: ReturnType<typeof setTimeout> | null = null;
-    const stop = (signal: "SIGTERM" | "SIGINT"): void => {
-      interruptedBy = signal;
-      child.kill("SIGTERM");
-      forceTimer ??= setTimeout(() => child.kill("SIGKILL"), 5_000);
+    let confirmationTimer: ReturnType<typeof setTimeout> | null = null;
+    let heartbeatTimer: ReturnType<typeof setTimeout> | null = null;
+    let noProgressTimer: ReturnType<typeof setTimeout> | null = null;
+    const receiptRoot = dirname(input.progressPath);
+    const identity = { version: 1, attemptId: input.attemptId, runnerPid: process.pid, childPid: child.pid ?? null };
+    const persistHeartbeat = (): void => {
+      heartbeatCount += 1;
+      const now = Date.now();
+      lastProgressMs = now;
+      const body = {
+        ...identity,
+        lastProgressAt: new Date(now).toISOString(),
+        lastProgressType: "validation_heartbeat",
+        eventCount: heartbeatCount,
+        elapsedMs: Math.max(0, now - startedMs),
+        resultPresent: false,
+      };
+      writeAtomicJson(input.progressPath, { ...body, digest: digest(body) });
     };
-    const onSigterm = (): void => stop("SIGTERM");
-    const onSigint = (): void => stop("SIGINT");
-    process.once("SIGTERM", onSigterm);
-    process.once("SIGINT", onSigint);
-    const timeout = setTimeout(() => {
-      timedOut = true;
-      child.kill("SIGTERM");
-      forceTimer = setTimeout(() => child.kill("SIGKILL"), 5_000);
-    }, input.timeoutMs);
-    const capture = (target: ReturnType<typeof openOutputCapture>, chunk: Uint8Array): void => {
-      if (captureFailed) return;
+    const tryPersistHeartbeat = (): boolean => {
       try {
-        target.write(chunk);
+        persistHeartbeat();
+        return true;
       } catch {
-        captureFailed = true;
-        child.kill("SIGKILL");
+        runtimeError = new Error("Reviewer validation progress receipt could not be persisted");
+        return false;
       }
     };
-    child.stdout.on("data", (chunk: Uint8Array) => capture(stdout, chunk));
-    child.stderr.on("data", (chunk: Uint8Array) => capture(stderr, chunk));
-    child.stdout.on("error", () => { captureFailed = true; child.kill("SIGKILL"); });
-    child.stderr.on("error", () => { captureFailed = true; child.kill("SIGKILL"); });
-    child.on("error", (error) => { runtimeError = error; });
-    child.on("close", (exitCode, signal) => {
+    const scheduleHeartbeat = (): void => {
+      const interval = Math.min(1_000, Math.max(10, Math.floor(input.timeoutMs / 4)), Math.max(10, Math.floor(input.noProgressTimeoutMs / 2)));
+      heartbeatTimer = setTimeout(() => {
+        if (finished) return;
+        if (!tryPersistHeartbeat()) {
+          stop("SIGTERM");
+          return;
+        }
+        scheduleHeartbeat();
+      }, interval);
+    };
+    const scheduleNoProgress = (): void => {
+      const remaining = Math.max(1, input.noProgressTimeoutMs - (Date.now() - lastProgressMs));
+      noProgressTimer = setTimeout(() => {
+        if (finished) return;
+        if (Date.now() - lastProgressMs >= input.noProgressTimeoutMs) stop("runtime_stall");
+        else scheduleNoProgress();
+      }, remaining);
+    };
+    const finish = async (exitCode: number | null, signal: string | null, forcedError: string | null = null): Promise<void> => {
+      if (finished) return;
+      finished = true;
+      if (!timedOut && Date.now() - startedMs >= input.timeoutMs) {
+        timedOut = true;
+        timeoutReason = "attempt_deadline";
+      }
       clearTimeout(timeout);
       if (forceTimer) clearTimeout(forceTimer);
+      if (confirmationTimer) clearTimeout(confirmationTimer);
+      if (heartbeatTimer) clearTimeout(heartbeatTimer);
+      if (noProgressTimer) clearTimeout(noProgressTimer);
       process.off("SIGTERM", onSigterm);
       process.off("SIGINT", onSigint);
+      if (!await stopRemainingProcessGroup(child, input.sigtermGraceMs, input.sigkillGraceMs)) {
+        forcedError = "Reviewer validation process group termination was not confirmed";
+      }
       let stdoutResult: ReviewerValidationOutput;
       let stderrResult: ReviewerValidationOutput;
       try {
         stdoutResult = stdout.finish();
         stderrResult = stderr.finish();
       } catch (error) {
-        resolveRun({
+        forcedError = `Attempt-private validation evidence capture failed: ${boundedError(error)}`;
+        stdoutResult = emptyOutput();
+        stderrResult = emptyOutput();
+      }
+      if (!tryPersistHeartbeat()) forcedError = runtimeError?.message ?? "Reviewer validation progress receipt failed";
+      try {
+        writeAtomicJson(join(receiptRoot, "validation-terminated.json"), {
+          ...identity,
+          ok: forcedError === null,
           exitCode,
           signal,
           timeout: timedOut,
-          error: `Attempt-private validation evidence capture failed: ${boundedError(error)}`,
-          stdout: emptyOutput(),
-          stderr: emptyOutput(),
-          relevantEnvironmentDigest: environmentDigest,
         });
-        return;
+      } catch {
+        forcedError = "Reviewer validation terminated receipt could not be persisted";
       }
-      const error = captureFailed
+      const error = forcedError ?? (captureFailed
         ? "Attempt-private validation evidence capture failed"
         : timedOut
-          ? "Reviewer validation timed out"
-          : interruptedBy
-            ? `Reviewer validation interrupted by ${interruptedBy}`
-            : runtimeError
-              ? boundedError(runtimeError)
-              : null;
+          ? `Reviewer validation ${timeoutReason ?? "attempt_deadline"}`
+          : runtimeError
+            ? boundedError(runtimeError)
+            : interruptedBy
+              ? `Reviewer validation interrupted by ${interruptedBy}`
+              : null);
       resolveRun({
         exitCode,
         signal,
@@ -151,8 +208,99 @@ export async function runReviewerValidationProcess(
         stderr: stderrResult,
         relevantEnvironmentDigest: environmentDigest,
       });
-    });
+    };
+    const stop = (requestedReason: "runtime_stall" | "attempt_deadline" | "SIGTERM" | "SIGINT"): void => {
+      if (timedOut || interruptedBy) return;
+      const reason = requestedReason === "runtime_stall" && Date.now() - startedMs >= input.timeoutMs
+        ? "attempt_deadline"
+        : requestedReason;
+      if (reason === "runtime_stall" || reason === "attempt_deadline") {
+        timedOut = true;
+        timeoutReason = reason;
+      }
+      else interruptedBy = reason;
+      try {
+        if (!existsSync(join(receiptRoot, "validation-terminate.json"))) {
+          writeAtomicJson(join(receiptRoot, "validation-terminate.json"), { ...identity, reason });
+        }
+        if (!existsSync(join(receiptRoot, "validation-terminating.json"))) {
+          writeAtomicJson(join(receiptRoot, "validation-terminating.json"), { ...identity, ok: true, reason });
+        }
+      } catch {
+        runtimeError = new Error("Reviewer validation termination receipt could not be persisted");
+      }
+      signalChildTree(child, "SIGTERM");
+      forceTimer ??= setTimeout(() => {
+        signalChildTree(child, "SIGKILL");
+        confirmationTimer = setTimeout(() => { void finish(null, null, "Reviewer validation child termination was not confirmed"); }, input.sigkillGraceMs);
+      }, input.sigtermGraceMs);
+    };
+    const onSigterm = (): void => stop("SIGTERM");
+    const onSigint = (): void => stop("SIGINT");
+    process.once("SIGTERM", onSigterm);
+    process.once("SIGINT", onSigint);
+    const timeout = setTimeout(() => stop("attempt_deadline"), input.timeoutMs);
+    if (!tryPersistHeartbeat()) stop("SIGTERM");
+    scheduleHeartbeat();
+    scheduleNoProgress();
+    const capture = (target: ReturnType<typeof openOutputCapture>, chunk: Uint8Array): void => {
+      if (captureFailed || finished) return;
+      try {
+        target.write(chunk);
+      } catch {
+        captureFailed = true;
+        signalChildTree(child, "SIGKILL");
+      }
+    };
+    child.stdout.on("data", (chunk: Uint8Array) => capture(stdout, chunk));
+    child.stderr.on("data", (chunk: Uint8Array) => capture(stderr, chunk));
+    child.stdout.on("error", () => { captureFailed = true; signalChildTree(child, "SIGKILL"); });
+    child.stderr.on("error", () => { captureFailed = true; signalChildTree(child, "SIGKILL"); });
+    child.on("error", (error) => { runtimeError = error; });
+    child.on("close", (exitCode: number | null, signal: string | null) => { void finish(exitCode, signal); });
   });
+}
+
+function signalChildTree(child: ReturnType<typeof spawn>, signal: "SIGTERM" | "SIGKILL"): void {
+  if (child.pid) {
+    try {
+      process.kill(-child.pid, signal);
+      return;
+    } catch {
+      // Fall back to the direct child when the process group has already disappeared.
+    }
+  }
+  child.kill(signal);
+}
+
+async function stopRemainingProcessGroup(
+  child: ReturnType<typeof spawn>,
+  sigtermGraceMs: number,
+  sigkillGraceMs: number,
+): Promise<boolean> {
+  if (!child.pid || !processGroupAlive(child.pid)) return true;
+  signalChildTree(child, "SIGTERM");
+  if (await processGroupExitsWithin(child.pid, sigtermGraceMs)) return true;
+  signalChildTree(child, "SIGKILL");
+  return processGroupExitsWithin(child.pid, sigkillGraceMs);
+}
+
+function processGroupAlive(pid: number): boolean {
+  try {
+    process.kill(-pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function processGroupExitsWithin(pid: number, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (processGroupAlive(pid)) {
+    if (Date.now() >= deadline) return false;
+    await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, Math.min(50, Math.max(1, deadline - Date.now()))));
+  }
+  return true;
 }
 
 function reviewerValidationEnvironment(input: ReviewerValidationProcessInput): {

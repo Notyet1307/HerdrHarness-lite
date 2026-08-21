@@ -88,6 +88,13 @@ export type ControlledCompactionPolicy = {
   overflowContinuation: boolean;
 };
 
+export type RuntimeTimeouts = {
+  totalTimeoutMs: number;
+  noProgressTimeoutMs: number;
+  sigtermGraceMs: number;
+  sigkillGraceMs: number;
+};
+
 export type ExecutionSnapshot = {
   version: 1;
   adapter: AttemptRuntimeAdapter;
@@ -103,6 +110,12 @@ export type ExecutionSnapshot = {
   compactionMode: "runtime-default" | "disabled" | "controlled-threshold";
   compactionPolicy?: ControlledCompactionPolicy;
   credentialMode: "runtime-default" | "canonical-oauth" | "canonical-model-config";
+  /** Missing only on snapshots prepared before bounded runtime deadlines. */
+  runtimeTimeouts?: RuntimeTimeouts;
+  /** Absolute Attempt deadline; missing only on snapshots prepared before bounded runtime deadlines. */
+  runtimeDeadlineAt?: string;
+  /** Reviewer-only; missing only on snapshots prepared before bounded validation. */
+  validationTimeoutMs?: number;
   dockerHost: string | null;
   resources: ExecutionResource[];
   /** Missing only on snapshots prepared before explicit context closure. */
@@ -366,6 +379,9 @@ export type AttemptContextEnvelope = {
     compactionMode: ExecutionSnapshot["compactionMode"];
     compactionPolicy?: ControlledCompactionPolicy;
     credentialMode: ExecutionSnapshot["credentialMode"];
+    runtimeTimeouts?: RuntimeTimeouts;
+    runtimeDeadlineAt?: string;
+    validationTimeoutMs?: number;
   };
   writeback:
     | { tool: "worker_submit"; statuses: WorkerResult["status"][] }

@@ -10,6 +10,7 @@ import type { ControllerContext } from "./context.js";
 import { message, result, safeToken, trimSlash } from "./helpers.js";
 import { BUNDLED_REVIEW_AXIS_AGENT, PI_RPC_RUNNER, PI_RPC_SDK_ENTRY } from "./resources.js";
 import { rpcEnabled, runtimeRole } from "./runtime-contract.js";
+import { configuredRuntimeTimeouts, configuredValidationTimeoutMs } from "../runtime-timeouts.js";
 import type { TickResult } from "./types.js";
 
 export async function prepareAttempt(ctx: ControllerContext, state: HarnessState, job: Job, lane: Attempt["lane"]): Promise<TickResult> {
@@ -82,6 +83,7 @@ export async function prepareAttempt(ctx: ControllerContext, state: HarnessState
       throw new Error(`controlled Worker compaction requires Pi ${QUALIFIED_CONTROLLED_COMPACTION_PI_VERSION}`);
     }
     const role = runtimeRole(ctx.deps.config, lane);
+    const runtimeTimeouts = configuredRuntimeTimeouts(ctx.deps.config, lane);
     executionSnapshot = buildExecutionSnapshot({
       adapter: useRpc ? "pi-rpc" : "herdr-pi-cli",
       executable: runtime.executable,
@@ -101,6 +103,9 @@ export async function prepareAttempt(ctx: ControllerContext, state: HarnessState
         ? { compactionPolicy: WORKER_CONTROLLED_COMPACTION_POLICY }
         : {}),
       credentialMode: useRpc ? role.credentialMode : "runtime-default",
+      runtimeTimeouts,
+      runtimeDeadlineAt: new Date(Date.parse(now) + runtimeTimeouts.totalTimeoutMs).toISOString(),
+      ...(lane === "reviewer" ? { validationTimeoutMs: configuredValidationTimeoutMs(ctx.deps.config) } : {}),
       dockerHost,
       extraResources: [
         ...(lane === "reviewer" ? [{ kind: "agent" as const, path: BUNDLED_REVIEW_AXIS_AGENT }] : []),

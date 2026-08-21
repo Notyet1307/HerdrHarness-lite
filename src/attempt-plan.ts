@@ -13,6 +13,9 @@ export function buildExecutionSnapshot(input: {
   compactionMode?: ExecutionSnapshot["compactionMode"];
   compactionPolicy?: ExecutionSnapshot["compactionPolicy"];
   credentialMode?: ExecutionSnapshot["credentialMode"];
+  runtimeTimeouts?: ExecutionSnapshot["runtimeTimeouts"];
+  runtimeDeadlineAt?: string;
+  validationTimeoutMs?: number;
   dockerHost?: string | null;
   context?: ExecutionContext;
   extraResources?: Array<{ kind: "agent" | "runtime" | "model-config"; path: string }>;
@@ -38,6 +41,9 @@ export function buildExecutionSnapshot(input: {
     compactionMode,
     ...(input.compactionPolicy ? { compactionPolicy: { ...input.compactionPolicy } } : {}),
     credentialMode: input.credentialMode ?? (input.adapter === "pi-rpc" ? "canonical-oauth" : "runtime-default"),
+    ...(input.runtimeTimeouts ? { runtimeTimeouts: { ...input.runtimeTimeouts } } : {}),
+    ...(input.runtimeDeadlineAt !== undefined ? { runtimeDeadlineAt: input.runtimeDeadlineAt } : {}),
+    ...(input.validationTimeoutMs !== undefined ? { validationTimeoutMs: input.validationTimeoutMs } : {}),
     dockerHost: input.dockerHost ?? null,
     resources: [
       ...flagValues(input.argv, "--skill").map((path) => executionResource("skill", path)),

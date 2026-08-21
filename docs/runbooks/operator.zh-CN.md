@@ -53,6 +53,12 @@ Worker 启用 Ponytail 时，extension 顺序必须严格为 bundled `worker-too
 
 配置要求 Docker 时，preflight 只接受本地 Unix socket，并验证 daemon 与 Compose。不要把远端 Docker credential boundary 隐式带入 Attempt。
 
+运行预算在新 Attempt preparation 时固化，运行中修改配置不会延长旧 Attempt。示例配置写出了当前默认值：Worker total/no-progress 为 90/15 分钟，Reviewer 为 45/10 分钟，validation total 为 30 分钟，SIGTERM/SIGKILL grace 为 10/5 秒；旧配置省略这些块时使用相同默认值。调小前先用 disposable lane 验证目标命令最长静默区间。
+
+Pi RPC 的 no-progress 只由 assistant message、tool execution、controlled compaction、明确 Provider retry、durable result 和 terminal/settled 事件刷新。`herdr-pi-cli` lane 改用 bounded `agent wait`，只对去除 queue/heartbeat/poll 行后的 terminal text digest 变化刷新进展；原文不落盘。Reviewer validation 使用 Controller-owned validation heartbeat，no-progress 取 Reviewer no-progress 与 validation total 的较小值，total 始终是硬上限。重复读取状态和 Controller/Fleet heartbeat 都不刷新业务进展。`runtime-progress.json`/`validation-progress.json` 只保存时间、类型、计数、PID、result-present 与 digest，不保存 Provider 原文、token 或 transcript。
+
+`runtime_stall` 表示已 dispatch 后超过 no-progress，`attempt_deadline` 表示无论期间是否持续进展都到达 total。两者都会写 terminate intent，经过 bounded SIGTERM/SIGKILL 收尾并要求 fresh Attempt；不得向旧 Attempt 重发 prompt。若 `terminated.json` 未确认，先核对 owned pane、runner/child PID 与 heartbeat，再按当前 operator option 处理，不能手工伪造 receipt。
+
 ## 4. 启动前检查
 
 每次启动或升级前记录：

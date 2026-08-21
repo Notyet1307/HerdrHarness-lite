@@ -1,8 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { HerdrCli } from "../src/adapters/herdr-cli.js";
 import type { CommandResult, CommandRunner } from "../src/adapters/command.js";
+import type { Attempt } from "../src/model.js";
 
 class RecordingRunner implements CommandRunner {
   calls: Array<{ command: string; args: string[] }> = [];
@@ -60,7 +63,7 @@ class RecordingRunner implements CommandRunner {
       return ok({ result: { type: "agent_started", agent: agent(this.agentName, "idle"), argv: plain.slice(plain.indexOf("--") + 1) } });
     }
     if (plain[0] === "agent" && plain[1] === "prompt") {
-      return ok({ result: { type: "agent_prompted", agent: agent(this.agentName, "done") } });
+      return ok({ result: { type: "agent_prompted", agent: agent(this.agentName, "working") } });
     }
     if (plain[0] === "agent" && plain[1] === "wait") {
       return ok({ result: { type: "agent_info", agent: agent(this.agentName, "done") } });
@@ -188,7 +191,7 @@ test("Herdr adapter follows the native 0.8 command and JSON response contract", 
     { command: "herdr", args: [...session, "agent", "get", handle.agentName] },
     { command: "herdr", args: [...session, "agent", "start", handle.agentName, "--kind", "pi", "--pane", "w1:p2", "--", "--model", "test-model"] },
     { command: "herdr", args: [...session, "agent", "start", handle.agentName, "--kind", "pi", "--pane", "w1:p2", "--", "--model", "test-model"] },
-    { command: "herdr", args: [...session, "agent", "prompt", handle.agentName, "/skill:implement [harness-dispatch:worker-001]\ndo the work", "--wait"] },
+    { command: "herdr", args: [...session, "agent", "prompt", handle.agentName, "/skill:implement [harness-dispatch:worker-001]\ndo the work", "--wait", "--until", "working", "--timeout", "30000"] },
     { command: "herdr", args: [...session, "agent", "wait", handle.agentName] },
     { command: "herdr", args: [...session, "pane", "close", "w1:p2"] },
   ]);
@@ -523,3 +526,168 @@ test("Herdr adapter requires an explicit named session", () => {
   const runner: CommandRunner = { run: () => fail("unexpected call") };
   assert.throws(() => new HerdrCli({ runner, session: "" }), /session is required/);
 });
+
+test("Herdr Worker and Reviewer waits use the Attempt-bound total deadline", async () => {
+  const root = mkdtempSync(join(tmpdir(), "herdr-bounded-wait-"));
+  mkdirSync(join(root, "attempt"));
+  const calls: Array<{ args: string[]; timeoutMs: number | undefined }> = [];
+  const runner: CommandRunner = {
+    run(_command, args, options) {
+      calls.push({ args: [...args], timeoutMs: options?.timeoutMs });
+      const plain = args.slice(2);
+      if (plain[0] === "agent" && plain[1] === "prompt") {
+        return ok({ result: { type: "agent_prompted", agent: agent("hhw-contract", "working") } });
+      }
+      if (plain[0] === "agent" && plain[1] === "wait") {
+        return ok({ result: { type: "agent_info", agent: agent("hhw-contract", "done") } });
+      }
+      if (plain[0] === "agent" && plain[1] === "get") {
+        return ok({ result: { type: "agent_info", agent: agent("hhw-contract", "done") } });
+      }
+      if (plain[0] === "agent" && plain[1] === "read") return ok({ result: { type: "agent_read", text: "done" } });
+      return fail(`unexpected command: ${plain.join(" ")}`);
+    },
+  };
+  const attempt = {
+    id: "worker-001",
+    lane: "worker",
+    startedAt: new Date().toISOString(),
+    executionSnapshot: {
+      adapter: "herdr-pi-cli",
+      runtimeTimeouts: { totalTimeoutMs: 1_000, noProgressTimeoutMs: 100, sigtermGraceMs: 50, sigkillGraceMs: 50 },
+      context: { bundlePath: join(root, "attempt", "trusted-context.md") },
+    },
+    resultPath: join(root, "result.json"),
+  } as unknown as Attempt;
+  const herdr = new HerdrCli({ runner, session: "test-session" });
+
+  try {
+    await herdr.prompt({
+      handle: { agentName: "hhw-contract", paneId: "w1:p2", tabId: "w1:t2", workspaceId: "w1" },
+      attempt,
+      dispatchId: attempt.id,
+      skill: "implement",
+      text: "bounded work",
+    });
+
+    assert.equal(calls[0]?.args.includes("--wait"), true);
+    assert.deepEqual(calls[0]?.args.slice(-4, -1), ["--until", "working", "--timeout"]);
+    assert.ok(Number(calls[0]?.timeoutMs) > 0 && Number(calls[0]?.timeoutMs) <= 1_000);
+
+    await herdr.wait({
+      handle: { agentName: "hhw-contract", paneId: "w1:p2", tabId: "w1:t2", workspaceId: "w1" },
+      attempt,
+      resultPath: attempt.resultPath,
+      expectedJobId: "job-1",
+      expectedAttemptId: attempt.id,
+      expectedLane: "worker",
+    });
+    assert.equal(calls[1]?.args.at(-2), "--timeout");
+    assert.ok(Number(calls[1]?.args.at(-1)) <= 100);
+    assert.ok(Number(calls[1]?.timeoutMs) >= Number(calls[1]?.args.at(-1)) && Number(calls[1]?.timeoutMs) <= 1_000);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Herdr no-progress ignores queue noise while tool output cannot extend total", async () => {
+  for (const mode of ["queue", "tool"] as const) {
+    const root = mkdtempSync(join(tmpdir(), `herdr-${mode}-progress-`));
+    mkdirSync(join(root, "attempt"));
+    let reads = 0;
+    let closed = 0;
+    const runner: CommandRunner = {
+      run(_command, args) {
+        const plain = args.slice(2);
+        if (plain[0] === "agent" && plain[1] === "prompt") {
+          return ok({ result: { type: "agent_prompted", agent: agent("hhw-contract", "working") } });
+        }
+        if (plain[0] === "agent" && plain[1] === "wait") {
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+          return fail(error("timeout", "bounded wait expired"));
+        }
+        if (plain[0] === "agent" && plain[1] === "read") {
+          reads += 1;
+          return ok({ result: { type: "agent_read", text: mode === "queue" ? `queue heartbeat ${reads}` : `tool output ${reads}` } });
+        }
+        if (plain[0] === "pane" && plain[1] === "close") {
+          closed += 1;
+          return ok({ result: { type: "ok" } });
+        }
+        if (plain[0] === "agent" && plain[1] === "get" && closed > 0) {
+          return fail(error("agent_not_found", "agent closed"));
+        }
+        return fail(`unexpected command: ${plain.join(" ")}`);
+      },
+    };
+    const attempt = boundedAttempt(root, mode === "queue" ? 500 : 120, 50);
+    const herdr = new HerdrCli({ runner, session: "test-session" });
+    const handle = { agentName: "hhw-contract", paneId: "w1:p2", tabId: "w1:t2", workspaceId: "w1" };
+    try {
+      await herdr.prompt({ handle, attempt, dispatchId: attempt.id, skill: "implement", text: "bounded work" });
+      await assert.rejects(() => herdr.wait({
+        handle,
+        attempt,
+        resultPath: attempt.resultPath,
+        expectedJobId: "job-1",
+        expectedAttemptId: attempt.id,
+        expectedLane: "worker",
+      }), new RegExp(mode === "queue" ? "runtime_stall" : "attempt_deadline"));
+      const terminal = JSON.parse(readFileSync(join(root, "attempt", "runtime", "terminal.json"), "utf8")) as Record<string, unknown>;
+      assert.equal(terminal.code, mode === "queue" ? "runtime_stall" : "attempt_deadline");
+      assert.equal(closed, 1);
+      assert.equal(existsSync(join(root, "attempt", "runtime", "terminated.json")), true);
+      const progress = readFileSync(join(root, "attempt", "runtime", "runtime-progress.json"), "utf8");
+      assert.equal(progress.includes("tool output"), false);
+      assert.equal(progress.includes("queue heartbeat"), false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("Herdr refuses a new agent side effect after the Attempt total deadline", async () => {
+  const calls: string[][] = [];
+  const root = mkdtempSync(join(tmpdir(), "herdr-expired-"));
+  const herdr = new HerdrCli({
+    session: "test-session",
+    runner: {
+      run: (_command, args) => {
+        calls.push([...args]);
+        const plain = args.slice(2);
+        if (plain[0] === "pane" && plain[1] === "close") return ok({ result: { type: "ok" } });
+        if (plain[0] === "agent" && plain[1] === "get") return fail(error("agent_not_found", "agent closed"));
+        return fail("unexpected call");
+      },
+    },
+  });
+  mkdirSync(join(root, "attempt"));
+  const attempt = boundedAttempt(root, 10, 5);
+  attempt.startedAt = new Date(Date.now() - 1_000).toISOString();
+
+  try {
+    await assert.rejects(() => herdr.startAgent({
+      handle: { agentName: "hhw-contract", paneId: "w1:p2", tabId: "w1:t2", workspaceId: "w1" },
+      attempt,
+      argv: [],
+    }), /attempt_deadline/);
+    assert.equal(calls.some((args) => args[2] === "agent" && args[3] === "start"), false);
+    assert.equal(calls.some((args) => args[2] === "pane" && args[3] === "close"), true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+function boundedAttempt(root: string, totalTimeoutMs: number, noProgressTimeoutMs: number): Attempt {
+  return {
+    id: "worker-001",
+    lane: "worker",
+    startedAt: new Date().toISOString(),
+    resultPath: join(root, "result.json"),
+    executionSnapshot: {
+      adapter: "herdr-pi-cli",
+      runtimeTimeouts: { totalTimeoutMs, noProgressTimeoutMs, sigtermGraceMs: 20, sigkillGraceMs: 10 },
+      context: { bundlePath: join(root, "attempt", "trusted-context.md") },
+    },
+  } as unknown as Attempt;
+}
