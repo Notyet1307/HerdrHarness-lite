@@ -214,7 +214,7 @@ function projectConfig(root: string, id: string, stateDir: string, resources: Ro
       "--skill", join(repositoryRoot, "pi/skills/code-review"),
       "--provider", "openai-codex",
       "--model", "fixture-model",
-      "--tools", "read,grep,find,ls,subagent,review_preflight,review_validate,review_submit",
+      "--tools", "read,grep,find,ls,subagent,review_preflight,review_submit",
       "--thinking", "max",
     ],
     herdr: { bin: "herdr", session: `session-${id}` },

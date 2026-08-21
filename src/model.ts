@@ -136,6 +136,48 @@ export type ReviewerResult = {
   findings: ReviewerFinding[];
 };
 
+export type ReviewerValidationStatus = "passed" | "failed-checks" | "infrastructure-error";
+
+export type ReviewerValidationOutput = {
+  text: string;
+  truncated: boolean;
+  redacted: boolean;
+  byteCount: number;
+  sha256: string;
+};
+
+export type ReviewerValidationReceipt = {
+  version: 1;
+  status: ReviewerValidationStatus;
+  jobId: string;
+  attemptId: string;
+  taskDigest: string;
+  baseSha: string;
+  reviewedHeadSha: string;
+  validationArgv: string[];
+  validationArgvDigest: string;
+  startedAt: string;
+  completedAt: string;
+  durationMs: number;
+  exitCode: number | null;
+  signal: string | null;
+  timeout: boolean;
+  error: string | null;
+  stdout: ReviewerValidationOutput;
+  stderr: ReviewerValidationOutput;
+  dockerHost: string | null;
+  relevantEnvironmentDigest: string;
+  resourceDigest: string;
+  sourceSnapshotDigest: string;
+};
+
+/** Durable runtime output; like `result`, this is not part of the immutable dispatch plan. */
+export type ReviewerValidationReceiptBinding = {
+  path: string;
+  digest: string;
+  status: ReviewerValidationStatus;
+};
+
 export type AttemptResult = WorkerResult | ReviewerResult;
 
 export type HandoffObligation = {
@@ -212,6 +254,7 @@ export type AttemptContextEnvelope = {
     refs: string[];
     reviewEvidencePath: string | null;
     validationArgv: string[] | null;
+    validationReceiptPath: string | null;
   };
   runtime: {
     snapshotDigest: string;
@@ -253,6 +296,8 @@ export type Attempt = {
   contextEnvelopeDigest?: string;
   handle: AgentHandle | null;
   result: AttemptResult | null;
+  /** Missing before deterministic Reviewer validation or on ledgers written before that stage existed. */
+  reviewerValidationReceipt?: ReviewerValidationReceiptBinding;
   /** Optional for V1 ledgers written before bounded same-attempt reconciliation. */
   reconciliationAttempts?: number;
   startedAt: string;
@@ -313,6 +358,7 @@ export type BlockClass =
   | "agent_blocked"
   | "review_uncertain"
   | "reviewer_preflight_dirty"
+  | "validation_infrastructure"
   | "infrastructure_exhausted"
   | "integrity_violation"
   | "stale_task"
@@ -740,6 +786,15 @@ export function assertJobInvariant(job: Job): void {
   }
   if (job.activeAttempt?.executionSnapshot !== undefined && job.activeAttempt.planDigest === undefined) {
     throw new Error("attempt execution snapshot requires a plan digest");
+  }
+  const validationReceipt = job.activeAttempt?.reviewerValidationReceipt;
+  if (validationReceipt !== undefined && (
+    job.activeAttempt?.lane !== "reviewer"
+    || !isBoundedText(validationReceipt.path, 8_192)
+    || !/^[0-9a-f]{64}$/i.test(validationReceipt.digest)
+    || !["passed", "failed-checks", "infrastructure-error"].includes(validationReceipt.status)
+  )) {
+    throw new Error("attempt has an invalid Reviewer validation receipt binding");
   }
   const handoff = job.activeAttempt?.contextEnvelope?.handoff?.value;
   if (handoff && job.activeAttempt) {

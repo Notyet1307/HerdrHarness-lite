@@ -62,6 +62,9 @@ export function buildAttemptContextEnvelope(input: {
         ? resolve(dirname(input.attempt.resultPath), "workspace", "review-evidence.txt")
         : null,
       validationArgv: input.attempt.reviewerValidationArgv ? [...input.attempt.reviewerValidationArgv] : null,
+      validationReceiptPath: input.attempt.lane === "reviewer"
+        ? resolve(dirname(input.attempt.resultPath), "validation-receipt.json")
+        : null,
     },
     runtime: {
       snapshotDigest: digest(input.executionSnapshot),

@@ -47,7 +47,7 @@ test("Pi review adapter uses fresh foreground Attempt-private project reviewers"
   assert.match(skill, /Pi tool names are case-sensitive/);
   assert.match(skill, /`Skill`, `Read`, `Glob`, `PowerShell`/);
   assert.match(skill, /returns at most 12 KiB per\s+axis/);
-  assert.match(skill, /stdout and stderr are each limited to 8 KiB/);
+  assert.match(skill, /stdout and stderr content is replaced by a fixed redaction marker/);
   for (const forbidden of ["docs/agents/issue-tracker.md", "gh issue", "fetch the issue"]) {
     assert.equal(skill.toLowerCase().includes(forbidden), false);
   }
@@ -90,7 +90,8 @@ test("example config pins the Worker and Reviewer Pi role contracts", () => {
     "reviewer-tools.js",
   ]);
   assert.deepEqual(flagValues(exampleConfig.workerArgv, "--tools"), ["read,bash,edit,write,grep,find,ls,worker_submit"]);
-  assert.deepEqual(flagValues(exampleConfig.reviewerArgv, "--tools"), ["read,grep,find,ls,subagent,review_preflight,review_validate,review_submit"]);
+  assert.deepEqual(flagValues(exampleConfig.reviewerArgv, "--tools"), ["read,grep,find,ls,subagent,review_preflight,review_submit"]);
+  assert.equal(exampleConfig.reviewerArgv.includes("review_validate"), false);
   assert.deepEqual(flagValues(exampleConfig.workerArgv, "--thinking"), ["high"]);
   assert.deepEqual(flagValues(exampleConfig.reviewerArgv, "--thinking"), ["max"]);
   assert.equal(exampleConfig.reviewerRuntime, "pi-rpc");

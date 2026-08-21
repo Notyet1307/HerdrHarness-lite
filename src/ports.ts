@@ -15,6 +15,8 @@ import type {
   Job,
   PullRequestObservation,
   PullRequestRef,
+  ReviewerValidationReceipt,
+  ReviewerValidationReceiptBinding,
   SelectedTask,
   TaskSnapshot,
   WorktreeHandle,
@@ -31,7 +33,7 @@ export type HarnessConfig = {
   worktreeRoot: string;
   maxReviewRounds: number;
   maxAnalystTurns: number;
-  /** Fixed argv executed by the Harness-owned Reviewer validation tool without a shell. */
+  /** Fixed argv executed by the Controller-owned Reviewer validation stage without a shell. */
   reviewerValidationArgv: string[];
   /** Native Pi arguments only; Herdr selects `pi` and Controller validates the role contract. */
   workerArgv: string[];
@@ -138,6 +140,20 @@ export type BaseSyncVerification =
   | { ok: true; headSha: string }
   | { ok: false; class: "agent_decision" | "integrity_violation"; reason: string };
 
+export type ReviewerValidationInput = {
+  worktree: WorktreeHandle;
+  rootPath: string;
+  resultPath: string;
+  jobId: string;
+  attemptId: string;
+  taskDigest: string;
+  baseSha: string;
+  expectedHeadSha: string;
+  validationArgv: string[];
+  dockerHost: string | null;
+  resourceDigest: string;
+};
+
 export interface GitPort {
   refreshBase(localPath: string, baseRef: string): Promise<string>;
   syncBase(input: {
@@ -173,16 +189,26 @@ export interface GitPort {
     agentDir: string;
   }): Promise<ExecutionContext>;
   verifyTrustedContext(context: ExecutionContext): Promise<void>;
+  runReviewerValidation(input: ReviewerValidationInput): Promise<{
+    receipt: ReviewerValidationReceipt;
+    binding: ReviewerValidationReceiptBinding;
+  }>;
+  verifyReviewerValidation(input: ReviewerValidationInput & {
+    binding: ReviewerValidationReceiptBinding;
+  }): Promise<ReviewerValidationReceipt>;
   prepareReviewer(input: {
     worktree: WorktreeHandle;
     rootPath: string;
     resultPath: string;
     jobId: string;
     attemptId: string;
+    taskDigest: string;
     baseSha: string;
     expectedHeadSha: string;
     validationArgv: string[];
     dockerHost: string | null;
+    resourceDigest: string;
+    validationReceipt: ReviewerValidationReceiptBinding;
     reviewAxisAgent: ExecutionResource;
     piExecutable: string;
     piRuntimeVersion: string;

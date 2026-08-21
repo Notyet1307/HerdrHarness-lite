@@ -1,6 +1,6 @@
 import { join, resolve } from "node:path";
-import { digest, type AnalystSession, type AnalystTurn, type AttemptResult, type EvidenceItem, type EvidenceRequest, type ExecutionContext, type ExecutionResource, type HarnessState, type IssueSnapshot, type Job, type PullRequestCheck, type PullRequestObservation, type PullRequestRef, type SelectedTask } from "../src/model.js";
-import type { AnalystPort, Clock, EvidencePort, GitHubPort, GitPort, HerdrPort, IdGenerator, RuntimePreflightPort, StateStore } from "../src/ports.js";
+import { digest, type AnalystSession, type AnalystTurn, type AttemptResult, type EvidenceItem, type EvidenceRequest, type ExecutionContext, type ExecutionResource, type HarnessState, type IssueSnapshot, type Job, type PullRequestCheck, type PullRequestObservation, type PullRequestRef, type ReviewerValidationReceipt, type ReviewerValidationReceiptBinding, type SelectedTask } from "../src/model.js";
+import type { AnalystPort, Clock, EvidencePort, GitHubPort, GitPort, HerdrPort, IdGenerator, ReviewerValidationInput, RuntimePreflightPort, StateStore } from "../src/ports.js";
 
 export const validCodeReviewSkillPath = resolve("pi/skills/code-review");
 export const validFocusedSelfCheckSkillPath = resolve("pi/skills/focused-self-check");
@@ -42,7 +42,7 @@ export const validReviewerArgv = [
   "--extension", validPiSubagentsExtensionPath,
   "--extension", validReviewerToolsExtensionPath,
   "--skill", validCodeReviewSkillPath,
-  "--tools", "read,grep,find,ls,subagent,review_preflight,review_validate,review_submit",
+  "--tools", "read,grep,find,ls,subagent,review_preflight,review_submit",
   "--thinking", "max",
 ];
 
@@ -218,9 +218,16 @@ export class FakeGit implements GitPort {
   reviewerFailure: string | null = null;
   reviewerValidationArgv: string[][] = [];
   reviewerDockerHosts: Array<string | null> = [];
+  reviewerValidationExecutions = 0;
+  reviewerValidationStarted = false;
+  reviewerValidationGate: Promise<void> | null = null;
+  reviewerValidationStatus: ReviewerValidationReceipt["status"] = "passed";
+  reviewerValidationError: string | null = null;
+  reviewerReceiptFailure: Error | null = null;
   trustedContexts: ExecutionContext[] = [];
   trustedContextFailure: Error | null = null;
   reviewerPreparationFailure: Error | null = null;
+  private reviewerReceipts = new Map<string, { receipt: ReviewerValidationReceipt; binding: ReviewerValidationReceiptBinding }>();
   workerVerifications: Array<{
     reportedHeadSha: string;
     expectedRemoteHeadSha: string | null;
@@ -283,10 +290,67 @@ export class FakeGit implements GitPort {
     if (this.trustedContextFailure) throw this.trustedContextFailure;
   }
 
-  async prepareReviewer(input: { rootPath: string; validationArgv: string[]; dockerHost: string | null; reviewAxisAgent: ExecutionResource; piExecutable: string; piRuntimeVersion: string; piAgentDir: string; prompt: string; trustedContextPath: string; reviewerSkillPath: string; contextBudgetBytes: number; contextBudgetReserveBytes: number }): Promise<{ reviewPath: string; descriptorPath: string; evidencePath: string }> {
-    if (this.reviewerPreparationFailure) throw this.reviewerPreparationFailure;
+  async runReviewerValidation(input: ReviewerValidationInput): Promise<{
+    receipt: ReviewerValidationReceipt;
+    binding: ReviewerValidationReceiptBinding;
+  }> {
+    const existing = this.reviewerReceipts.get(input.attemptId);
+    if (existing) return clone(existing);
+    this.reviewerValidationExecutions += 1;
+    this.reviewerValidationStarted = true;
+    if (this.reviewerValidationGate) await this.reviewerValidationGate;
     this.reviewerValidationArgv.push([...input.validationArgv]);
     this.reviewerDockerHosts.push(input.dockerHost);
+    const failedChecks = this.reviewerValidationStatus === "failed-checks";
+    const infrastructure = this.reviewerValidationStatus === "infrastructure-error";
+    const emptyOutput = {
+      text: "",
+      truncated: false,
+      redacted: false,
+      byteCount: 0,
+      sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    };
+    const receipt: ReviewerValidationReceipt = {
+      version: 1,
+      status: this.reviewerValidationStatus,
+      jobId: input.jobId,
+      attemptId: input.attemptId,
+      taskDigest: input.taskDigest,
+      baseSha: input.baseSha,
+      reviewedHeadSha: input.expectedHeadSha,
+      validationArgv: [...input.validationArgv],
+      validationArgvDigest: digest(input.validationArgv),
+      startedAt: "2026-08-03T00:00:00.000Z",
+      completedAt: "2026-08-03T00:00:01.000Z",
+      durationMs: 1_000,
+      exitCode: infrastructure ? null : failedChecks ? 7 : 0,
+      signal: null,
+      timeout: false,
+      error: infrastructure ? (this.reviewerValidationError ?? "validation infrastructure unavailable") : null,
+      stdout: emptyOutput,
+      stderr: { ...emptyOutput },
+      dockerHost: input.dockerHost,
+      relevantEnvironmentDigest: "e".repeat(64),
+      resourceDigest: input.resourceDigest,
+      sourceSnapshotDigest: "f".repeat(64),
+    };
+    const binding = { path: join(input.rootPath, "validation-receipt.json"), digest: digest(receipt), status: receipt.status };
+    const output = { receipt, binding };
+    this.reviewerReceipts.set(input.attemptId, clone(output));
+    return clone(output);
+  }
+
+  async verifyReviewerValidation(input: ReviewerValidationInput & {
+    binding: ReviewerValidationReceiptBinding;
+  }): Promise<ReviewerValidationReceipt> {
+    if (this.reviewerReceiptFailure) throw this.reviewerReceiptFailure;
+    const stored = this.reviewerReceipts.get(input.attemptId);
+    if (!stored || JSON.stringify(stored.binding) !== JSON.stringify(input.binding)) throw new Error("validation receipt drifted");
+    return clone(stored.receipt);
+  }
+
+  async prepareReviewer(input: { rootPath: string; validationArgv: string[]; dockerHost: string | null; validationReceipt: ReviewerValidationReceiptBinding; reviewAxisAgent: ExecutionResource; piExecutable: string; piRuntimeVersion: string; piAgentDir: string; prompt: string; trustedContextPath: string; reviewerSkillPath: string; contextBudgetBytes: number; contextBudgetReserveBytes: number }): Promise<{ reviewPath: string; descriptorPath: string; evidencePath: string }> {
+    if (this.reviewerPreparationFailure) throw this.reviewerPreparationFailure;
     return {
       reviewPath: join(input.rootPath, "workspace", "source"),
       descriptorPath: join(input.rootPath, "workspace", "descriptor.json"),

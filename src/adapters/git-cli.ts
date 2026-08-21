@@ -1,17 +1,24 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { Buffer } from "node:buffer";
-import { accessSync, chmodSync, constants, cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
-import type { ContextEntry, ExecutionContext, ExecutionResource } from "../model.js";
+import { accessSync, chmodSync, closeSync, constants, cpSync, existsSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { digest, type ContextEntry, type ExecutionContext, type ExecutionResource, type ReviewerValidationReceipt, type ReviewerValidationReceiptBinding } from "../model.js";
 import { executionResourceDigest } from "../attempt-plan.js";
-import type { BaseSyncVerification, GitPort, ReviewerVerification, WorkerVerification } from "../ports.js";
+import type { BaseSyncVerification, GitPort, ReviewerValidationInput, ReviewerVerification, WorkerVerification } from "../ports.js";
 import { pathIsWithin, pathsOverlap } from "../path-safety.js";
+import {
+  assertReviewerValidationReceipt,
+  REVIEWER_VALIDATION_TIMEOUT_MS,
+  ReviewerValidationInfrastructureError,
+  ReviewerValidationIntegrityError,
+} from "../reviewer-validation.js";
 import {
   assertReviewerInitialContextBudget,
   REVIEWER_CONTEXT_BUDGET_BYTES,
   REVIEWER_CONTEXT_BUDGET_RESERVE_BYTES,
 } from "../reviewer-context-budget.js";
 import { type CommandRunner, requireSuccess, SyncCommandRunner } from "./command.js";
+import { runReviewerValidationProcess } from "./reviewer-validation-runner.js";
 
 const CONTEXT_CANDIDATES = ["AGENTS.override.md", "AGENTS.md", "AGENTS.MD", "CLAUDE.md", "CLAUDE.MD"] as const;
 const MAX_CONTEXT_BYTES = 128 * 1024;
@@ -23,7 +30,10 @@ const REVIEWER_SUBAGENT_CONFIG = `${JSON.stringify({
 }, null, 2)}\n`;
 
 export class GitCli implements GitPort {
-  constructor(private readonly runner: CommandRunner = new SyncCommandRunner()) {}
+  constructor(
+    private readonly runner: CommandRunner = new SyncCommandRunner(),
+    private readonly reviewerValidationTimeoutMs = REVIEWER_VALIDATION_TIMEOUT_MS,
+  ) {}
 
   async refreshBase(localPath: string, baseRef: string): Promise<string> {
     requireSuccess(this.runner.run("git", ["-C", localPath, "fetch", "--prune", "origin", baseRef]), "git fetch base");
@@ -300,16 +310,96 @@ export class GitCli implements GitPort {
     }
   }
 
+  async runReviewerValidation(input: ReviewerValidationInput): Promise<{
+    receipt: ReviewerValidationReceipt;
+    binding: ReviewerValidationReceiptBinding;
+  }> {
+    const paths = reviewerPaths(input);
+    if (existsSync(paths.receiptPath)) {
+      const binding = receiptBinding(paths.receiptPath);
+      return { binding, receipt: await this.verifyReviewerValidation({ ...input, binding }) };
+    }
+    if (existsSync(paths.planPath)) {
+      throw new ReviewerValidationInfrastructureError("Reviewer validation was interrupted before its durable receipt; a fresh Attempt is required");
+    }
+
+    const sourceSnapshotDigest = this.prepareReviewerValidationWorkspace(input, paths);
+    const plan = validationPlan(input, paths, sourceSnapshotDigest);
+    publishImmutable(paths.planPath, `${JSON.stringify(plan, null, 2)}\n`);
+    const startedAt = new Date().toISOString();
+    const startedMs = Date.now();
+    const output = await runReviewerValidationProcess({
+      validationPath: paths.validationPath,
+      scratchPath: paths.scratchPath,
+      validationArgv: input.validationArgv,
+      dockerHost: input.dockerHost,
+      timeoutMs: this.reviewerValidationTimeoutMs,
+    });
+    const completedAt = new Date().toISOString();
+    const deterministic = output.signal === null && output.timeout === false && output.error === null;
+    const receipt: ReviewerValidationReceipt = {
+      version: 1,
+      status: deterministic ? output.exitCode === 0 ? "passed" : "failed-checks" : "infrastructure-error",
+      jobId: input.jobId,
+      attemptId: input.attemptId,
+      taskDigest: input.taskDigest,
+      baseSha: input.baseSha,
+      reviewedHeadSha: input.expectedHeadSha,
+      validationArgv: [...input.validationArgv],
+      validationArgvDigest: digest(input.validationArgv),
+      startedAt,
+      completedAt,
+      durationMs: Math.max(0, Date.now() - startedMs),
+      exitCode: output.exitCode,
+      signal: output.signal,
+      timeout: output.timeout,
+      error: output.error,
+      stdout: output.stdout,
+      stderr: output.stderr,
+      dockerHost: input.dockerHost,
+      relevantEnvironmentDigest: output.relevantEnvironmentDigest,
+      resourceDigest: input.resourceDigest,
+      sourceSnapshotDigest,
+    };
+    assertReviewerValidationReceipt(receipt, validationIdentity(input));
+    publishImmutable(paths.receiptPath, `${JSON.stringify(receipt, null, 2)}\n`);
+    return { receipt, binding: receiptBinding(paths.receiptPath) };
+  }
+
+  async verifyReviewerValidation(input: ReviewerValidationInput & {
+    binding: ReviewerValidationReceiptBinding;
+  }): Promise<ReviewerValidationReceipt> {
+    const paths = reviewerPaths(input);
+    if (input.binding.path !== paths.receiptPath || !existsSync(paths.planPath) || !existsSync(paths.receiptPath)) {
+      throw new ReviewerValidationIntegrityError("Reviewer validation receipt path or plan is missing");
+    }
+    const raw = privateImmutableFile(paths.receiptPath);
+    if (textDigest(raw) !== input.binding.digest) throw new ReviewerValidationIntegrityError("Reviewer validation receipt digest drifted");
+    const receipt = JSON.parse(raw) as unknown;
+    assertReviewerValidationReceipt(receipt, validationIdentity(input));
+    if (receipt.status !== input.binding.status) throw new ReviewerValidationIntegrityError("Reviewer validation receipt status drifted");
+    const plan = JSON.parse(privateImmutableFile(paths.planPath)) as unknown;
+    const expectedPlan = validationPlan(input, paths, receipt.sourceSnapshotDigest);
+    if (JSON.stringify(plan) !== JSON.stringify(expectedPlan)) throw new ReviewerValidationIntegrityError("Reviewer validation plan drifted");
+    if (sourceSnapshotDigest(paths.reviewPath) !== receipt.sourceSnapshotDigest) {
+      throw new ReviewerValidationIntegrityError("Reviewer source snapshot digest drifted");
+    }
+    return receipt;
+  }
+
   async prepareReviewer(input: {
     worktree: { path: string; branch: string; workspaceId: string };
     rootPath: string;
     resultPath: string;
     jobId: string;
     attemptId: string;
+    taskDigest: string;
     baseSha: string;
     expectedHeadSha: string;
     validationArgv: string[];
     dockerHost: string | null;
+    resourceDigest: string;
+    validationReceipt: ReviewerValidationReceiptBinding;
     reviewAxisAgent: ExecutionResource;
     piExecutable: string;
     piRuntimeVersion: string;
@@ -320,9 +410,8 @@ export class GitCli implements GitPort {
     contextBudgetBytes: number;
     contextBudgetReserveBytes: number;
   }): Promise<{ reviewPath: string; descriptorPath: string; evidencePath: string }> {
-    const rootPath = resolve(input.rootPath);
-    if (pathsOverlap(input.worktree.path, rootPath)) throw new Error("Reviewer state must be outside the product worktree");
-    if (resolve(input.resultPath) !== join(rootPath, "result.json")) throw new Error("Reviewer result path escaped its attempt root");
+    const paths = reviewerPaths(input);
+    await this.verifyReviewerValidation({ ...input, binding: input.validationReceipt });
     if (input.reviewAxisAgent.kind !== "agent" || executionResourceDigest(input.reviewAxisAgent.path) !== input.reviewAxisAgent.digest) {
       throw new Error("Reviewer child agent differs from the bound execution resource");
     }
@@ -336,15 +425,9 @@ export class GitCli implements GitPort {
       throw new Error("Reviewer context budget contract changed");
     }
 
-    const workspacePath = join(rootPath, "workspace");
-    const reviewPath = join(workspacePath, "source");
-    const validationPath = join(workspacePath, "validation");
-    const scratchPath = join(workspacePath, "scratch");
-    const runtimePath = join(workspacePath, "review-runtime");
-    const subagentConfigDir = join(workspacePath, "subagent-config");
-    const subagentConfigPath = join(subagentConfigDir, "extensions", "subagent", "config.json");
+    const subagentConfigPath = join(paths.subagentConfigDir, "extensions", "subagent", "config.json");
     const subagentConfigDigest = textDigest(REVIEWER_SUBAGENT_CONFIG);
-    const reviewAxisAgentPath = join(runtimePath, ".agents", basename(input.reviewAxisAgent.path));
+    const reviewAxisAgentPath = join(paths.runtimePath, ".agents", basename(input.reviewAxisAgent.path));
     const reviewAxisAgentContent = readFileSync(input.reviewAxisAgent.path, "utf8");
     const reviewAxisAgentDigest = textDigest(reviewAxisAgentContent);
     const piExecutable = realpathSync(input.piExecutable);
@@ -352,28 +435,24 @@ export class GitCli implements GitPort {
     if (!input.piRuntimeVersion.trim() || /[\0\r\n]/.test(input.piRuntimeVersion)) throw new Error("Reviewer Pi runtime version is invalid");
     if (!isAbsolute(input.piAgentDir) || /[\0\r\n]/.test(input.piAgentDir)) throw new Error("Reviewer Pi agent directory is invalid");
     const piAgentDir = resolve(input.piAgentDir);
-    const emptyAppendSystemPromptPath = join(runtimePath, "empty-append-system.md");
+    const emptyAppendSystemPromptPath = join(paths.runtimePath, "empty-append-system.md");
     const emptyAppendSystemPromptDigest = textDigest("");
-    const piSubagentWrapperPath = join(runtimePath, "pi-subagent");
+    const piSubagentWrapperPath = join(paths.runtimePath, "pi-subagent");
     const piSubagentWrapperContent = piSubagentWrapper(piExecutable, input.piRuntimeVersion, emptyAppendSystemPromptPath);
     const piSubagentWrapperDigest = textDigest(piSubagentWrapperContent);
-    const descriptorPath = join(workspacePath, "descriptor.json");
-    const evidencePath = join(workspacePath, "review-evidence.txt");
-    const privateEvidenceDir = join(rootPath, "evidence");
     const descriptor = {
       version: 1,
       jobId: input.jobId,
       attemptId: input.attemptId,
       reviewedHeadSha: input.expectedHeadSha,
-      validationArgv: input.validationArgv,
-      dockerHost: input.dockerHost,
-      reviewPath,
-      validationPath,
-      scratchPath,
-      runtimePath,
+      validationReceiptPath: input.validationReceipt.path,
+      validationReceiptDigest: input.validationReceipt.digest,
+      validationStatus: input.validationReceipt.status,
+      reviewPath: paths.reviewPath,
+      runtimePath: paths.runtimePath,
       reviewAxisAgentPath,
       reviewAxisAgentDigest,
-      subagentConfigDir,
+      subagentConfigDir: paths.subagentConfigDir,
       subagentConfigPath,
       subagentConfigDigest,
       piExecutable,
@@ -384,66 +463,65 @@ export class GitCli implements GitPort {
       piSubagentWrapperPath,
       piSubagentWrapperDigest,
       resultPath: resolve(input.resultPath),
-      privateEvidenceDir,
+      privateEvidenceDir: paths.privateEvidenceDir,
       initialContextBytes,
       contextBudgetBytes: input.contextBudgetBytes,
       contextBudgetReserveBytes: input.contextBudgetReserveBytes,
     };
 
-    if (existsSync(descriptorPath)) {
-      const existing = JSON.parse(readFileSync(descriptorPath, "utf8")) as unknown;
+    if (existsSync(paths.descriptorPath)) {
+      const existing = JSON.parse(readFileSync(paths.descriptorPath, "utf8")) as unknown;
       if (JSON.stringify(existing) !== JSON.stringify(descriptor)) throw new Error("Reviewer descriptor identity changed after preparation");
-      for (const path of [reviewPath, validationPath, scratchPath, runtimePath, reviewAxisAgentPath, subagentConfigDir, subagentConfigPath, emptyAppendSystemPromptPath, piSubagentWrapperPath, evidencePath, privateEvidenceDir]) {
+      for (const path of [paths.reviewPath, paths.runtimePath, reviewAxisAgentPath, paths.subagentConfigDir, subagentConfigPath, emptyAppendSystemPromptPath, piSubagentWrapperPath, paths.evidencePath, paths.privateEvidenceDir]) {
         if (!existsSync(path)) throw new Error(`Reviewer workspace is incomplete: ${path}`);
       }
-      if (textDigest(readFileSync(reviewAxisAgentPath, "utf8")) !== reviewAxisAgentDigest || (lstatSync(reviewAxisAgentPath).mode & 0o222)) {
-        throw new Error("Reviewer child agent snapshot is not immutable");
-      }
-      if (textDigest(readFileSync(subagentConfigPath, "utf8")) !== subagentConfigDigest || (lstatSync(subagentConfigPath).mode & 0o222)) {
-        throw new Error("Reviewer subagent config snapshot is not immutable");
-      }
-      if (textDigest(readFileSync(emptyAppendSystemPromptPath, "utf8")) !== emptyAppendSystemPromptDigest || (lstatSync(emptyAppendSystemPromptPath).mode & 0o222)) {
-        throw new Error("Reviewer child append-system prompt override is not immutable");
-      }
-      if (textDigest(readFileSync(piSubagentWrapperPath, "utf8")) !== piSubagentWrapperDigest || (lstatSync(piSubagentWrapperPath).mode & 0o222) || !(lstatSync(piSubagentWrapperPath).mode & 0o111)) {
-        throw new Error("Reviewer child Pi wrapper is not immutable and executable");
-      }
-      return { reviewPath, descriptorPath, evidencePath };
+      assertReviewerRuntimeFiles({ reviewAxisAgentPath, reviewAxisAgentDigest, subagentConfigPath, subagentConfigDigest, emptyAppendSystemPromptPath, emptyAppendSystemPromptDigest, piSubagentWrapperPath, piSubagentWrapperDigest });
+      return { reviewPath: paths.reviewPath, descriptorPath: paths.descriptorPath, evidencePath: paths.evidencePath };
     }
 
+    mkdirSync(join(paths.runtimePath, ".agents"), { recursive: true, mode: 0o700 });
+    mkdirSync(join(paths.subagentConfigDir, "extensions", "subagent"), { recursive: true, mode: 0o700 });
+    writeFileSync(reviewAxisAgentPath, reviewAxisAgentContent, { flag: "wx", mode: 0o400 });
+    writeFileSync(subagentConfigPath, REVIEWER_SUBAGENT_CONFIG, { flag: "wx", mode: 0o400 });
+    writeFileSync(emptyAppendSystemPromptPath, "", { flag: "wx", mode: 0o400 });
+    writeFileSync(piSubagentWrapperPath, piSubagentWrapperContent, { flag: "wx", mode: 0o500 });
+    makeReadOnly(paths.runtimePath);
+    makeReadOnly(paths.subagentConfigDir);
+    writeImmutable(paths.descriptorPath, `${JSON.stringify(descriptor, null, 2)}\n`);
+    return { reviewPath: paths.reviewPath, descriptorPath: paths.descriptorPath, evidencePath: paths.evidencePath };
+  }
+
+  private prepareReviewerValidationWorkspace(input: ReviewerValidationInput, paths: ReviewerPaths): string {
     const head = this.git(input.worktree.path, ["rev-parse", "HEAD"]).trim();
     if (head !== input.expectedHeadSha) throw new Error(`Reviewer source HEAD ${head} != ${input.expectedHeadSha}`);
-    const ancestry = this.runner.run("git", ["-C", input.worktree.path, "merge-base", "--is-ancestor", input.baseSha, head]);
-    if (!ancestry.ok) throw new Error(`Reviewer base ${input.baseSha} is not an ancestor of ${head}`);
+    if (!this.runner.run("git", ["-C", input.worktree.path, "merge-base", "--is-ancestor", input.baseSha, head]).ok) {
+      throw new Error(`Reviewer base ${input.baseSha} is not an ancestor of ${head}`);
+    }
     const dirty = this.git(input.worktree.path, ["status", "--porcelain", "--untracked-files=no"]);
     if (dirty.trim()) throw new Error(`Reviewer source has tracked changes:\n${dirty.trim()}`);
     const diff = this.git(input.worktree.path, ["diff", "--no-ext-diff", "--find-renames", `${input.baseSha}...${head}`]);
     if (!diff.trim()) throw new Error("Reviewer fixed-point diff is empty");
     const commits = this.git(input.worktree.path, ["log", "--oneline", `${input.baseSha}..${head}`]);
 
-    if (existsSync(workspacePath)) {
-      makeWritable(workspacePath);
-      rmSync(workspacePath, { recursive: true, force: true });
+    if (existsSync(paths.workspacePath)) {
+      makeWritable(paths.workspacePath);
+      rmSync(paths.workspacePath, { recursive: true, force: true });
     }
-    mkdirSync(reviewPath, { recursive: true, mode: 0o700 });
-    mkdirSync(privateEvidenceDir, { recursive: true, mode: 0o700 });
-    mkdirSync(join(runtimePath, ".agents"), { recursive: true, mode: 0o700 });
-    mkdirSync(join(subagentConfigDir, "extensions", "subagent"), { recursive: true, mode: 0o700 });
-    mkdirSync(rootPath, { recursive: true, mode: 0o700 });
-    chmodSync(rootPath, 0o700);
+    if (existsSync(paths.privateEvidenceDir)) rmSync(paths.privateEvidenceDir, { recursive: true, force: true });
+    mkdirSync(paths.reviewPath, { recursive: true, mode: 0o700 });
+    mkdirSync(paths.privateEvidenceDir, { recursive: true, mode: 0o700 });
+    mkdirSync(paths.rootPath, { recursive: true, mode: 0o700 });
+    chmodSync(paths.rootPath, 0o700);
     requireSuccess(
-      this.runner.run("git", ["-C", input.worktree.path, "checkout-index", "--all", "--force", `--prefix=${reviewPath}${sep}`]),
+      this.runner.run("git", ["-C", input.worktree.path, "checkout-index", "--all", "--force", `--prefix=${paths.reviewPath}${sep}`]),
       "git export Reviewer source",
     );
-    cpSync(reviewPath, validationPath, { recursive: true });
-    for (const path of [join(scratchPath, "home"), join(scratchPath, "tmp"), join(scratchPath, "cache"), join(scratchPath, "pycache")]) {
+    const sourceDigest = sourceSnapshotDigest(paths.reviewPath);
+    cpSync(paths.reviewPath, paths.validationPath, { recursive: true });
+    for (const path of [join(paths.scratchPath, "home"), join(paths.scratchPath, "tmp"), join(paths.scratchPath, "cache"), join(paths.scratchPath, "pycache")]) {
       mkdirSync(path, { recursive: true });
     }
-    writeFileSync(reviewAxisAgentPath, reviewAxisAgentContent, { flag: "wx", mode: 0o400 });
-    writeFileSync(subagentConfigPath, REVIEWER_SUBAGENT_CONFIG, { flag: "wx", mode: 0o400 });
-    writeFileSync(emptyAppendSystemPromptPath, "", { flag: "wx", mode: 0o400 });
-    writeFileSync(piSubagentWrapperPath, piSubagentWrapperContent, { flag: "wx", mode: 0o500 });
-    writeFileSync(evidencePath, [
+    writeFileSync(paths.evidencePath, [
       `Base SHA: ${input.baseSha}`,
       `Head SHA: ${head}`,
       "Ancestry: verified",
@@ -455,11 +533,8 @@ export class GitCli implements GitPort {
       "Diff:",
       diff,
     ].join("\n"), { mode: 0o400 });
-    makeReadOnly(reviewPath);
-    makeReadOnly(runtimePath);
-    makeReadOnly(subagentConfigDir);
-    writeFileSync(descriptorPath, `${JSON.stringify(descriptor, null, 2)}\n`, { flag: "wx", mode: 0o400 });
-    return { reviewPath, descriptorPath, evidencePath };
+    makeReadOnly(paths.reviewPath);
+    return sourceDigest;
   }
 
   async verifyReviewer(input: {
@@ -495,6 +570,157 @@ export class GitCli implements GitPort {
   }
 }
 
+type ReviewerPaths = {
+  rootPath: string;
+  workspacePath: string;
+  reviewPath: string;
+  validationPath: string;
+  scratchPath: string;
+  runtimePath: string;
+  subagentConfigDir: string;
+  descriptorPath: string;
+  evidencePath: string;
+  privateEvidenceDir: string;
+  planPath: string;
+  receiptPath: string;
+};
+
+function reviewerPaths(input: Pick<ReviewerValidationInput, "worktree" | "rootPath" | "resultPath">): ReviewerPaths {
+  const rootPath = resolve(input.rootPath);
+  const resultPath = resolve(input.resultPath);
+  if (pathsOverlap(input.worktree.path, rootPath)) throw new Error("Reviewer state must be outside the product worktree");
+  if (resultPath !== join(rootPath, "result.json")) throw new Error("Reviewer result path escaped its attempt root");
+  const workspacePath = join(rootPath, "workspace");
+  const paths = {
+    rootPath,
+    workspacePath,
+    reviewPath: join(workspacePath, "source"),
+    validationPath: join(workspacePath, "validation"),
+    scratchPath: join(workspacePath, "scratch"),
+    runtimePath: join(workspacePath, "review-runtime"),
+    subagentConfigDir: join(workspacePath, "subagent-config"),
+    descriptorPath: join(workspacePath, "descriptor.json"),
+    evidencePath: join(workspacePath, "review-evidence.txt"),
+    privateEvidenceDir: join(rootPath, "evidence"),
+    planPath: join(rootPath, "validation-plan.json"),
+    receiptPath: join(rootPath, "validation-receipt.json"),
+  };
+  for (const path of Object.values(paths).filter((value) => value !== rootPath)) {
+    if (!pathIsWithin(rootPath, path)) throw new Error("Reviewer path escaped its canonical state root");
+  }
+  for (const [left, right] of [
+    [paths.reviewPath, paths.validationPath],
+    [paths.reviewPath, resultPath],
+    [paths.validationPath, resultPath],
+    [paths.workspacePath, resultPath],
+    [paths.workspacePath, paths.receiptPath],
+    [paths.privateEvidenceDir, paths.reviewPath],
+    [paths.privateEvidenceDir, paths.validationPath],
+  ] as const) {
+    if (pathsOverlap(left, right)) throw new Error("Reviewer source, validation, state, and result paths overlap");
+  }
+  return paths;
+}
+
+function validationIdentity(input: ReviewerValidationInput) {
+  return {
+    jobId: input.jobId,
+    attemptId: input.attemptId,
+    taskDigest: input.taskDigest,
+    baseSha: input.baseSha,
+    reviewedHeadSha: input.expectedHeadSha,
+    validationArgv: input.validationArgv,
+    dockerHost: input.dockerHost,
+    resourceDigest: input.resourceDigest,
+  };
+}
+
+function validationPlan(input: ReviewerValidationInput, paths: ReviewerPaths, sourceSnapshotDigest: string) {
+  return {
+    version: 1,
+    ...validationIdentity(input),
+    validationArgvDigest: digest(input.validationArgv),
+    reviewPath: paths.reviewPath,
+    validationPath: paths.validationPath,
+    scratchPath: paths.scratchPath,
+    privateEvidenceDir: paths.privateEvidenceDir,
+    receiptPath: paths.receiptPath,
+    sourceSnapshotDigest,
+  };
+}
+
+function receiptBinding(path: string): ReviewerValidationReceiptBinding {
+  const raw = privateImmutableFile(path);
+  const parsed = JSON.parse(raw) as { status?: unknown };
+  if (parsed.status !== "passed" && parsed.status !== "failed-checks" && parsed.status !== "infrastructure-error") {
+    throw new ReviewerValidationIntegrityError("Reviewer validation receipt has an invalid status");
+  }
+  return { path, digest: textDigest(raw), status: parsed.status };
+}
+
+function privateImmutableFile(path: string): string {
+  const stat = lstatSync(path);
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || (stat.mode & 0o222)) {
+    throw new ReviewerValidationIntegrityError(`Reviewer validation artifact is not immutable: ${path}`);
+  }
+  return readFileSync(path, "utf8");
+}
+
+function publishImmutable(path: string, body: string): void {
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  const temporary = `${path}.${randomUUID()}.tmp`;
+  let fd: number | null = null;
+  try {
+    fd = openSync(temporary, "wx", 0o600);
+    writeFileSync(fd, body, { encoding: "utf8" });
+    fsyncSync(fd);
+    closeSync(fd);
+    fd = null;
+    chmodSync(temporary, 0o400);
+    linkSync(temporary, path);
+    unlinkSync(temporary);
+    syncDirectory(dirname(path));
+  } finally {
+    if (fd !== null) closeSync(fd);
+    if (existsSync(temporary)) unlinkSync(temporary);
+  }
+}
+
+function syncDirectory(path: string): void {
+  const fd = openSync(path, "r");
+  try {
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function assertReviewerRuntimeFiles(input: {
+  reviewAxisAgentPath: string;
+  reviewAxisAgentDigest: string;
+  subagentConfigPath: string;
+  subagentConfigDigest: string;
+  emptyAppendSystemPromptPath: string;
+  emptyAppendSystemPromptDigest: string;
+  piSubagentWrapperPath: string;
+  piSubagentWrapperDigest: string;
+}): void {
+  if (textDigest(readFileSync(input.reviewAxisAgentPath, "utf8")) !== input.reviewAxisAgentDigest || (lstatSync(input.reviewAxisAgentPath).mode & 0o222)) {
+    throw new Error("Reviewer child agent snapshot is not immutable");
+  }
+  if (textDigest(readFileSync(input.subagentConfigPath, "utf8")) !== input.subagentConfigDigest || (lstatSync(input.subagentConfigPath).mode & 0o222)) {
+    throw new Error("Reviewer subagent config snapshot is not immutable");
+  }
+  if (textDigest(readFileSync(input.emptyAppendSystemPromptPath, "utf8")) !== input.emptyAppendSystemPromptDigest || (lstatSync(input.emptyAppendSystemPromptPath).mode & 0o222)) {
+    throw new Error("Reviewer child append-system prompt override is not immutable");
+  }
+  if (textDigest(readFileSync(input.piSubagentWrapperPath, "utf8")) !== input.piSubagentWrapperDigest
+    || (lstatSync(input.piSubagentWrapperPath).mode & 0o222)
+    || !(lstatSync(input.piSubagentWrapperPath).mode & 0o111)) {
+    throw new Error("Reviewer child Pi wrapper is not immutable and executable");
+  }
+}
+
 function privateRegularFileBytes(path: string): number {
   if (!isAbsolute(path)) throw new Error("Reviewer context resource path must be absolute");
   const stat = lstatSync(path);
@@ -506,7 +732,27 @@ function commandDiagnostic(result: { code: number | null; stderr: string; stdout
   return result.error ?? (result.stderr.trim() || result.stdout.trim() || `exit ${result.code}`);
 }
 
-function textDigest(value: string): string {
+function sourceSnapshotDigest(root: string): string {
+  const hash = createHash("sha256");
+  const visit = (path: string, relativePath: string): void => {
+    const stat = lstatSync(path);
+    if (stat.isSymbolicLink()) {
+      throw new Error(`Reviewer source snapshot contains a symbolic link: ${path}`);
+    }
+    if (stat.isDirectory()) {
+      for (const name of readdirSync(path).sort()) visit(join(path, name), join(relativePath, name));
+      return;
+    }
+    if (!stat.isFile()) throw new Error(`Reviewer source snapshot contains an unsupported entry: ${path}`);
+    hash.update(`${relativePath}\0file\0`);
+    hash.update(readFileSync(path));
+    hash.update("\0");
+  };
+  visit(root, ".");
+  return hash.digest("hex");
+}
+
+function textDigest(value: string | Uint8Array): string {
   const hash = createHash("sha256");
   hash.update(value);
   return hash.digest("hex");

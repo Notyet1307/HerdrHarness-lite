@@ -1,11 +1,10 @@
-import { accessSync, chmodSync, closeSync, constants, existsSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
+import { closeSync, existsSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
-import { spawn, spawnSync } from "node:child_process";
-import { basename, delimiter, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { spawnSync } from "node:child_process";
+import { dirname, isAbsolute, join, relative } from "node:path";
 import { ORIGINAL_AGENT_DIR_ENV, PI_PACKAGE_ROOT_ENV } from "./reviewer-subagent-config.js";
 
 const DESCRIPTOR_ENV = "HERDR_HARNESS_REVIEW_DESCRIPTOR";
-const VALIDATION_OUTPUT_LIMIT = 8 * 1024;
 const AXIS_OUTPUT_LIMIT = 12 * 1024;
 const AXIS_SUMMARY_LIMIT = 2 * 1024;
 const AXIS_FINDING_LIMIT = 32;
@@ -13,6 +12,7 @@ const AXIS_EVIDENCE_LIMIT = 64;
 const AXIS_EVIDENCE_REF_LIMIT = 512;
 const GENERIC_TOOL_OUTPUT_LIMIT = 16 * 1024;
 const CONTEXT_BUDGET_EXCEEDED = "reviewer_context_budget_exceeded";
+const VALIDATION_OUTPUT_REDACTED = "[redacted validation output]";
 const BOUNDED_TOP_LEVEL_TOOLS = new Set(["read", "grep", "find", "ls", "subagent"]);
 const SAFE_SUBAGENT_CONFIG = {
   asyncByDefault: false,
@@ -26,7 +26,6 @@ export default function reviewerTools(pi) {
   restorePiAgentDirectory(descriptor);
   assertReviewRuntime(descriptor);
   let environmentPreflight = null;
-  let validation = null;
   let submitted = false;
   let axesCall = null;
   let axesCompleted = false;
@@ -89,45 +88,20 @@ export default function reviewerTools(pi) {
   pi.registerTool({
     name: "review_preflight",
     label: "Preflight Reviewer environment",
-    description: "Verify the actual Reviewer source, validation copy, command path, and required Docker daemon before review axes start.",
+    description: "Verify the read-only Reviewer runtime and read the exact-HEAD Controller validation receipt before review axes start.",
     parameters: { type: "object", properties: {}, additionalProperties: false },
     execute: async () => {
       if (environmentPreflight) return respond(environmentPreflight);
       try {
-        const env = reviewerEnv(descriptor);
         if (!existsSync(process.cwd())) throw new Error("read-only Reviewer source is missing");
-        if (!existsSync(descriptor.validationPath)) throw new Error("Reviewer validation copy is missing");
-        if (!existsSync(descriptor.scratchPath)) throw new Error("Reviewer scratch directory is missing");
         assertReviewRuntime(descriptor);
-        const executables = validationExecutables(descriptor.validationArgv)
-          .map((command) => resolveExecutable(command, descriptor.validationPath, env.PATH));
-        proveWritable(descriptor.validationPath);
-
-        let docker = null;
-        if (descriptor.dockerHost) {
-          const version = spawnSync("docker", ["version", "--format", "{{.Server.Version}}"], {
-            cwd: descriptor.validationPath,
-            env,
-            encoding: "utf8",
-            maxBuffer: 1024 * 1024,
-            timeout: 15_000,
-          });
-          if (version.error || version.status !== 0 || !version.stdout.trim()) {
-            throw new Error(`Docker daemon is unavailable: ${processFailure(version)}`);
-          }
-          const compose = spawnSync("docker", ["compose", "version", "--short"], {
-            cwd: descriptor.validationPath,
-            env,
-            encoding: "utf8",
-            maxBuffer: 1024 * 1024,
-            timeout: 15_000,
-          });
-          if (compose.error || compose.status !== 0 || !compose.stdout.trim()) {
-            throw new Error(`Docker Compose V2 is unavailable: ${processFailure(compose)}`);
-          }
-          docker = { host: descriptor.dockerHost, serverVersion: version.stdout.trim(), composeVersion: compose.stdout.trim() };
-        }
-        environmentPreflight = { ok: true, validationExecutable: executables.at(-1), docker };
+        const validationReceipt = readBoundValidationReceipt(descriptor);
+        if (validationReceipt.status === "infrastructure-error") throw new Error("Controller validation infrastructure did not produce reviewable evidence");
+        environmentPreflight = {
+          ok: true,
+          validationReceipt,
+          validationFindings: validationFindings(validationReceipt, descriptor),
+        };
       } catch (error) {
         environmentPreflight = {
           ok: false,
@@ -136,56 +110,6 @@ export default function reviewerTools(pi) {
         };
       }
       return respond(environmentPreflight);
-    },
-  });
-
-  pi.registerTool({
-    name: "review_validate",
-    label: "Run fixed review validation",
-    description: "Run the single Harness-configured validation command in the disposable writable validation copy.",
-    parameters: { type: "object", properties: {}, additionalProperties: false },
-    execute: async () => {
-      if (!environmentPreflight?.ok) throw new Error("review_validate requires a successful review_preflight run");
-      if (validation) return respond(validation);
-      const env = reviewerEnv(descriptor);
-      const [command, ...args] = descriptor.validationArgv;
-      const output = await runValidation(command, args, descriptor, env);
-      const validationFailure = output.error || output.status === null
-        ? failure("acceptance", "validation_infrastructure", "review-validation", true)
-        : output.status === 0
-          ? null
-          : failure("deterministic", "validation_failed", "review-validation", false);
-      try {
-        if (!output.stdout || !output.stderr) throw new Error("validation evidence capture failed");
-        const stdout = output.stdout;
-        const stderr = output.stderr;
-        validation = {
-          command: descriptor.validationArgv,
-          exitCode: output.status,
-          signal: output.signal,
-          error: output.error,
-          stdout: stdout.text,
-          stderr: stderr.text,
-          stdoutByteCount: stdout.byteCount,
-          stderrByteCount: stderr.byteCount,
-          stdoutSha256: stdout.digest,
-          stderrSha256: stderr.digest,
-          stdoutTruncated: stdout.truncated,
-          stderrTruncated: stderr.truncated,
-          stdoutEvidenceRef: stdout.evidenceRef,
-          stderrEvidenceRef: stderr.evidenceRef,
-          ...(validationFailure ? { failure: validationFailure } : {}),
-        };
-      } catch {
-        validation = {
-          command: descriptor.validationArgv,
-          exitCode: output.status,
-          signal: output.signal,
-          error: "Attempt-private validation evidence capture failed",
-          failure: failure("acceptance", "validation_infrastructure", "review-validation", false),
-        };
-      }
-      return respond(validation);
     },
   });
 
@@ -227,21 +151,22 @@ export default function reviewerTools(pi) {
       if (params.status === "pass" && Object.values(axisResults ?? {}).some((axis) => axis.status !== "pass")) {
         throw new Error("Reviewer pass requires pass from both Standards and Spec axes");
       }
-      if (params.status === "changes" && !Object.values(axisResults ?? {}).some((axis) => axis.status === "changes")) {
-        throw new Error("Reviewer changes requires changes from at least one review axis");
-      }
+      const validationReceipt = params.status === "pass" || params.status === "changes"
+        ? readBoundValidationReceipt(descriptor)
+        : null;
+      const boundValidationFindings = validationReceipt ? validationFindings(validationReceipt, descriptor) : [];
+      if (params.status === "changes"
+        && !Object.values(axisResults ?? {}).some((axis) => axis.status === "changes")
+        && boundValidationFindings.length === 0) throw new Error("Reviewer changes requires an axis or deterministic validation finding");
       if ((params.status === "pass" || params.status === "changes")
-        && !sameFindingIdentity(params.findings, submittedAxisFindings(axisResults))) {
-        throw new Error("Reviewer result findings must preserve every Review Axis finding identity");
+        && !sameFindingIdentity(params.findings, [...submittedAxisFindings(axisResults), ...boundValidationFindings])) {
+        throw new Error("Reviewer result findings must preserve every Review Axis and validation finding identity");
       }
       if ((params.status === "pass" || params.status === "changes") && !environmentPreflight?.ok) {
         throw new Error("Reviewer pass or changes requires a successful review_preflight run");
       }
-      if ((params.status === "pass" || params.status === "changes") && !validation) {
-        throw new Error("Reviewer pass or changes requires a review_validate run");
-      }
-      if (params.status === "pass" && (validation.exitCode !== 0 || validation.error)) {
-        throw new Error("Reviewer pass requires a successful review_validate run");
+      if (params.status === "pass" && validationReceipt?.status !== "passed") {
+        throw new Error("Reviewer pass requires a passed Controller validation receipt");
       }
       const result = {
         version: 1,
@@ -516,93 +441,6 @@ function invalidAxisProjection(summary, raw) {
   };
 }
 
-function reviewerEnv(descriptor) {
-  const env = validationEnv({
-    HOME: join(descriptor.scratchPath, "home"),
-    TMPDIR: join(descriptor.scratchPath, "tmp"),
-    TMP: join(descriptor.scratchPath, "tmp"),
-    TEMP: join(descriptor.scratchPath, "tmp"),
-    XDG_CACHE_HOME: join(descriptor.scratchPath, "cache"),
-    PYTHONPYCACHEPREFIX: join(descriptor.scratchPath, "pycache"),
-  }, descriptor.dockerHost);
-  const wrapped = envAssignments(descriptor.validationArgv);
-  const configuredHost = wrapped.get("DOCKER_HOST");
-  if (configuredHost && configuredHost !== descriptor.dockerHost) {
-    throw new Error("Reviewer validation argv attempts to override the bound Docker host");
-  }
-  const dockerConfig = wrapped.get("DOCKER_CONFIG");
-  if (dockerConfig) {
-    if (!isAbsolute(dockerConfig) || /[\0\r\n]/.test(dockerConfig)) {
-      throw new Error("Reviewer validation DOCKER_CONFIG must be an absolute safe path");
-    }
-    env.DOCKER_CONFIG = dockerConfig;
-  }
-  return env;
-}
-
-function validationEnv(scratch, dockerHost) {
-  const env = { PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin", ...scratch };
-  if (dockerHost) env.DOCKER_HOST = dockerHost;
-  for (const name of ["LANG", "LC_ALL", "LC_CTYPE"]) {
-    if (process.env[name]) env[name] = process.env[name];
-  }
-  return env;
-}
-
-function envAssignments(argv) {
-  const values = new Map();
-  if (basename(argv[0] ?? "") !== "env") return values;
-  for (const argument of argv.slice(1)) {
-    const match = /^([A-Za-z_][A-Za-z0-9_]*)=([^\0\r\n]*)$/.exec(argument);
-    if (!match) break;
-    values.set(match[1], match[2]);
-  }
-  return values;
-}
-
-function validationExecutables(argv) {
-  const commands = [argv[0]];
-  if (basename(argv[0] ?? "") !== "env") return commands;
-  const target = argv.slice(1).find((argument) => !/^[A-Za-z_][A-Za-z0-9_]*=[^\0\r\n]*$/.test(argument));
-  if (!target || target.startsWith("-")) throw new Error("Reviewer validation env wrapper has no supported command");
-  commands.push(target);
-  return commands;
-}
-
-function resolveExecutable(command, cwd, pathValue) {
-  const candidates = command.includes("/")
-    ? [isAbsolute(command) ? command : resolve(cwd, command)]
-    : (pathValue ?? "").split(delimiter).filter(Boolean).map((entry) => join(entry, command));
-  for (const candidate of candidates) {
-    try {
-      accessSync(candidate, constants.X_OK);
-      return candidate;
-    } catch {
-      // Try the next PATH entry.
-    }
-  }
-  throw new Error(`Reviewer validation executable is unavailable: ${command}`);
-}
-
-function proveWritable(path) {
-  const probe = join(path, `.herdr-harness-preflight-${randomUUID()}`);
-  let fd = null;
-  try {
-    fd = openSync(probe, "wx", 0o600);
-    closeSync(fd);
-    fd = null;
-    unlinkSync(probe);
-  } finally {
-    if (fd !== null) closeSync(fd);
-    if (existsSync(probe)) unlinkSync(probe);
-  }
-}
-
-function processFailure(output) {
-  const detail = (output.error?.message ?? output.stderr?.trim()) || output.stdout?.trim() || `exit ${output.status}`;
-  return detail.length <= 4_000 ? detail : `[truncated]\n${detail.slice(-4_000)}`;
-}
-
 export function publishResult(path, body) {
   mkdirSync(dirname(path), { recursive: true });
   const temporary = `${path}.${randomUUID()}.tmp`;
@@ -635,17 +473,15 @@ function readDescriptor() {
   const path = process.env[DESCRIPTOR_ENV];
   if (!path || !isAbsolute(path)) throw new Error(`${DESCRIPTOR_ENV} must name an absolute descriptor path`);
   const value = JSON.parse(readFileSync(path, "utf8"));
-  if (value?.dockerHost === undefined) value.dockerHost = null;
   if (
     value?.version !== 1
     || typeof value.jobId !== "string" || !value.jobId
     || typeof value.attemptId !== "string" || !value.attemptId
     || !/^[0-9a-f]{40}$/i.test(value.reviewedHeadSha ?? "")
-    || !Array.isArray(value.validationArgv) || value.validationArgv.length < 1
-    || value.validationArgv.some((item) => typeof item !== "string" || !item || item.length > 8192)
+    || !isAbsolute(value.validationReceiptPath ?? "")
+    || !/^[0-9a-f]{64}$/i.test(value.validationReceiptDigest ?? "")
+    || !["passed", "failed-checks"].includes(value.validationStatus)
     || !isAbsolute(value.reviewPath ?? "")
-    || !isAbsolute(value.validationPath ?? "")
-    || !isAbsolute(value.scratchPath ?? "")
     || !isAbsolute(value.runtimePath ?? "")
     || !isAbsolute(value.reviewAxisAgentPath ?? "")
     || !/^[0-9a-f]{64}$/i.test(value.reviewAxisAgentDigest ?? "")
@@ -658,15 +494,74 @@ function readDescriptor() {
     || !Number.isSafeInteger(value.contextBudgetBytes) || value.contextBudgetBytes < 1
     || !Number.isSafeInteger(value.contextBudgetReserveBytes) || value.contextBudgetReserveBytes < 1
     || value.initialContextBytes > value.contextBudgetBytes - value.contextBudgetReserveBytes
-    || (value.dockerHost !== null && (typeof value.dockerHost !== "string" || !safeDockerHost(value.dockerHost)))
   ) {
     throw new Error("invalid Harness Reviewer descriptor");
   }
   return value;
 }
 
-function safeDockerHost(host) {
-  return host.startsWith("unix:///") && !/[\0\r\n]/.test(host);
+function readBoundValidationReceipt(descriptor) {
+  const stat = lstatSync(descriptor.validationReceiptPath);
+  const raw = readFileSync(descriptor.validationReceiptPath);
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || (stat.mode & 0o222)
+    || sha256(raw) !== descriptor.validationReceiptDigest) {
+    throw new Error("Controller validation receipt changed after Reviewer preparation");
+  }
+  const receipt = JSON.parse(raw.toString("utf8"));
+  if (!validValidationReceipt(receipt, descriptor)) throw new Error("Controller validation receipt is invalid");
+  return receipt;
+}
+
+function validValidationReceipt(receipt, descriptor) {
+  if (!receipt || typeof receipt !== "object" || Array.isArray(receipt)
+    || receipt.version !== 1
+    || receipt.jobId !== descriptor.jobId
+    || receipt.attemptId !== descriptor.attemptId
+    || receipt.reviewedHeadSha !== descriptor.reviewedHeadSha
+    || receipt.status !== descriptor.validationStatus
+    || !["passed", "failed-checks"].includes(receipt.status)
+    || !/^[0-9a-f]{64}$/i.test(receipt.taskDigest ?? "")
+    || !/^[0-9a-f]{40}$/i.test(receipt.baseSha ?? "")
+    || !Array.isArray(receipt.validationArgv) || receipt.validationArgv.length < 1 || receipt.validationArgv.length > 32
+    || receipt.validationArgv.some((item) => typeof item !== "string" || !item || item.length > 8192)
+    || receipt.validationArgvDigest !== sha256(JSON.stringify(receipt.validationArgv))
+    || !Number.isFinite(Date.parse(receipt.startedAt)) || !Number.isFinite(Date.parse(receipt.completedAt))
+    || !Number.isSafeInteger(receipt.durationMs) || receipt.durationMs < 0
+    || !Number.isInteger(receipt.exitCode) || receipt.exitCode < 0
+    || receipt.signal !== null || receipt.timeout !== false || receipt.error !== null
+    || (receipt.dockerHost !== null && (typeof receipt.dockerHost !== "string" || !receipt.dockerHost.startsWith("unix:///") || /[\0\r\n]/.test(receipt.dockerHost)))
+    || !/^[0-9a-f]{64}$/i.test(receipt.relevantEnvironmentDigest ?? "")
+    || !/^[0-9a-f]{64}$/i.test(receipt.resourceDigest ?? "")
+    || !/^[0-9a-f]{64}$/i.test(receipt.sourceSnapshotDigest ?? "")
+    || !validValidationOutput(receipt.stdout)
+    || !validValidationOutput(receipt.stderr)) return false;
+  return receipt.status === "passed" ? receipt.exitCode === 0 : receipt.exitCode !== 0;
+}
+
+function validValidationOutput(output) {
+  if (!output || typeof output !== "object" || Array.isArray(output) || typeof output.text !== "string") return false;
+  return typeof output.truncated === "boolean"
+    && typeof output.redacted === "boolean"
+    && Number.isSafeInteger(output.byteCount) && output.byteCount >= 0
+    && /^[0-9a-f]{64}$/i.test(output.sha256 ?? "")
+    && (output.byteCount === 0
+      ? output.text === "" && !output.truncated && !output.redacted
+      : output.text === VALIDATION_OUTPUT_REDACTED && output.truncated && output.redacted);
+}
+
+function validationFindings(receipt, descriptor) {
+  if (receipt.status !== "failed-checks") return [];
+  return [{
+    severity: "major",
+    summary: `Deterministic validation failed with exit code ${receipt.exitCode}`,
+    evidence: [
+      `validation receipt: ${descriptor.validationReceiptPath}`,
+      `receipt sha256: ${descriptor.validationReceiptDigest}`,
+      `argv sha256: ${receipt.validationArgvDigest}`,
+      `stdout: ${receipt.stdout.byteCount} bytes sha256 ${receipt.stdout.sha256}`,
+      `stderr: ${receipt.stderr.byteCount} bytes sha256 ${receipt.stderr.sha256}`,
+    ].join("\n"),
+  }];
 }
 
 function projectGenericToolResult(event) {
@@ -680,135 +575,6 @@ function projectGenericToolResult(event) {
     outputByteCount: Buffer.byteLength(serialized, "utf8"),
     digest: sha256(serialized),
     truncated: projection.truncated || (event.content ?? []).some((item) => item?.type !== "text"),
-  };
-}
-
-async function runValidation(command, args, descriptor, env) {
-  let stdout;
-  let stderr;
-  try {
-    stdout = openOutputCapture(descriptor, "validation-stdout.log");
-    stderr = openOutputCapture(descriptor, "validation-stderr.log");
-  } catch {
-    stdout?.abort();
-    stderr?.abort();
-    return { status: null, signal: null, error: "Attempt-private validation evidence capture failed", stdout: null, stderr: null };
-  }
-  let child;
-  try {
-    child = spawn(command, args, { cwd: descriptor.validationPath, env, stdio: ["ignore", "pipe", "pipe"] });
-  } catch {
-    stdout.abort();
-    stderr.abort();
-    return { status: null, signal: null, error: "Reviewer validation process could not start", stdout: null, stderr: null };
-  }
-  return await new Promise((resolveRun) => {
-    let runtimeError = null;
-    let captureFailed = false;
-    let timedOut = false;
-    let forceTimer = null;
-    const timeout = setTimeout(() => {
-      timedOut = true;
-      child.kill("SIGTERM");
-      forceTimer = setTimeout(() => child.kill("SIGKILL"), 5_000);
-    }, 30 * 60 * 1000);
-    const capture = (target, chunk) => {
-      if (captureFailed) return;
-      try {
-        target.write(chunk);
-      } catch {
-        captureFailed = true;
-        child.kill("SIGKILL");
-      }
-    };
-    const failCapture = () => {
-      captureFailed = true;
-      child.kill("SIGKILL");
-    };
-    child.stdout.on("data", (chunk) => capture(stdout, chunk));
-    child.stderr.on("data", (chunk) => capture(stderr, chunk));
-    child.stdout.on("error", failCapture);
-    child.stderr.on("error", failCapture);
-    child.on("error", (error) => { runtimeError = error; });
-    child.on("close", (status, signal) => {
-      clearTimeout(timeout);
-      if (forceTimer) clearTimeout(forceTimer);
-      if (captureFailed) {
-        stdout.abort();
-        stderr.abort();
-        resolveRun({ status, signal, error: "Attempt-private validation evidence capture failed", stdout: null, stderr: null });
-        return;
-      }
-      try {
-        const stdoutResult = stdout.finish();
-        const stderrResult = stderr.finish();
-        resolveRun({
-          status,
-          signal,
-          error: timedOut
-            ? "Reviewer validation timed out"
-            : runtimeError instanceof Error ? runtimeError.message : null,
-          stdout: stdoutResult,
-          stderr: stderrResult,
-        });
-      } catch {
-        stdout.abort();
-        stderr.abort();
-        resolveRun({ status, signal, error: "Attempt-private validation evidence capture failed", stdout: null, stderr: null });
-      }
-    });
-  });
-}
-
-function openOutputCapture(descriptor, evidenceRef) {
-  const path = join(descriptor.privateEvidenceDir, evidenceRef);
-  if (!pathWithin(descriptor.privateEvidenceDir, path) || existsSync(path)) {
-    throw new Error("Reviewer validation evidence path is unavailable");
-  }
-  const fd = openSync(path, "wx", 0o600);
-  const hash = createHash("sha256");
-  let byteCount = 0;
-  let head = Buffer.alloc(0);
-  let tail = Buffer.alloc(0);
-  let closed = false;
-  return {
-    write(value) {
-      const chunk = Buffer.isBuffer(value) ? value : Buffer.from(value);
-      let offset = 0;
-      while (offset < chunk.length) {
-        const written = writeSync(fd, chunk, offset, chunk.length - offset);
-        if (written < 1) throw new Error("Reviewer validation evidence write made no progress");
-        offset += written;
-      }
-      hash.update(chunk);
-      byteCount += chunk.length;
-      if (head.length < VALIDATION_OUTPUT_LIMIT) {
-        head = Buffer.concat([head, chunk]).subarray(0, VALIDATION_OUTPUT_LIMIT);
-      }
-      tail = Buffer.concat([tail, chunk]).subarray(-VALIDATION_OUTPUT_LIMIT);
-    },
-    finish() {
-      fsyncSync(fd);
-      closeSync(fd);
-      closed = true;
-      chmodSync(path, 0o400);
-      const source = byteCount <= VALIDATION_OUTPUT_LIMIT ? head : Buffer.concat([head, tail]);
-      const projection = boundedHeadTail(source.toString("utf8"), VALIDATION_OUTPUT_LIMIT);
-      return {
-        text: projection.text,
-        truncated: byteCount > VALIDATION_OUTPUT_LIMIT || projection.truncated,
-        byteCount,
-        digest: hash.digest("hex"),
-        evidenceRef,
-      };
-    },
-    abort() {
-      if (!closed) {
-        try { closeSync(fd); } catch {}
-        closed = true;
-      }
-      if (existsSync(path)) unlinkSync(path);
-    },
   };
 }
 

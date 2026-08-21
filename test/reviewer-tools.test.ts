@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
-import { chmodSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -45,17 +45,13 @@ const reviewCall = {
   workflowScript: reviewWorkflowScript(),
 };
 
-test("Reviewer tools isolate validation and write one identity-bound result", async () => {
+test("Reviewer tools read one bound validation receipt and write one identity-bound result", async () => {
   const root = mkdtempSync(join(tmpdir(), "herdr-review-tools-"));
   const source = join(root, "source");
-  const validation = join(root, "validation");
-  const scratch = join(root, "scratch");
   const privateEvidenceDir = join(root, "evidence");
-  const dockerConfig = join(root, "docker-config");
   const resultPath = join(root, "result.json");
   const descriptorPath = join(root, "descriptor.json");
   const previousDescriptor = process.env.HERDR_HARNESS_REVIEW_DESCRIPTOR;
-  const previousSecret = process.env.HERDR_REVIEWER_TEST_SECRET;
   const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
   const previousOriginalAgentDir = process.env.HERDR_HARNESS_REVIEW_ORIGINAL_PI_AGENT_DIR;
   const previousCanonicalAgentDir = process.env.HERDR_HARNESS_REVIEW_CANONICAL_PI_AGENT_DIR;
@@ -63,37 +59,26 @@ test("Reviewer tools isolate validation and write one identity-bound result", as
   const previousPiPackageRoot = process.env.PI_SUBAGENTS_PI_CODING_AGENT_PACKAGE_ROOT;
   const previousAxisOutputBytes = process.env.FAKE_PI_REVIEW_AXIS_OUTPUT_BYTES;
   try {
-    for (const path of [source, validation, privateEvidenceDir, dockerConfig, join(scratch, "home"), join(scratch, "tmp"), join(scratch, "cache"), join(scratch, "pycache")]) {
+    for (const path of [source, privateEvidenceDir]) {
       mkdirSync(path, { recursive: true });
     }
     chmodSync(privateEvidenceDir, 0o700);
     writeFileSync(join(source, "product.txt"), "source\n");
-    writeFileSync(join(validation, "product.txt"), "source\n");
     const runtime = prepareReviewRuntime(root, source);
-    writeFileSync(descriptorPath, JSON.stringify({
+    const descriptor = withValidationReceipt(root, {
       version: 1,
       jobId: "job-1",
       attemptId: "reviewer-1",
       reviewedHeadSha: "b".repeat(40),
-      validationArgv: [
-        "/usr/bin/env",
-        `DOCKER_CONFIG=${dockerConfig}`,
-        process.execPath,
-        resolve("test/fixtures/reviewer-validation.js"),
-        "--stdout-bytes", String(21 * 1024 * 1024),
-        "--stderr-bytes", String(5 * 1024 * 1024),
-      ],
-      dockerHost: null,
       piAgentDir: join(root, "original-agent"),
       ...runtime,
-      validationPath: validation,
-      scratchPath: scratch,
       resultPath,
       privateEvidenceDir,
       initialContextBytes: 10_000,
       contextBudgetBytes: REVIEWER_CONTEXT_BUDGET_BYTES,
       contextBudgetReserveBytes: REVIEWER_CONTEXT_BUDGET_RESERVE_BYTES,
-    }));
+    }, "passed");
+    writeFileSync(descriptorPath, JSON.stringify(descriptor));
     process.env.HERDR_HARNESS_REVIEW_DESCRIPTOR = descriptorPath;
     const originalAgentDir = join(root, "original-agent");
     mkdirSync(join(originalAgentDir, "extensions", "subagent"), { recursive: true });
@@ -144,7 +129,7 @@ test("Reviewer tools isolate validation and write one identity-bound result", as
     const submit = tools.get("review_submit");
     const subagent = tools.get("subagent");
     assert.ok(preflight);
-    assert.ok(validate);
+    assert.equal(validate, undefined);
     assert.ok(submit);
     assert.ok(subagent);
     assert.ok(toolCallHook);
@@ -154,10 +139,16 @@ test("Reviewer tools isolate validation and write one identity-bound result", as
       summary: "premature",
       findings: [],
     }), /completed Standards and Spec/);
-    await assert.rejects(() => validate.execute("validate-before-preflight", {}), /successful review_preflight/);
     assert.equal((await toolCallHook({ toolCallId: "axes-too-early", toolName: "subagent", input: reviewCall }))?.block, true);
-    const preflightResult = JSON.parse((await preflight.execute("preflight", {})).content[0]?.text ?? "{}") as { ok?: boolean };
+    const preflightResult = JSON.parse((await preflight.execute("preflight", {})).content[0]?.text ?? "{}") as {
+      ok?: boolean;
+      validationReceipt?: { status?: string; exitCode?: number };
+    };
     assert.equal(preflightResult.ok, true);
+    assert.deepEqual(preflightResult.validationReceipt && {
+      status: preflightResult.validationReceipt.status,
+      exitCode: preflightResult.validationReceipt.exitCode,
+    }, { status: "passed", exitCode: 0 });
     const largeRead = `read-head\n${"r".repeat(1024 * 1024)}\nread-tail`;
     const readProjection = await toolResultHook({
       toolCallId: "large-read",
@@ -280,57 +271,7 @@ test("Reviewer tools isolate validation and write one identity-bound result", as
       assert.equal(sha256(evidence), projection.digest);
     }
 
-    await assert.rejects(() => submit.execute("submit-before-validation", {
-      status: "pass",
-      summary: "premature",
-      findings: [],
-    }), /requires a review_validate run/);
-    process.env.HERDR_REVIEWER_TEST_SECRET = "must-not-leak";
-    const validationResult = JSON.parse((await validate.execute("validate", {})).content[0]?.text ?? "{}") as {
-      stdout?: string;
-      stderr?: string;
-      stdoutByteCount?: number;
-      stderrByteCount?: number;
-      stdoutSha256?: string;
-      stderrSha256?: string;
-      stdoutTruncated?: boolean;
-      stderrTruncated?: boolean;
-      stdoutEvidenceRef?: string;
-      stderrEvidenceRef?: string;
-      failure?: unknown;
-    };
-    assert.match(validationResult.stdout ?? "", /^stdout-head/);
-    assert.match(validationResult.stdout ?? "", /stdout-tail$/);
-    assert.match(validationResult.stderr ?? "", /^stderr-head/);
-    assert.match(validationResult.stderr ?? "", /stderr-tail$/);
-    assert.ok(Buffer.byteLength(validationResult.stdout ?? "") <= 8 * 1024);
-    assert.ok(Buffer.byteLength(validationResult.stderr ?? "") <= 8 * 1024);
-    assert.equal(validationResult.stdoutByteCount, 21 * 1024 * 1024);
-    assert.equal(validationResult.stderrByteCount, 5 * 1024 * 1024);
-    assert.equal(validationResult.stdoutTruncated, true);
-    assert.equal(validationResult.stderrTruncated, true);
-    assert.equal(validationResult.stdoutEvidenceRef, "validation-stdout.log");
-    assert.equal(validationResult.stderrEvidenceRef, "validation-stderr.log");
-    for (const [ref, bytes, digest] of [
-      [validationResult.stdoutEvidenceRef, validationResult.stdoutByteCount, validationResult.stdoutSha256],
-      [validationResult.stderrEvidenceRef, validationResult.stderrByteCount, validationResult.stderrSha256],
-    ] as const) {
-      assert.ok(ref);
-      const raw = readFileSync(join(privateEvidenceDir, ref));
-      assert.equal(raw.length, bytes);
-      assert.equal(sha256(raw), digest);
-      assert.equal(lstatSync(join(privateEvidenceDir, ref)).mode & 0o222, 0);
-    }
-    assert.equal(validationResult.failure, undefined);
-    assert.equal(readFileSync(join(validation, "validation-only.txt"), "utf8"), "ok");
     assert.equal(readFileSync(join(source, "product.txt"), "utf8"), "source\n");
-    const validationEnv = JSON.parse(readFileSync(join(validation, "validation-env.json"), "utf8")) as Record<string, string>;
-    assert.equal(validationEnv.HERDR_REVIEWER_TEST_SECRET, undefined);
-    assert.equal(validationEnv.HOME, join(scratch, "home"));
-    assert.equal(validationEnv.TMPDIR, join(scratch, "tmp"));
-    assert.equal(validationEnv.TMP, join(scratch, "tmp"));
-    assert.equal(validationEnv.TEMP, join(scratch, "tmp"));
-    assert.equal(validationEnv.DOCKER_CONFIG, dockerConfig);
 
     await submit.execute("submit", { status: "pass", summary: "accepted", findings: [] });
     const result = JSON.parse(readFileSync(resultPath, "utf8")) as Record<string, unknown>;
@@ -353,8 +294,6 @@ test("Reviewer tools isolate validation and write one identity-bound result", as
   } finally {
     if (previousDescriptor === undefined) delete process.env.HERDR_HARNESS_REVIEW_DESCRIPTOR;
     else process.env.HERDR_HARNESS_REVIEW_DESCRIPTOR = previousDescriptor;
-    if (previousSecret === undefined) delete process.env.HERDR_REVIEWER_TEST_SECRET;
-    else process.env.HERDR_REVIEWER_TEST_SECRET = previousSecret;
     restoreEnv("PI_CODING_AGENT_DIR", previousAgentDir);
     restoreEnv("HERDR_HARNESS_REVIEW_ORIGINAL_PI_AGENT_DIR", previousOriginalAgentDir);
     restoreEnv("HERDR_HARNESS_REVIEW_CANONICAL_PI_AGENT_DIR", previousCanonicalAgentDir);
@@ -375,7 +314,7 @@ test("Reviewer environment preflight blocks review axes but still permits a dura
   const previousSubagentPiBinary = process.env.PI_SUBAGENT_PI_BINARY;
   const previousPiPackageRoot = process.env.PI_SUBAGENTS_PI_CODING_AGENT_PACKAGE_ROOT;
   try {
-    for (const path of ["source", "validation", "evidence", "scratch", "scratch/home", "scratch/tmp", "scratch/cache", "scratch/pycache"]) {
+    for (const path of ["source", "evidence"]) {
       mkdirSync(join(root, path), { recursive: true });
     }
     chmodSync(join(root, "evidence"), 0o700);
@@ -385,12 +324,11 @@ test("Reviewer environment preflight blocks review axes but still permits a dura
       jobId: "job-2",
       attemptId: "reviewer-2",
       reviewedHeadSha: "c".repeat(40),
-      validationArgv: ["definitely-missing-review-command"],
-      dockerHost: null,
+      validationReceiptPath: join(root, "missing-validation-receipt.json"),
+      validationReceiptDigest: "0".repeat(64),
+      validationStatus: "passed",
       piAgentDir: join(root, "original-agent"),
       ...runtime,
-      validationPath: join(root, "validation"),
-      scratchPath: join(root, "scratch"),
       resultPath,
       privateEvidenceDir: join(root, "evidence"),
       initialContextBytes: 10_000,
@@ -430,7 +368,7 @@ test("Reviewer environment preflight blocks review axes but still permits a dura
       failure?: Record<string, unknown>;
     };
     assert.equal(failure.ok, false);
-    assert.match(failure.error ?? "", /validation executable is unavailable/);
+    assert.match(failure.error ?? "", /missing-validation-receipt|no such file/i);
     assert.deepEqual(failure.failure, {
       domain: "acceptance",
       code: "validation_infrastructure",
@@ -447,16 +385,13 @@ test("Reviewer environment preflight blocks review axes but still permits a dura
     const result = JSON.parse(readFileSync(resultPath, "utf8")) as { status?: string };
     assert.equal(result.status, "blocked");
 
-    const deterministicDescriptor = JSON.parse(readFileSync(descriptorPath, "utf8")) as Record<string, unknown>;
-    deterministicDescriptor.attemptId = "reviewer-3";
+    const descriptorBase = JSON.parse(readFileSync(descriptorPath, "utf8")) as Record<string, unknown>;
     const deterministicResultPath = join(root, "result-reviewer-3.json");
-    deterministicDescriptor.resultPath = deterministicResultPath;
-    deterministicDescriptor.validationArgv = [
-      process.execPath,
-      resolve("test/fixtures/reviewer-validation.js"),
-      "--stderr-bytes", "1000",
-      "--exit-code", "7",
-    ];
+    const deterministicDescriptor = withValidationReceipt(root, {
+      ...descriptorBase,
+      attemptId: "reviewer-3",
+      resultPath: deterministicResultPath,
+    }, "failed-checks");
     writeFileSync(descriptorPath, JSON.stringify(deterministicDescriptor));
     process.env.PI_CODING_AGENT_DIR = originalAgentDir;
     configExtension.default();
@@ -470,7 +405,17 @@ test("Reviewer environment preflight blocks review axes but still permits a dura
         else deterministicToolResultHook = hook as ToolResultHook;
       },
     });
-    assert.equal(JSON.parse((await deterministicTools.get("review_preflight")!.execute("preflight", {})).content[0]!.text).ok, true);
+    const deterministicPreflight = JSON.parse((await deterministicTools.get("review_preflight")!.execute("preflight", {})).content[0]!.text) as {
+      ok?: boolean;
+      validationReceipt?: { exitCode?: number; status?: string };
+      validationFindings?: Array<{ severity: "major"; summary: string; evidence: string }>;
+    };
+    assert.equal(deterministicPreflight.ok, true);
+    assert.deepEqual(deterministicPreflight.validationReceipt && {
+      exitCode: deterministicPreflight.validationReceipt.exitCode,
+      status: deterministicPreflight.validationReceipt.status,
+    }, { exitCode: 7, status: "failed-checks" });
+    assert.equal(deterministicTools.has("review_validate"), false);
     assert.ok(deterministicToolCallHook);
     assert.ok(deterministicToolResultHook);
     const changesCall = { ...reviewCall };
@@ -500,35 +445,29 @@ test("Reviewer environment preflight blocks review axes but still permits a dura
       status: "changes",
       summary: "omitted finding",
       findings: [],
-    }), /preserve every Review Axis finding identity/);
-    const deterministicFailure = JSON.parse((await deterministicTools.get("review_validate")!.execute("validate", {})).content[0]!.text) as {
-      exitCode?: number;
-      failure?: Record<string, unknown>;
-    };
-    assert.equal(deterministicFailure.exitCode, 7);
-    assert.deepEqual(deterministicFailure.failure, {
-      domain: "deterministic",
-      code: "validation_failed",
-      stage: "review-validation",
-      retryable: false,
-    });
+    }), /preserve every Review Axis and validation finding identity/);
     await assert.rejects(() => deterministicTools.get("review_submit")!.execute("forged-finding", {
       status: "changes",
       summary: "forged finding",
       findings: [{ severity: "major", summary: "Different identity", evidence: "src/shared.ts:10" }],
-    }), /preserve every Review Axis finding identity/);
+    }), /preserve every Review Axis and validation finding identity/);
+    const validationFinding = deterministicPreflight.validationFindings?.[0];
+    assert.ok(validationFinding);
     await deterministicTools.get("review_submit")!.execute("bound-changes", {
       status: "changes",
-      summary: "one bound finding",
-      findings: [{ severity: "major", summary: axisFinding.summary, evidence: axisFinding.evidenceRefs.join("\n") }],
+      summary: "axis and deterministic validation findings",
+      findings: [
+        { severity: "major", summary: axisFinding.summary, evidence: axisFinding.evidenceRefs.join("\n") },
+        validationFinding,
+      ],
     });
     assert.equal(JSON.parse(readFileSync(deterministicResultPath, "utf8")).status, "changes");
 
-    const malformedDescriptor: Record<string, unknown> = {
+    const malformedDescriptor = withValidationReceipt(root, {
       ...deterministicDescriptor,
       attemptId: "reviewer-malformed",
       resultPath: join(root, "result-malformed.json"),
-    };
+    }, "passed");
     writeFileSync(descriptorPath, JSON.stringify(malformedDescriptor));
     process.env.PI_CODING_AGENT_DIR = originalAgentDir;
     configExtension.default();
@@ -580,9 +519,11 @@ test("Reviewer environment preflight blocks review axes but still permits a dura
       findings: [],
     }), /completed Standards and Spec/);
 
-    const budgetDescriptor = { ...malformedDescriptor };
-    budgetDescriptor.attemptId = "reviewer-budget";
-    budgetDescriptor.resultPath = join(root, "result-budget.json");
+    const budgetDescriptor = withValidationReceipt(root, {
+      ...malformedDescriptor,
+      attemptId: "reviewer-budget",
+      resultPath: join(root, "result-budget.json"),
+    }, "passed");
     budgetDescriptor.initialContextBytes = REVIEWER_CONTEXT_BUDGET_BYTES - REVIEWER_CONTEXT_BUDGET_RESERVE_BYTES - 1;
     writeFileSync(descriptorPath, JSON.stringify(budgetDescriptor));
     process.env.PI_CODING_AGENT_DIR = originalAgentDir;
@@ -637,6 +578,58 @@ function workflowEntries(script: unknown): Array<{ key: string; agent: string; t
   assert.equal(script.startsWith(prefix), true);
   assert.equal(script.endsWith(suffix), true);
   return JSON.parse(script.slice(prefix.length, -suffix.length)) as Array<{ key: string; agent: string; task: string }>;
+}
+
+function withValidationReceipt(
+  root: string,
+  descriptor: Record<string, unknown>,
+  status: "passed" | "failed-checks",
+): Record<string, unknown> {
+  const privateEvidenceDir = String(descriptor.privateEvidenceDir);
+  const emptyDigest = sha256("");
+  assert.ok(privateEvidenceDir);
+  const validationArgv = ["npm", "run", "verify"];
+  const output = () => ({
+    text: "",
+    truncated: false,
+    redacted: false,
+    byteCount: 0,
+    sha256: emptyDigest,
+  });
+  const receipt = {
+    version: 1,
+    status,
+    jobId: descriptor.jobId,
+    attemptId: descriptor.attemptId,
+    taskDigest: "1".repeat(64),
+    baseSha: "a".repeat(40),
+    reviewedHeadSha: descriptor.reviewedHeadSha,
+    validationArgv,
+    validationArgvDigest: sha256(JSON.stringify(validationArgv)),
+    startedAt: "2026-08-21T00:00:00.000Z",
+    completedAt: "2026-08-21T00:00:01.000Z",
+    durationMs: 1_000,
+    exitCode: status === "passed" ? 0 : 7,
+    signal: null,
+    timeout: false,
+    error: null,
+    stdout: output(),
+    stderr: output(),
+    dockerHost: null,
+    relevantEnvironmentDigest: "2".repeat(64),
+    resourceDigest: "3".repeat(64),
+    sourceSnapshotDigest: "4".repeat(64),
+  };
+  const body = JSON.stringify(receipt);
+  const validationReceiptPath = join(root, `validation-receipt-${String(descriptor.attemptId)}.json`);
+  writeFileSync(validationReceiptPath, body, { mode: 0o400 });
+  chmodSync(validationReceiptPath, 0o400);
+  return {
+    ...descriptor,
+    validationReceiptPath,
+    validationReceiptDigest: sha256(body),
+    validationStatus: status,
+  };
 }
 
 function prepareReviewRuntime(root: string, reviewPath: string): {
@@ -709,7 +702,7 @@ function restoreEnv(name: string, value: string | undefined): void {
   else process.env[name] = value;
 }
 
-function sha256(value: Uint8Array): string {
+function sha256(value: string | Uint8Array): string {
   const hash = createHash("sha256");
   hash.update(value);
   return hash.digest("hex");

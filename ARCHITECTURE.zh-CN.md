@@ -75,7 +75,7 @@ IssueSnapshot -> TaskSnapshot -> Job -> Attempt
 
 ### Attempt
 
-`Attempt` 是一次 fresh Worker 或 Reviewer 执行。它绑定 lane、round、base、预期 HEAD、result path、phase、prompt digest、执行快照、上下文 envelope、Herdr handle 和 durable result。blocked 或已完成 Attempt 不会被恢复为新的写入执行；重试创建 fresh Attempt。
+`Attempt` 是一次 fresh Worker 或 Reviewer 执行。它绑定 lane、round、base、预期 HEAD、result path、phase、prompt digest、执行快照、上下文 envelope、可选 validation receipt path/digest/status、Herdr handle 和 durable result。blocked 或已完成 Attempt 不会被恢复为新的写入执行；重试创建 fresh Attempt。
 
 ### Incident、EvidencePack、Analysis、Approval 与 OperatorAction
 
@@ -153,6 +153,7 @@ agent_decision
 agent_blocked
 review_uncertain
 reviewer_preflight_dirty
+validation_infrastructure
 infrastructure_exhausted
 integrity_violation
 stale_task
@@ -202,19 +203,19 @@ Worker 接收 TaskSnapshot Objective、base/branch、trusted repository context�
 
 ### Reviewer
 
-Reviewer 是 fresh、read-only、exact-HEAD 审查者。它接收 AttemptContextEnvelope 中的 Objective 作为本 Attempt 唯一 Spec 输入、Harness 生成的 Git evidence、trusted standards bundle 和固定 validation argv。Objective 是 untrusted task data，不能扩权；不足时 Reviewer 返回 `blocked`，不会自行抓取另一份 Issue。
+Reviewer 是 fresh、read-only、exact-HEAD 审查者。固定 validation argv 在 Attempt 产生任何副作用前绑定；Controller 随后导出只读 source snapshot 和 disposable writable validation copy，执行命令并原子持久化 `validation-receipt.json`。同一 tick 只把 receipt binding checkpoint 写入 ledger；后续 tick 复核 receipt 后才允许 Reviewer Provider 启动。Objective 是 untrusted task data，不能扩权；不足时 Reviewer 返回 `blocked`，不会自行抓取另一份 Issue。
 
 Reviewer 必须：
 
 - 先做 `review_preflight`；
 - 在只读 exact-HEAD source snapshot 上启动 fresh Standards / Spec 双轴 child；
-- 只在 disposable writable copy 中运行一次 `review_validate`；
+- 只读取 exact-HEAD、digest-bound 的 Controller validation receipt，不启动或等待 validation 进程；
 - 通过 `review_submit` 写身份绑定结果；
 - 保持 candidate repository 中的 instruction files 只是审查对象。
 
-Reviewer skill 只允许双轴完成、固定验证成功且无 blocking finding 时提交 `pass`。运行时工具强制双轴、preflight 与验证成功；Controller 再独立强制身份、exact HEAD 与 clean-tree gate。
+receipt 的 `passed` 允许继续 `pass` gate；正常非零退出记录为 `failed-checks`，Reviewer 必须把固定 validation finding 纳入 `changes`；spawn、路径、权限、超时或环境失败记录为 `infrastructure-error`，Controller 在 Provider 启动前进入 `validation_infrastructure` block。已有有效 receipt 在 restart 后复用，绑定或 source digest 漂移则 fail closed。Reviewer skill 与运行时工具继续强制双轴和 finding identity；Controller 再独立强制身份、exact HEAD、receipt 与 clean-tree gate。
 
-顶层 Reviewer prompt 从绑定 snapshot 明示大小写敏感的真实工具 allowlist。Harness 注入上下文总预算为 256 KiB；初始 prompt、trusted bundle 与 bundled review skill 在 dispatch 前计数，后续 `read`/`grep`/`find`/`ls`、双轴和 validation 等 Harness tool projection 继续累计，超限以 `reviewer_context_budget_exceeded` fail closed。`review_validate` 的 stdout/stderr 各只向模型返回最多 8 KiB 的头尾、原始 byte count 与 SHA-256；Standards/Spec 各只返回最多 12 KiB 的结构化 status/summary/findings/evidence refs 与原始输出 digest，`review_submit` 机械绑定每项 finding identity。完整原始 validation/axis 输出只写入 Attempt 私有 evidence，不能替代 exit code、finding identity、durable result 或 Git gate。
+顶层 Reviewer prompt 从绑定 snapshot 明示大小写敏感的真实工具 allowlist，其中没有 `review_validate`。Harness 注入上下文总预算为 256 KiB；初始 prompt、trusted bundle 与 bundled review skill 在 dispatch 前计数，后续 `read`/`grep`/`find`/`ls`、双轴和 receipt projection 继续累计，超限以 `reviewer_context_budget_exceeded` fail closed。receipt 的 stdout/stderr 内容统一替换为固定 redaction marker，只保留原始 byte count 与 SHA-256，原始 validation 输出不落盘；Standards/Spec 各只返回最多 12 KiB 的结构化 status/summary/findings/evidence refs 与原始输出 digest，`review_submit` 机械绑定每项 axis/validation finding identity。完整 axis 输出只写入 Attempt 私有 evidence，不能替代 exit code、finding identity、durable result 或 Git gate。
 
 ### Analyst
 
@@ -287,7 +288,7 @@ required check 失败时，Controller 记录 HEAD-bound CI evidence、取消 aut
 
 ### Blocked recovery
 
-runtime 外部结果短暂迟到时，同一 Attempt 只做一次 bounded reconciliation，且不重放 prompt。窄范围 pre-dispatch Worker 或 same-HEAD Reviewer infrastructure incident 可由 policy 自动授权一次 fresh retry；其余情况依次需要 Incident、EvidencePack、Analyst advice 与精确 human gate。恢复会关闭旧 pane，并创建 fresh Worker 或 Reviewer。
+runtime 外部结果短暂迟到时，同一 Attempt 只做一次 bounded reconciliation，且不重放 prompt。窄范围 pre-dispatch Worker 或 same-HEAD Reviewer runtime infrastructure incident 可由 policy 自动授权一次 fresh retry；`validation_infrastructure` 不在该自动规则内，其余情况依次需要 Incident、EvidencePack、Analyst advice 与精确 human gate。恢复会关闭旧 pane，并创建 fresh Worker 或 Reviewer。
 
 Analyst `hold` 不授权 retry。`reassess` 只创建新的可审计 Incident/Analysis cycle，也不直接授权执行。
 
@@ -299,6 +300,7 @@ Analyst `hold` 不授权 retry。`reassess` 只创建新的可审计 Incident/An
 | `controller.ts` | 公开 `HarnessController` facade 与 `JobState` 分发 |
 | `controller/task-lifecycle.ts` | 选择、claim、worktree 与归档 |
 | `controller/attempt-*` | Attempt 准备、驱动、完整性、收口与 bounded reconciliation |
+| `controller/reviewer-validation.ts` | Reviewer 前置 validation receipt 的绑定、复核与 block 分类 |
 | `controller/runtime-preflight.ts` | Provider、Docker、Pi 与 execution snapshot gate |
 | `controller/delivery.ts` | PR、CI、base refresh 与 merge observation |
 | `controller/recovery-flow.ts` | EvidencePack、Analyst、late result、CI reconciliation 与 fresh retry |
@@ -322,6 +324,7 @@ Analyst `hold` 不授权 retry。`reassess` 只创建新的可审计 Incident/An
 | `adapters/json-store.ts` | ledger lock、CAS、atomic write 与 event append |
 | `adapters/github-gh.ts` | GitHub Issue/claim/PR/checks/merge |
 | `adapters/git-cli.ts` | worktree、Git fixed point、trusted context、Reviewer snapshots |
+| `adapters/reviewer-validation-runner.ts` | 无 shell 的固定 argv 执行、超时与有界输出持久化 |
 | `adapters/herdr-cli.ts` | Herdr worktree/pane/agent lifecycle |
 | `adapters/pi-rpc-runtime.ts` | Controller-facing durable RPC adapter |
 | `adapters/local-evidence.ts` | bounded Analyst evidence |

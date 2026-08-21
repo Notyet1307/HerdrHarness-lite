@@ -1376,6 +1376,7 @@ function rpcFixture(): {
         refs: [],
         reviewEvidencePath: null,
         validationArgv: null,
+        validationReceiptPath: null,
       },
       runtime: {
         snapshotDigest: "0".repeat(64),

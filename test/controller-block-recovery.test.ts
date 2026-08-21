@@ -366,7 +366,7 @@ test("Reviewer infrastructure failure automatically retries once despite unknown
     preflight: new FakeRuntimePreflight(),
   });
 
-  for (let index = 0; index < 12; index += 1) await controller.tick();
+  for (let index = 0; index < 13; index += 1) await controller.tick();
   const failedReviewerId = store.state.activeJob?.activeAttempt?.id;
   herdr.settleWithoutResult = {
     agentStatus: "idle",
@@ -420,7 +420,7 @@ test("Reviewer infrastructure failure automatically retries once despite unknown
   assert.equal(store.state.activeJob?.reviewRound, 0);
   assert.equal(herdr.closed.length, 2);
 
-  for (let index = 0; index < 5; index += 1) await controller.tick();
+  for (let index = 0; index < 6; index += 1) await controller.tick();
   assert.equal(store.state.activeJob?.state, "publish_ready");
   assert.equal(herdr.prepared.filter((entry) => entry.lane === "worker").length, 1);
   assert.equal(herdr.prepared.filter((entry) => entry.lane === "reviewer").length, 2);
@@ -537,7 +537,7 @@ test("held Reviewer infrastructure incident can be reassessed without granting r
     preflight: new FakeRuntimePreflight(),
   });
 
-  for (let index = 0; index < 12; index += 1) await controller.tick();
+  for (let index = 0; index < 13; index += 1) await controller.tick();
   herdr.settleWithoutResult = { agentStatus: "idle", diagnostic: "provider sessions are full" };
   await controller.tick();
   await controller.tick();
@@ -605,6 +605,7 @@ test("held Reviewer infrastructure incident can be reassessed without granting r
   );
   assert.equal((await controller.tick()).action, "recovery_applied");
   assert.equal((await controller.tick()).action, "attempt_prepared");
+  assert.equal((await controller.tick()).action, "reviewer_validation_ready");
   assert.equal((await controller.tick()).action, "attempt_pane_ready");
   assert.equal((await controller.tick()).action, "attempt_agent_ready");
   assert.equal((await controller.tick()).action, "attempt_dispatched");
@@ -662,7 +663,7 @@ test("held Reviewer validation block can be reassessed and retried on the same H
     preflight: new FakeRuntimePreflight(),
   });
 
-  for (let index = 0; index < 13; index += 1) await controller.tick();
+  for (let index = 0; index < 14; index += 1) await controller.tick();
   assert.equal(store.state.activeJob?.state, "blocked");
   assert.equal(store.state.activeJob?.incident?.class, "review_uncertain");
   assert.equal(store.state.activeJob?.activeAttempt?.result?.lane, "reviewer");
@@ -707,6 +708,7 @@ test("held Reviewer validation block can be reassessed and retried on the same H
   assert.equal((await controller.tick()).action, "attempt_prepared");
   const freshAttemptId = store.state.activeJob!.activeAttempt!.id;
   assert.ok(freshAttemptId !== blockedAttemptId);
+  assert.equal((await controller.tick()).action, "reviewer_validation_ready");
   assert.equal((await controller.tick()).action, "attempt_pane_ready");
   assert.equal((await controller.tick()).action, "attempt_agent_ready");
   assert.equal((await controller.tick()).action, "attempt_dispatched");
@@ -972,7 +974,7 @@ test("controller-recorded Analyst execution failure can be reassessed without gr
     preflight: new FakeRuntimePreflight(),
   });
 
-  for (let index = 0; index < 14; index += 1) await controller.tick();
+  for (let index = 0; index < 15; index += 1) await controller.tick();
   const held = store.state.activeJob!;
   assert.equal(held.incident?.class, "review_uncertain");
   assert.equal(held.activeAttempt?.phase, "settled");
@@ -1066,7 +1068,7 @@ test("an exact human decision can recover an exhausted major Reviewer change int
     preflight: new FakeRuntimePreflight(),
   });
 
-  for (let index = 0; index < 14; index += 1) await controller.tick();
+  for (let index = 0; index < 15; index += 1) await controller.tick();
   const held = store.state.activeJob!;
   const oldAttemptId = held.activeAttempt!.id;
   assert.equal(held.state, "blocked");

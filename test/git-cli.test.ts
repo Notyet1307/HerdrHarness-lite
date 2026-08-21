@@ -2,9 +2,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { Buffer } from "node:buffer";
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { GitCli } from "../src/adapters/git-cli.js";
 import { executionResourceDigest } from "../src/attempt-plan.js";
 import { type CommandResult, type CommandRunner, requireSuccess, SyncCommandRunner } from "../src/adapters/command.js";
@@ -74,6 +74,7 @@ test("trusted context is exported from the exact base SHA with Pi-compatible pre
     writeFileSync(context.bundlePath, "tampered\n");
     await assert.rejects(() => cli.verifyTrustedContext(context), /changed after preparation/);
   } finally {
+    makeWritableForCleanup(root);
     rmSync(root, { recursive: true, force: true });
   }
 });
@@ -142,6 +143,8 @@ test("Reviewer preparation exports a read-only exact-HEAD snapshot and writable 
   const attemptRoot = join(root, "state", "attempt-1");
   const reviewAxisAgentPath = join(root, "review-axis.md");
   const fakePiPath = join(root, "fake-pi");
+  const dockerConfig = join(root, "docker-config");
+  const previousSecret = process.env.HERDR_REVIEWER_TEST_SECRET;
   const runner = new SyncCommandRunner();
   const git = (...args: string[]): string => requireSuccess(runner.run("git", ["-C", repo, ...args]), `git ${args[0]}`);
   try {
@@ -160,6 +163,7 @@ test("Reviewer preparation exports a read-only exact-HEAD snapshot and writable 
     writeFileSync(reviewAxisAgentPath, "---\nname: herdr-harness-review-axis\ndescription: test\n---\nread only\n");
     writeFileSync(fakePiPath, "#!/bin/sh\nif [ \"$1\" = --version ]; then printf '0.84.0\\n'; exit 0; fi\n: > \"$FAKE_PI_ARGS\"\nfor arg in \"$@\"; do printf '%s\\n' \"$arg\" >> \"$FAKE_PI_ARGS\"; done\n", { mode: 0o500 });
     chmodSync(fakePiPath, 0o500);
+    mkdirSync(dockerConfig);
     mkdirSync(attemptRoot, { recursive: true });
     writeFileSync(join(attemptRoot, "trusted-context.md"), "preserve me\n");
     const input = {
@@ -168,10 +172,19 @@ test("Reviewer preparation exports a read-only exact-HEAD snapshot and writable 
       resultPath: join(attemptRoot, "result.json"),
       jobId: "job-1",
       attemptId: "reviewer-1",
+      taskDigest: "1".repeat(64),
       baseSha,
       expectedHeadSha,
-      validationArgv: ["npm", "run", "verify"],
-      dockerHost: "unix:///tmp/docker.sock",
+      validationArgv: [
+        "/usr/bin/env",
+        `DOCKER_CONFIG=${dockerConfig}`,
+        process.execPath,
+        resolve("test/fixtures/reviewer-validation.js"),
+        "--stdout-bytes", String(21 * 1024 * 1024),
+        "--stderr-bytes", String(5 * 1024 * 1024),
+      ],
+      dockerHost: null,
+      resourceDigest: "2".repeat(64),
       reviewAxisAgent: {
         kind: "agent" as const,
         path: reviewAxisAgentPath,
@@ -187,13 +200,73 @@ test("Reviewer preparation exports a read-only exact-HEAD snapshot and writable 
       contextBudgetReserveBytes: REVIEWER_CONTEXT_BUDGET_RESERVE_BYTES,
     };
 
-    const workspace = await new GitCli(runner).prepareReviewer(input);
+    const cli = new GitCli(runner);
+    process.env.HERDR_REVIEWER_TEST_SECRET = "must-not-leak";
+    const validation = await cli.runReviewerValidation(input);
+    assert.equal(validation.receipt.status, "passed");
+    assert.equal(validation.receipt.stdout.byteCount, 21 * 1024 * 1024);
+    assert.equal(validation.receipt.stderr.byteCount, 5 * 1024 * 1024);
+    assert.equal(validation.receipt.stdout.truncated, true);
+    assert.equal(validation.receipt.stderr.truncated, true);
+    assert.equal(validation.receipt.stdout.redacted, true);
+    assert.equal(validation.receipt.stderr.redacted, true);
+    assert.equal(validation.receipt.stdout.text, "[redacted validation output]");
+    assert.equal(validation.receipt.stderr.text, "[redacted validation output]");
+    assert.match(validation.receipt.stdout.sha256, /^[0-9a-f]{64}$/);
+    assert.match(validation.receipt.stderr.sha256, /^[0-9a-f]{64}$/);
+    assert.deepEqual(readdirSync(join(attemptRoot, "evidence")), []);
+    const validationEnv = JSON.parse(readFileSync(join(attemptRoot, "workspace", "validation", "validation-env.json"), "utf8")) as Record<string, string>;
+    assert.equal(validationEnv.HERDR_REVIEWER_TEST_SECRET, undefined);
+    assert.equal(validationEnv.DOCKER_CONFIG, dockerConfig);
+    assert.equal(validationEnv.HOME, join(attemptRoot, "workspace", "scratch", "home"));
+    writeFileSync(join(attemptRoot, "workspace", "validation", "validation-only.txt"), "sentinel");
+    assert.deepEqual(await cli.runReviewerValidation(input), validation);
+    assert.equal(readFileSync(join(attemptRoot, "workspace", "validation", "validation-only.txt"), "utf8"), "sentinel");
+    await assert.rejects(() => cli.verifyReviewerValidation({
+      ...input,
+      expectedHeadSha: "c".repeat(40),
+      binding: validation.binding,
+    }), /receipt binding is invalid or drifted/);
+    const failedRoot = join(root, "state", "attempt-failed");
+    const failed = await cli.runReviewerValidation({
+      ...input,
+      rootPath: failedRoot,
+      resultPath: join(failedRoot, "result.json"),
+      attemptId: "reviewer-failed",
+      validationArgv: [process.execPath, resolve("test/fixtures/reviewer-validation.js"), "--exit-code", "7"],
+    });
+    assert.equal(failed.receipt.status, "failed-checks");
+    assert.equal(failed.receipt.exitCode, 7);
+    assert.equal(failed.receipt.error, null);
+    const missingRoot = join(root, "state", "attempt-missing");
+    const missing = await cli.runReviewerValidation({
+      ...input,
+      rootPath: missingRoot,
+      resultPath: join(missingRoot, "result.json"),
+      attemptId: "reviewer-missing",
+      validationArgv: ["definitely-missing-review-command"],
+    });
+    assert.equal(missing.receipt.status, "infrastructure-error");
+    assert.match(missing.receipt.error ?? "", /executable is unavailable/);
+    const timeoutRoot = join(root, "state", "attempt-timeout");
+    const timedOut = await new GitCli(runner, 25).runReviewerValidation({
+      ...input,
+      rootPath: timeoutRoot,
+      resultPath: join(timeoutRoot, "result.json"),
+      attemptId: "reviewer-timeout",
+      validationArgv: [process.execPath, resolve("test/fixtures/reviewer-validation.js"), "--sleep-ms", "200"],
+    });
+    assert.equal(timedOut.receipt.status, "infrastructure-error");
+    assert.equal(timedOut.receipt.timeout, true);
+    const preparedInput = { ...input, validationReceipt: validation.binding };
+    const workspace = await cli.prepareReviewer(preparedInput);
     assert.equal(readFileSync(join(workspace.reviewPath, "product.txt"), "utf8"), "head\n");
     assert.equal(lstatSync(join(workspace.reviewPath, "product.txt")).mode & 0o222, 0);
     writeFileSync(join(attemptRoot, "workspace", "validation", "product.txt"), "validation mutation\n");
     assert.match(readFileSync(workspace.evidencePath, "utf8"), new RegExp(`Head SHA: ${expectedHeadSha}`));
     const descriptor = JSON.parse(readFileSync(join(attemptRoot, "workspace", "descriptor.json"), "utf8")) as {
-      dockerHost: string;
+      validationReceiptPath: string;
+      validationReceiptDigest: string;
       runtimePath: string;
       emptyAppendSystemPromptPath: string;
       piSubagentWrapperPath: string;
@@ -203,7 +276,8 @@ test("Reviewer preparation exports a read-only exact-HEAD snapshot and writable 
       contextBudgetBytes: number;
       contextBudgetReserveBytes: number;
     };
-    assert.equal(descriptor.dockerHost, "unix:///tmp/docker.sock");
+    assert.equal(descriptor.validationReceiptPath, validation.binding.path);
+    assert.equal(descriptor.validationReceiptDigest, validation.binding.digest);
     assert.equal(descriptor.runtimePath, join(attemptRoot, "workspace", "review-runtime"));
     assert.equal(descriptor.piRuntimeVersion, "0.84.0");
     assert.equal(descriptor.privateEvidenceDir, join(attemptRoot, "evidence"));
@@ -229,9 +303,9 @@ test("Reviewer preparation exports a read-only exact-HEAD snapshot and writable 
       "json",
     ]);
     assert.equal(readFileSync(join(attemptRoot, "trusted-context.md"), "utf8"), "preserve me\n");
-    assert.deepEqual(await new GitCli(runner).prepareReviewer(input), workspace);
+    assert.deepEqual(await new GitCli(runner).prepareReviewer(preparedInput), workspace);
     await assert.rejects(() => new GitCli(runner).prepareReviewer({
-      ...input,
+      ...preparedInput,
       prompt: "x".repeat(REVIEWER_CONTEXT_BUDGET_BYTES),
     }), /reviewer_context_budget_exceeded/);
     chmodSync(fakePiPath, 0o700);
@@ -241,12 +315,12 @@ test("Reviewer preparation exports a read-only exact-HEAD snapshot and writable 
     assert.equal(drifted.status, 70);
     assert.match(drifted.stderr, /Pi runtime version changed/);
     await assert.rejects(() => new GitCli(runner).prepareReviewer({
-      ...input,
+      ...preparedInput,
       rootPath: join(repo, "review-state"),
       resultPath: join(repo, "review-state", "result.json"),
     }), /outside the product worktree/);
     await assert.rejects(() => new GitCli(runner).prepareReviewer({
-      ...input,
+      ...preparedInput,
       rootPath: root,
       resultPath: join(root, "result.json"),
     }), /outside the product worktree/);
@@ -255,11 +329,24 @@ test("Reviewer preparation exports a read-only exact-HEAD snapshot and writable 
     const stateLink = join(root, "state-link");
     symlinkSync(linkedState, stateLink, "dir");
     await assert.rejects(() => new GitCli(runner).prepareReviewer({
-      ...input,
+      ...preparedInput,
       rootPath: stateLink,
       resultPath: join(stateLink, "result.json"),
     }), /outside the product worktree/);
+    symlinkSync("/tmp", join(repo, "escape"), "dir");
+    git("add", "escape");
+    git("commit", "--quiet", "-m", "candidate symlink");
+    const symlinkRoot = join(root, "state", "attempt-symlink");
+    await assert.rejects(() => cli.runReviewerValidation({
+      ...input,
+      rootPath: symlinkRoot,
+      resultPath: join(symlinkRoot, "result.json"),
+      attemptId: "reviewer-symlink",
+      expectedHeadSha: git("rev-parse", "HEAD").trim(),
+    }), /source snapshot contains a symbolic link/);
   } finally {
+    if (previousSecret === undefined) delete process.env.HERDR_REVIEWER_TEST_SECRET;
+    else process.env.HERDR_REVIEWER_TEST_SECRET = previousSecret;
     const sourcePath = join(attemptRoot, "workspace", "source");
     const productPath = join(sourcePath, "product.txt");
     for (const path of [
@@ -273,9 +360,18 @@ test("Reviewer preparation exports a read-only exact-HEAD snapshot and writable 
     }
     if (existsSync(sourcePath)) chmodSync(sourcePath, 0o700);
     if (existsSync(productPath)) chmodSync(productPath, 0o600);
+    makeWritableForCleanup(root);
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+function makeWritableForCleanup(path: string): void {
+  if (!existsSync(path)) return;
+  const stat = lstatSync(path);
+  if (stat.isSymbolicLink()) return;
+  chmodSync(path, stat.mode | (stat.isDirectory() ? 0o700 : 0o600));
+  if (stat.isDirectory()) for (const name of readdirSync(path)) makeWritableForCleanup(join(path, name));
+}
 
 test("Worker Git verification rejects untracked files outside Harness results", async () => {
   const input = {
