@@ -2,6 +2,7 @@ import { reviewChangesHandoff } from "../handoff.js";
 import { evolveJob, type AgentStatus, type Attempt, type AttemptResult, type HarnessState, type Job, type ReviewerResult, type WorkerResult } from "../model.js";
 import { validateAttemptResult } from "../policy.js";
 import { pathIsWithin } from "../path-safety.js";
+import { makeSafeRuntimeDiagnostic } from "../pi-rpc-diagnostics.js";
 import type { ControllerContext } from "./context.js";
 import { reconcileAttemptOrBlock } from "./attempt-reconciliation.js";
 import { verifyReviewerIntegrity } from "./attempt-integrity.js";
@@ -26,8 +27,9 @@ export async function finishObservedAttempt(
   const validated = validateAttemptResult(job.id, attempt, observation.result);
   if (!validated.ok) {
     const summary = withHerdrDiagnostic(validated.reason, observation.diagnostic);
+    const runtimeDiagnostic = resultDiagnostic(observation.result === null ? "result_missing" : "result_identity");
     if (observation.result === null && observation.agentStatus !== "blocked") {
-      return reconcileAttemptOrBlock(ctx, state, job, attempt, summary);
+      return reconcileAttemptOrBlock(ctx, state, job, attempt, summary, runtimeDiagnostic);
     }
     return ctx.block(state, job, {
       class: observation.agentStatus === "blocked"
@@ -36,6 +38,7 @@ export async function finishObservedAttempt(
       lane: attempt.lane,
       summary,
       attemptResult: observation.result,
+      runtimeDiagnostic,
     });
   }
   if (attempt.lane === "worker") {
@@ -74,6 +77,7 @@ export async function finishWorker(
       lane: "worker",
       summary: "worker completion lacks verifiable Git provenance",
       attemptResult: worker,
+      runtimeDiagnostic: resultDiagnostic("result_identity"),
     });
   }
 
@@ -92,6 +96,7 @@ export async function finishWorker(
       lane: "worker",
       summary: verification.reason,
       attemptResult: worker,
+      runtimeDiagnostic: gitDiagnostic(),
     });
   }
 
@@ -133,6 +138,7 @@ export async function finishReviewer(
       lane: "reviewer",
       summary: "review result lacks a bound implementation HEAD",
       attemptResult: review,
+      runtimeDiagnostic: resultDiagnostic("result_identity"),
     });
   }
   const settled = settleAttempt(attempt, review, ctx.deps.clock.now());
@@ -198,4 +204,26 @@ export async function closeCompletedAttempt(ctx: ControllerContext, job: Job, at
   } catch (error) {
     return result(false, "attempt_completed", job.id, `${attempt.lane} pane close is not confirmed: ${message(error)}`);
   }
+}
+
+function resultDiagnostic(code: "result_missing" | "result_identity") {
+  return makeSafeRuntimeDiagnostic({
+    domain: "acceptance",
+    code,
+    stage: "result-validation",
+    failureDomain: "result",
+    failureCode: code,
+    retryable: false,
+  });
+}
+
+function gitDiagnostic() {
+  return makeSafeRuntimeDiagnostic({
+    domain: "acceptance",
+    code: "git_integrity",
+    stage: "git-verification",
+    failureDomain: "git",
+    failureCode: "git_integrity",
+    retryable: false,
+  });
 }

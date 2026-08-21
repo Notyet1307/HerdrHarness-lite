@@ -25,7 +25,9 @@ export default function fixture(pi) {
             agent: entry.agent,
             task: entry.task,
             exitCode: 0,
-            finalOutput: `${entry.key}: no findings`,
+            finalOutput: process.env.FAKE_PI_REVIEW_AXIS_OUTPUT_BYTES
+              ? `${entry.key}: ${"x".repeat(Number(process.env.FAKE_PI_REVIEW_AXIS_OUTPUT_BYTES))}`
+              : `${entry.key}: no findings`,
           })),
         },
       };

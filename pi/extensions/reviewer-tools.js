@@ -94,7 +94,11 @@ export default function reviewerTools(pi) {
         }
         environmentPreflight = { ok: true, validationExecutable: executables.at(-1), docker };
       } catch (error) {
-        environmentPreflight = { ok: false, error: error instanceof Error ? error.message : String(error) };
+        environmentPreflight = {
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+          failure: failure("acceptance", "validation_infrastructure", "review-preflight", true),
+        };
       }
       return toolResult(environmentPreflight);
     },
@@ -117,6 +121,11 @@ export default function reviewerTools(pi) {
         maxBuffer: 20 * 1024 * 1024,
         timeout: 30 * 60 * 1000,
       });
+      const validationFailure = output.error || output.status === null
+        ? failure("acceptance", "validation_infrastructure", "review-validation", true)
+        : output.status === 0
+          ? null
+          : failure("deterministic", "validation_failed", "review-validation", false);
       validation = {
         command: descriptor.validationArgv,
         exitCode: output.status,
@@ -124,6 +133,7 @@ export default function reviewerTools(pi) {
         error: output.error?.message ?? null,
         stdout: tail(output.stdout ?? ""),
         stderr: tail(output.stderr ?? ""),
+        ...(validationFailure ? { failure: validationFailure } : {}),
       };
       return toolResult(validation);
     },
@@ -496,4 +506,8 @@ function tail(value) {
 
 function toolResult(details) {
   return { content: [{ type: "text", text: JSON.stringify(details, null, 2) }], details };
+}
+
+function failure(domain, code, stage, retryable) {
+  return { domain, code, stage, retryable };
 }

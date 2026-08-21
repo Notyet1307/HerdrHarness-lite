@@ -82,7 +82,11 @@ function respond(command) {
     return;
   }
   if (command.type === "set_auto_compaction") autoCompactionEnabled = command.enabled;
-  if (command.type === "abort" && process.env.FAKE_PI_WAIT_FOR_ABORT === "1") {
+  if (command.type === "abort" && (
+    process.env.FAKE_PI_WAIT_FOR_ABORT === "1"
+    || process.env.FAKE_PI_PROVIDER_NEVER_RETURNS === "1"
+    || process.env.FAKE_PI_RESULT_BEFORE_STALL === "1"
+  )) {
     emit({ type: "agent_end", messages: [], willRetry: false });
     emit({ type: "agent_settled" });
     emit(base);
@@ -96,6 +100,10 @@ function respond(command) {
     emit({ type: "extension_ui_request", id: "worker-ui", method: "setStatus", widgetKey: "ponytail" });
   }
   emit({ type: "turn_start" });
+  if (process.env.FAKE_PI_OVERSIZE_EVENT === "1") {
+    process.stdout.write(`${JSON.stringify({ type: "turn_end", payload: "x".repeat(1024 * 1024) })}\n`);
+    return;
+  }
   if (["1", "fail"].includes(process.env.FAKE_PI_CONTROLLED_COMPACTION)) {
     emitProjected({
       type: "compaction_start",
@@ -132,7 +140,7 @@ function respond(command) {
       summaryDigest: "a".repeat(64),
     });
   }
-  if (process.env.FAKE_PI_WAIT_FOR_ABORT === "1") return;
+  if (process.env.FAKE_PI_WAIT_FOR_ABORT === "1" || process.env.FAKE_PI_PROVIDER_NEVER_RETURNS === "1") return;
   if (["success", "error"].includes(process.env.FAKE_PI_TOOL_BEFORE_FAILURE)) {
     emit({ type: "tool_execution_start", toolCallId: "tool-1", toolName: "read", args: {} });
     emit({
@@ -142,6 +150,10 @@ function respond(command) {
       result: { content: "fixed fixture result" },
       isError: process.env.FAKE_PI_TOOL_BEFORE_FAILURE === "error",
     });
+  }
+  if (process.env.FAKE_PI_CONTINUATION_LOST === "1") {
+    process.stdout.write("", () => process.exit(0));
+    return;
   }
   if (["error", "aborted"].includes(process.env.FAKE_PI_ASSISTANT_STOP_REASON)) {
     const failureMessage = {
@@ -154,6 +166,12 @@ function respond(command) {
     emit({ type: "message_end", message: failureMessage });
     emit({ type: "turn_end", message: failureMessage, toolResults: [] });
     emit({ type: "agent_end", messages: [failureMessage], willRetry: false });
+    emit({ type: "agent_settled" });
+    return;
+  }
+  if (process.env.FAKE_PI_UNKNOWN_EVENT === "1") {
+    emit({ type: "future_rpc_event", privatePayload: "must-not-be-persisted" });
+    emit({ type: "agent_end", messages: [], willRetry: false });
     emit({ type: "agent_settled" });
     return;
   }
@@ -177,6 +195,10 @@ function respond(command) {
     headSha: "b".repeat(40),
     failedCommands: [],
   })}\n`);
+  if (process.env.FAKE_PI_TERMINAL_FAILURE_AFTER_RESULT === "1") {
+    emit({ type: "auto_retry_start", privatePayload: "must-not-be-persisted" });
+  }
+  if (process.env.FAKE_PI_RESULT_BEFORE_STALL === "1") return;
   if (process.env.FAKE_PI_MALFORMED_AFTER_PROMPT === "1") {
     process.stdout.write("{malformed\n");
     return;

@@ -297,6 +297,17 @@ test("an approved retry rechecks and accepts a late exact Worker result before s
   herdr.settleWithoutResult = { agentStatus: "idle", diagnostic: "Pi is auto-compacting" };
   assert.equal((await controller.tick()).action, "attempt_reconciling");
   assert.equal((await controller.tick()).action, "blocked");
+  assert.deepEqual(store.state.activeJob?.incident?.runtimeDiagnostic && {
+    domain: store.state.activeJob.incident.runtimeDiagnostic.domain,
+    code: store.state.activeJob.incident.runtimeDiagnostic.code,
+    stage: store.state.activeJob.incident.runtimeDiagnostic.stage,
+    retryable: store.state.activeJob.incident.runtimeDiagnostic.retryable,
+  }, {
+    domain: "acceptance",
+    code: "result_missing",
+    stage: "result-validation",
+    retryable: false,
+  });
   const blockedAttemptId = store.state.activeJob!.activeAttempt!.id;
   assert.equal((await controller.tick()).action, "analysis_recorded");
   const blocked = store.state.activeJob!;
@@ -906,6 +917,7 @@ test("a pre-fix Worker result with a fabricated SHA suffix can be reassessed onl
   await controller.tick();
   const held = store.state.activeJob!;
   assert.equal(held.incident?.class, "integrity_violation");
+  assert.equal(held.incident?.runtimeDiagnostic?.code, "git_integrity");
   assert.equal(held.analysis?.action, "hold");
   assert.deepEqual(operatorActionsFor(held).map((action) => action.kind), ["reassess", "cancel"]);
 

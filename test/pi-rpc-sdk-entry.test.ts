@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { SyncCommandRunner } from "../src/adapters/command.js";
 import { executionResourceDigest } from "../src/attempt-plan.js";
+import { fakePiSdkSource } from "./fixtures/fake-pi-sdk.js";
 import {
   installWorkerContextControls,
   projectPiRpcEvent,
@@ -213,6 +214,48 @@ test("Worker context controls pin exact task data and compact once between tool 
   assert.equal(events[1]?.summaryDigest && String(events[1]?.summaryDigest).length, 64);
 });
 
+test("controlled compaction Provider failure emits only a content-free failed event", async () => {
+  const events: Record<string, unknown>[] = [];
+  const secret = "access_token_COMPACTION_SENTINEL";
+  const session = {
+    model: { provider: "test", id: "model", contextWindow: 100_000 },
+    thinkingLevel: "high",
+    modelRuntime: { async getAuth() { return { auth: { apiKey: secret } }; } },
+    sessionManager: {
+      getBranch() { return [{ id: "entry-1" }]; },
+      appendCompaction() { return "unused"; },
+      buildSessionContext() { return { messages: [] }; },
+    },
+    agent: {
+      state: { messages: [], systemPrompt: "trusted" },
+      async transformContext(messages: unknown[]) { return messages; },
+      async prepareNextTurnWithContext() { return undefined; },
+    },
+  };
+  installWorkerContextControls({
+    calculateContextTokens(usage: { totalTokens: number }) { return usage.totalTokens; },
+    estimateTokens() { return 0; },
+    prepareCompaction() { return { firstKeptEntryId: "entry-1" }; },
+    async compact() { throw new Error(`Provider failed ${secret}`); },
+  }, session, "exact task", {
+    triggerPercent: 75,
+    maxCompactions: 1,
+    keepRecentTokens: 20_000,
+    overflowContinuation: false,
+  }, (event: Record<string, unknown>) => events.push(event));
+
+  const nextTurn = session.agent.prepareNextTurnWithContext as unknown as (turn: unknown) => Promise<unknown>;
+  await assert.rejects(() => nextTurn({
+    message: { usage: { totalTokens: 80_000 } },
+    context: { messages: [], systemPrompt: "trusted" },
+  }), /Harness controlled compaction failed/);
+  assert.deepEqual(events.map(({ type, outcome, willRetry }) => ({ type, outcome, willRetry })), [
+    { type: "compaction_start", outcome: undefined, willRetry: false },
+    { type: "compaction_end", outcome: "failed", willRetry: false },
+  ]);
+  assert.equal(JSON.stringify(events).includes(secret), false);
+});
+
 test("Pi RPC SDK host shares only canonical subscription OAuth and keeps settings in memory", () => {
   const root = mkdtempSync(join(tmpdir(), "harness-pi-sdk-"));
   const dist = join(root, "pi", "dist");
@@ -223,7 +266,7 @@ test("Pi RPC SDK host shares only canonical subscription OAuth and keeps setting
   mkdirSync(oauthAgentDir);
   writeFileSync(join(root, "pi", "package.json"), '{"type":"module"}\n');
   writeFileSync(join(dist, "cli.js"), "#!/usr/bin/env node\n", { mode: 0o700 });
-  writeFileSync(join(dist, "index.js"), fakePiSdk());
+  writeFileSync(join(dist, "index.js"), fakePiSdkSource());
   const authPath = join(oauthAgentDir, "auth.json");
   const authBefore = '{"openai-codex":{"type":"oauth"}}\n';
   writeFileSync(authPath, authBefore, { mode: 0o600 });
@@ -276,6 +319,13 @@ test("Pi RPC SDK host shares only canonical subscription OAuth and keeps setting
     assert.equal(authFailure.ok, false);
     assert.equal(authFailure.stderr.includes(sentinel), false);
 
+    const lockContention = runner.run(process.execPath, commandArgs, {
+      ...options,
+      env: { ...options.env, FAKE_PI_SDK_OAUTH_LOCK_CONTENTION: "1" },
+    });
+    assert.equal(lockContention.ok, false);
+    assert.equal(lockContention.stderr, "FAIL: Pi RPC SDK host failed at model-runtime\n");
+
     linkSync(authPath, join(root, "auth-hardlink.json"));
     const rejected = runner.run(process.execPath, commandArgs, options);
     assert.equal(rejected.ok, false);
@@ -295,7 +345,7 @@ test("Pi RPC SDK host reads one bound custom models.json without copying its API
   mkdirSync(credentialAgentDir);
   writeFileSync(join(root, "pi", "package.json"), '{"type":"module"}\n');
   writeFileSync(join(dist, "cli.js"), "#!/usr/bin/env node\n", { mode: 0o700 });
-  writeFileSync(join(dist, "index.js"), fakePiSdk());
+  writeFileSync(join(dist, "index.js"), fakePiSdkSource());
   const modelsPath = join(credentialAgentDir, "models.json");
   const secret = "CUSTOM_API_KEY_SENTINEL";
   const trustedBaseUrl = "https://trusted.invalid/v1";
@@ -395,68 +445,3 @@ test("Pi RPC SDK host reads one bound custom models.json without copying its API
     rmSync(root, { recursive: true, force: true });
   }
 });
-
-function fakePiSdk(): string {
-  return `
-import { readFileSync, writeFileSync } from "node:fs";
-export const VERSION = "0.84.0";
-const state = {};
-export const SettingsManager = {
-  inMemory(values, options) {
-    state.settings = { values, options };
-    return { kind: "settings" };
-  },
-};
-export const ModelRuntime = {
-  async create(options) {
-    state.modelOptions = options;
-    let registered = false;
-    let registeredModels = [];
-    return {
-      getModel(provider, id) { return registeredModels.find((model) => model.provider === provider && model.id === id) ?? { provider, id }; },
-      getProvider() { return undefined; },
-      async getAuth() {
-        if (process.env.FAKE_PI_SDK_AUTH_ERROR) throw new Error(process.env.FAKE_PI_SDK_AUTH_ERROR);
-        state.authChecked = true;
-        return registered ? { source: "configured API key", auth: { token: "redacted" } } : { auth: { token: "redacted" } };
-      },
-      isUsingSubscription() { return !registered; },
-      registerProvider(provider, config) {
-        const canonical = process.env.FAKE_PI_SDK_SWAP_MODEL_PATH;
-        if (canonical) {
-          const original = readFileSync(canonical, "utf8");
-          writeFileSync(canonical, process.env.FAKE_PI_SDK_SWAP_MODEL_CONTENT, { mode: 0o600 });
-          writeFileSync(canonical, original, { mode: 0o600 });
-        }
-        registered = true;
-        registeredModels = config.models.map((model) => ({ ...model, provider }));
-        state.registeredProvider = provider;
-        state.registeredBaseUrl = config.baseUrl;
-        state.registeredModel = registeredModels[0];
-      },
-    };
-  },
-};
-export const SessionManager = { inMemory(cwd) { return { cwd }; } };
-export async function createAgentSessionServices() {
-  return { diagnostics: [], resourceLoader: { getExtensions() { return { errors: [] }; } } };
-}
-export async function createAgentSessionFromServices() {
-  const session = {
-    state: { messages: [] },
-    async prompt() {
-      session.state.messages.push({ role: "assistant", stopReason: "stop", content: [{ type: "text", text: "HERDR_HARNESS_PROVIDER_OK" }] });
-    },
-  };
-  return { session };
-}
-export async function createAgentSessionRuntime(factory, options) {
-  const runtime = await factory(options);
-  return {
-    ...runtime,
-    async dispose() { writeFileSync(process.env.FAKE_PI_SDK_CAPTURE, JSON.stringify(state)); },
-  };
-}
-export async function runRpcMode() { throw new Error("not used"); }
-`;
-}

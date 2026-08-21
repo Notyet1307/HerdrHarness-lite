@@ -30,6 +30,9 @@ test("advanced evidence separates dirty worktree progress and exposes only safe 
       attemptId,
       ok: false,
       error: "network access_token_MUST_NOT_LEAK",
+      domain: "execution",
+      code: "provider_network",
+      stage: "agent-run",
       failureDomain: "provider",
       failureCode: "provider_network",
       retryable: true,
@@ -112,6 +115,7 @@ test("advanced evidence separates dirty worktree progress and exposes only safe 
     }]);
     assert.ok(runtimeEvidence);
     assert.match(runtimeEvidence.summary, /provider_network/);
+    assert.match(runtimeEvidence.summary, /"domain":"execution"/);
     assert.match(runtimeEvidence.summary, /canonical-oauth/);
     assert.match(runtimeEvidence.summary, /controlled-threshold/);
     assert.match(runtimeEvidence.summary, /"tokensBefore":80000/);

@@ -24,8 +24,10 @@ import {
 } from "./compatibility.js";
 import {
   classifyProviderFailure,
+  classifyProviderContinuationLost,
   classifyPiRpcRunnerFailure,
   failurePhase,
+  makeSafeRuntimeDiagnostic,
   piRpcRunnerError,
   providerApi,
   type PiRpcProviderApi,
@@ -61,7 +63,7 @@ export class StrictJsonlDecoder {
   push(chunk: string, onRecord?: (record: JsonObject) => void): JsonObject[] {
     this.buffer += chunk;
     if (Buffer.byteLength(this.buffer, "utf8") > MAX_RPC_LINE_BYTES && !this.buffer.includes("\n")) {
-      throw piRpcRunnerError("rpc_protocol", "rpc_line_too_large", false);
+      throw piRpcRunnerError("rpc_protocol", "rpc_event_oversize", false);
     }
     const records: JsonObject[] = [];
     for (;;) {
@@ -72,7 +74,7 @@ export class StrictJsonlDecoder {
       if (line.endsWith("\r")) line = line.slice(0, -1);
       if (!line) continue;
       if (Buffer.byteLength(line, "utf8") > MAX_RPC_LINE_BYTES) {
-        throw piRpcRunnerError("rpc_protocol", "rpc_line_too_large", false);
+        throw piRpcRunnerError("rpc_protocol", "rpc_event_oversize", false);
       }
       let value: unknown;
       try {
@@ -360,7 +362,20 @@ async function main(argv: string[]): Promise<void> {
     if (!dispatch) {
       await stopChild(child, client);
       preparePiRpcAgentDir(plan.snapshot);
-      writeAtomicJson(spoolPath(plan.runtimeRoot, "terminal.json"), { ...identity, ok: false, error: "terminated before dispatch" });
+      const diagnostic = makeSafeRuntimeDiagnostic({
+        domain: "execution",
+        code: "runtime_terminated",
+        stage: "await-dispatch",
+        failureDomain: "runtime",
+        failureCode: "runtime_terminated",
+        retryable: false,
+      });
+      writeAtomicJson(spoolPath(plan.runtimeRoot, "terminal.json"), {
+        ...identity,
+        ok: false,
+        error: "terminated before dispatch",
+        ...diagnostic,
+      });
       writeAtomicJson(spoolPath(plan.runtimeRoot, "terminated.json"), { ...identity, ok: true, reason: "pre-dispatch termination" });
       return;
     }
@@ -402,6 +417,34 @@ async function main(argv: string[]): Promise<void> {
     const assistantTerminalFailure = assistantFailure as AssistantFailure | null;
     const terminalError = policyViolation ?? assistantTerminalFailure?.error ?? null;
     const ok = terminalError === null && !terminationRequested && settled;
+    const terminalDiagnostic = !ok && !assistantTerminalFailure
+      ? policyViolation === "controlled compaction failed"
+        ? makeSafeRuntimeDiagnostic({
+            domain: "execution",
+            code: "compaction_failure",
+            stage: "compaction",
+            failureDomain: "compaction",
+            failureCode: "compaction_failure",
+            retryable: false,
+          })
+        : policyViolation
+          ? makeSafeRuntimeDiagnostic({
+              domain: "execution",
+              code: "policy_violation",
+              stage: "agent-run",
+              failureDomain: "policy",
+              failureCode: "policy_violation",
+              retryable: false,
+            })
+          : makeSafeRuntimeDiagnostic({
+              domain: "execution",
+              code: "runtime_terminated",
+              stage: "agent-run",
+              failureDomain: "runtime",
+              failureCode: "runtime_terminated",
+              retryable: false,
+            })
+      : assistantTerminalFailure?.diagnostic ?? null;
     failureStage = "child-exit";
     if (ok && (childExit.code !== 0 || childExit.signal !== null)) {
       throw piRpcRunnerError("child_process", "child_exit_after_settled", false);
@@ -410,56 +453,67 @@ async function main(argv: string[]): Promise<void> {
       ...identity,
       ok,
       ...(!ok ? { error: terminalError ?? "runtime terminated by Controller" } : {}),
-      ...(!policyViolation && assistantTerminalFailure ? {
-        failureStage: "agent-run",
-        ...assistantTerminalFailure.diagnostic,
-        childExit,
-      } : {}),
+      ...(terminalDiagnostic ? withChildExit(terminalDiagnostic, childExit) : {}),
       agentSettled: settled,
       ...(controlledCompactionReceipt ? { controlledCompaction: controlledCompactionReceipt } : {}),
     });
     writeAtomicJson(spoolPath(plan.runtimeRoot, "terminated.json"), { ...identity, ok: true, reason: "settled and child exited" });
   } catch (error) {
     const primaryFailure = classifyPiRpcRunnerFailure(error, failureStage);
-    let cleanupFailureCode: string | null = null;
+    let cleanupFailure: ReturnType<typeof classifyPiRpcRunnerFailure> | null = null;
     if (child && client) {
       try {
         childExit ??= await stopChild(child, client);
       } catch (stopError) {
-        cleanupFailureCode = classifyPiRpcRunnerFailure(stopError, "child-shutdown").failureCode;
+        cleanupFailure = classifyPiRpcRunnerFailure(stopError, "child-shutdown");
       }
     } else if (child) {
-      cleanupFailureCode = "child_shutdown_unconfirmed";
+      cleanupFailure = classifyPiRpcRunnerFailure(
+        piRpcRunnerError("child_process", "child_shutdown_unconfirmed", false),
+        "child-shutdown",
+      );
     }
-    const diagnosticFingerprint = digest({
-      version: 1,
-      ...primaryFailure,
-      agentSettled: settled,
-      agentEndObserved,
-      lastEventType,
-      childExit: childExitCategory(childExit),
-    });
+    const diagnostic = primaryFailure.failureCode === "child_exit_before_settled"
+      && toolExecutionCount > 0
+      && lastEventType === "tool_execution_end"
+      ? classifyProviderContinuationLost({
+          providerApi: effectiveProviderApi,
+          phase: failurePhase(toolExecutionCount, toolErrorCount),
+          turnCount,
+          assistantMessageCount,
+          toolExecutionCount,
+          toolErrorCount,
+          transcriptBytes,
+        }, childExit)
+      : makeSafeRuntimeDiagnostic({ ...primaryFailure, childExit });
+    const cleanupDiagnostic = cleanupFailure
+      ? makeSafeRuntimeDiagnostic({
+          ...cleanupFailure,
+          domain: "observation",
+          code: "rpc_terminal_missing",
+          stage: "child-shutdown",
+          retryable: false,
+          childExit,
+        })
+      : null;
     writeAtomicJson(spoolPath(plan.runtimeRoot, "terminal.json"), {
       ...identity,
       ok: false,
       error: "Pi RPC runner failed",
-      failureStage,
-      ...primaryFailure,
-      diagnosticFingerprint,
-      childExit,
+      ...diagnostic,
       agentSettled: settled,
       agentEndObserved,
       lastEventType,
       eventCount,
       ...(controlledCompactionReceipt ? { controlledCompaction: controlledCompactionReceipt } : {}),
       stdoutEnded: client?.outputFinished ?? false,
-      ...(cleanupFailureCode ? { cleanupFailureCode } : {}),
+      ...(cleanupFailure ? { cleanupFailureCode: cleanupFailure.failureCode } : {}),
     });
     writeAtomicJson(spoolPath(plan.runtimeRoot, "terminated.json"), {
       ...identity,
-      ok: cleanupFailureCode === null,
-      reason: cleanupFailureCode === null ? "runner failure child exit confirmed" : "runner failure child exit unconfirmed",
-      ...(cleanupFailureCode ? { error: "Pi RPC child exit unconfirmed", cleanupFailureCode } : {}),
+      ok: cleanupFailure === null,
+      reason: cleanupFailure === null ? "runner failure child exit confirmed" : "runner failure child exit unconfirmed",
+      ...(cleanupFailure ? { error: "Pi RPC child exit unconfirmed", cleanupFailureCode: cleanupFailure.failureCode, ...cleanupDiagnostic } : {}),
     });
     throw new Error("Pi RPC runner failed");
   }
@@ -470,6 +524,20 @@ function observedPayloadBytes(event: JsonObject): number {
   return typeof projected === "number" && Number.isSafeInteger(projected) && projected >= 0
     ? projected
     : Buffer.byteLength(JSON.stringify(event), "utf8");
+}
+
+function withChildExit(diagnostic: SafeRuntimeDiagnostic, childExit: ChildExit): SafeRuntimeDiagnostic {
+  if (!diagnostic.domain || !diagnostic.code || !diagnostic.stage) {
+    throw new Error("current runtime diagnostic has no stable classification");
+  }
+  const { diagnosticFingerprint: _fingerprint, ...fields } = diagnostic;
+  return makeSafeRuntimeDiagnostic({
+    ...fields,
+    domain: diagnostic.domain,
+    code: diagnostic.code,
+    stage: diagnostic.stage,
+    childExit,
+  });
 }
 
 function observedPayloadDigest(event: JsonObject): string {
@@ -779,14 +847,6 @@ async function exitsWithin(exit: Promise<unknown>, timeoutMs: number): Promise<b
 
 function receiptIdentity(plan: PiRpcPlan): JsonObject {
   return { version: 1, attemptId: plan.attemptId, generation: plan.generation, planDigest: plan.planDigest };
-}
-
-function childExitCategory(childExit: ChildExit | null): string {
-  if (!childExit) return "unknown";
-  if (childExit.signal !== null) return "signal";
-  if (childExit.code === 0) return "success";
-  if (childExit.code !== null) return "nonzero";
-  return "unknown";
 }
 
 function object(value: unknown): JsonObject {

@@ -57,6 +57,7 @@ test("Reviewer tools isolate validation and write one identity-bound result", as
   const previousCanonicalAgentDir = process.env.HERDR_HARNESS_REVIEW_CANONICAL_PI_AGENT_DIR;
   const previousSubagentPiBinary = process.env.PI_SUBAGENT_PI_BINARY;
   const previousPiPackageRoot = process.env.PI_SUBAGENTS_PI_CODING_AGENT_PACKAGE_ROOT;
+  const previousAxisOutputBytes = process.env.FAKE_PI_REVIEW_AXIS_OUTPUT_BYTES;
   try {
     for (const path of [source, validation, dockerConfig, join(scratch, "home"), join(scratch, "tmp"), join(scratch, "cache"), join(scratch, "pycache")]) {
       mkdirSync(path, { recursive: true });
@@ -73,8 +74,9 @@ test("Reviewer tools isolate validation and write one identity-bound result", as
         "/usr/bin/env",
         `DOCKER_CONFIG=${dockerConfig}`,
         process.execPath,
-        "-e",
-        "const fs=require('node:fs');fs.writeFileSync('validation-only.txt','ok');fs.writeFileSync('validation-env.json',JSON.stringify(process.env))",
+        resolve("test/fixtures/reviewer-validation.js"),
+        "--stdout-bytes", "100000",
+        "--stderr-bytes", "100000",
       ],
       dockerHost: null,
       piAgentDir: join(root, "original-agent"),
@@ -236,7 +238,10 @@ test("Reviewer tools isolate validation and write one identity-bound result", as
       findings: [],
     }), /completed Standards and Spec/);
 
+    process.env.FAKE_PI_REVIEW_AXIS_OUTPUT_BYTES = "200000";
     const workflowResult = await subagent.execute("axes", defaultedScopeReviewCall);
+    restoreEnv("FAKE_PI_REVIEW_AXIS_OUTPUT_BYTES", previousAxisOutputBytes);
+    assert.ok(JSON.stringify(workflowResult.details).length > 400_000);
     await toolResultHook({
       toolCallId: "axes",
       toolName: "subagent",
@@ -252,7 +257,16 @@ test("Reviewer tools isolate validation and write one identity-bound result", as
       findings: [],
     }), /requires a review_validate run/);
     process.env.HERDR_REVIEWER_TEST_SECRET = "must-not-leak";
-    await validate.execute("validate", {});
+    const validationResult = JSON.parse((await validate.execute("validate", {})).content[0]?.text ?? "{}") as {
+      stdout?: string;
+      stderr?: string;
+      failure?: unknown;
+    };
+    assert.match(validationResult.stdout ?? "", /^\[truncated\]\n/);
+    assert.match(validationResult.stderr ?? "", /^\[truncated\]\n/);
+    assert.ok((validationResult.stdout ?? "").length <= 50_020);
+    assert.ok((validationResult.stderr ?? "").length <= 50_020);
+    assert.equal(validationResult.failure, undefined);
     assert.equal(readFileSync(join(validation, "validation-only.txt"), "utf8"), "ok");
     assert.equal(readFileSync(join(source, "product.txt"), "utf8"), "source\n");
     const validationEnv = JSON.parse(readFileSync(join(validation, "validation-env.json"), "utf8")) as Record<string, string>;
@@ -291,6 +305,7 @@ test("Reviewer tools isolate validation and write one identity-bound result", as
     restoreEnv("HERDR_HARNESS_REVIEW_CANONICAL_PI_AGENT_DIR", previousCanonicalAgentDir);
     restoreEnv("PI_SUBAGENT_PI_BINARY", previousSubagentPiBinary);
     restoreEnv("PI_SUBAGENTS_PI_CODING_AGENT_PACKAGE_ROOT", previousPiPackageRoot);
+    restoreEnv("FAKE_PI_REVIEW_AXIS_OUTPUT_BYTES", previousAxisOutputBytes);
     rmSync(root, { recursive: true, force: true });
   }
 });
@@ -349,9 +364,19 @@ test("Reviewer environment preflight blocks review axes but still permits a dura
     assert.ok(preflight);
     assert.ok(submit);
     assert.ok(toolCallHook);
-    const failure = JSON.parse((await preflight.execute("preflight", {})).content[0]?.text ?? "{}") as { ok?: boolean; error?: string };
+    const failure = JSON.parse((await preflight.execute("preflight", {})).content[0]?.text ?? "{}") as {
+      ok?: boolean;
+      error?: string;
+      failure?: Record<string, unknown>;
+    };
     assert.equal(failure.ok, false);
     assert.match(failure.error ?? "", /validation executable is unavailable/);
+    assert.deepEqual(failure.failure, {
+      domain: "acceptance",
+      code: "validation_infrastructure",
+      stage: "review-preflight",
+      retryable: true,
+    });
     assert.equal((await toolCallHook({ toolCallId: "axes", toolName: "subagent", input: reviewCall }))?.block, true);
 
     await submit.execute("blocked", {
@@ -361,6 +386,35 @@ test("Reviewer environment preflight blocks review axes but still permits a dura
     });
     const result = JSON.parse(readFileSync(resultPath, "utf8")) as { status?: string };
     assert.equal(result.status, "blocked");
+
+    const deterministicDescriptor = JSON.parse(readFileSync(descriptorPath, "utf8")) as Record<string, unknown>;
+    deterministicDescriptor.attemptId = "reviewer-3";
+    deterministicDescriptor.validationArgv = [
+      process.execPath,
+      resolve("test/fixtures/reviewer-validation.js"),
+      "--stderr-bytes", "1000",
+      "--exit-code", "7",
+    ];
+    writeFileSync(descriptorPath, JSON.stringify(deterministicDescriptor));
+    process.env.PI_CODING_AGENT_DIR = originalAgentDir;
+    configExtension.default();
+    const deterministicTools = new Map<string, Tool>();
+    extension.default({
+      registerTool(tool) { deterministicTools.set(tool.name, tool); },
+      on() {},
+    });
+    assert.equal(JSON.parse((await deterministicTools.get("review_preflight")!.execute("preflight", {})).content[0]!.text).ok, true);
+    const deterministicFailure = JSON.parse((await deterministicTools.get("review_validate")!.execute("validate", {})).content[0]!.text) as {
+      exitCode?: number;
+      failure?: Record<string, unknown>;
+    };
+    assert.equal(deterministicFailure.exitCode, 7);
+    assert.deepEqual(deterministicFailure.failure, {
+      domain: "deterministic",
+      code: "validation_failed",
+      stage: "review-validation",
+      retryable: false,
+    });
   } finally {
     if (previousDescriptor === undefined) delete process.env.HERDR_HARNESS_REVIEW_DESCRIPTOR;
     else process.env.HERDR_HARNESS_REVIEW_DESCRIPTOR = previousDescriptor;
