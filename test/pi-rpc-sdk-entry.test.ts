@@ -65,7 +65,22 @@ test("Pi RPC event adapter keeps Pi 0.84.2 message_update serialization fields",
   assert.deepEqual(message.usage, event.message.usage);
   assert.equal((projected.assistantMessageEvent as Record<string, unknown>).type, "text_delta");
   assert.equal((projected.assistantMessageEvent as Record<string, unknown>).partial, undefined);
+  assert.equal(projected.assistantContentObserved, true);
+  assert.equal(projected.toolCallObserved, false);
   assert.equal(JSON.stringify(projected).includes("PRIVATE_"), false);
+});
+
+test("Pi RPC event adapter projects tool-call observation without tool arguments", () => {
+  const projected = projectPiRpcEvent({
+    type: "message_start",
+    message: {
+      role: "assistant",
+      content: [{ type: "toolCall", name: "bash", arguments: { token: "PRIVATE_TOOL_ARGUMENT" } }],
+    },
+  });
+  assert.equal(projected.assistantContentObserved, false);
+  assert.equal(projected.toolCallObserved, true);
+  assert.equal(JSON.stringify(projected).includes("PRIVATE_TOOL_ARGUMENT"), false);
 });
 
 test("Pi RPC event adapter strips controlled compaction summary content", () => {
@@ -127,6 +142,8 @@ test("Pi RPC event adapter projects only the RPC subscriber and preserves diagno
   assert.equal(received[0]?.type, "message_end");
   assert.equal((received[0]?.message as Record<string, unknown>).role, "assistant");
   assert.equal((received[0]?.message as Record<string, unknown>).stopReason, "error");
+  assert.equal(received[0]?.assistantContentObserved, true);
+  assert.equal(received[0]?.toolCallObserved, false);
   assert.match(String((received[0]?.message as Record<string, unknown>).errorMessage), /^HTTP 429 rate limit/);
   assert.ok(Buffer.byteLength(String((received[0]?.message as Record<string, unknown>).errorMessage)) <= 16 * 1024);
   assert.equal(JSON.stringify(received[0]).includes("untrusted provider response"), false);

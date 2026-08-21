@@ -174,7 +174,26 @@ function respond(command) {
       isError: process.env.FAKE_PI_TOOL_BEFORE_FAILURE === "error",
     });
   }
+  if (process.env.FAKE_PI_TOOL_START_ONLY) {
+    for (const toolName of process.env.FAKE_PI_TOOL_START_ONLY.split(",")) {
+      emit({ type: "tool_execution_start", toolCallId: `tool-start-${toolName}`, toolName, args: {} });
+    }
+  }
+  if (process.env.FAKE_PI_TOOL_EVENT_ONLY === "end") {
+    emit({ type: "tool_execution_end", toolCallId: "tool-end-only", toolName: "read", result: {}, isError: false });
+  }
+  if (process.env.FAKE_PI_TOOL_EVENT_ONLY === "bash-update") {
+    emit({ type: "bash_execution_update", toolCallId: "bash-update-only", partialResult: "bounded progress" });
+  }
+  if (process.env.FAKE_PI_WORKTREE_CHANGE === "1") {
+    writeFileSync(join(process.cwd(), "provider-failure-side-effect.txt"), "changed\n");
+  }
   if (process.env.FAKE_PI_CONTINUATION_LOST === "1") {
+    if (process.env.FAKE_PI_ASSISTANT_BEFORE_CONTINUATION_LOST === "1") {
+      const message = { role: "assistant", content: [{ type: "text", text: "partial" }], stopReason: "stop" };
+      emit({ type: "message_start", message });
+      emit({ type: "message_end", message });
+    }
     process.stdout.write("", () => process.exit(0));
     return;
   }

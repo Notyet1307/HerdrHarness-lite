@@ -131,7 +131,7 @@ node dist/src/fleet-cli.js status --config /PRIVATE/PATH/fleet.config.json --ope
 - `runtime-preflight.ts`、`attempt-integrity.ts`：runtime 与 Git gate；
 - `reviewer-validation.ts`、`reviewer-checkpoints.ts`：固定验证与 fresh aggregation checkpoint；
 - `delivery.ts`：PR、CI、base refresh、merge；
-- `recovery-flow.ts`：Analyst 证据、授权和 fresh retry；
+- `recovery-flow.ts`、`automatic-recovery.ts`：Analyst 证据，以及 policy fresh retry 的授权和副作用复核；
 - `config-validation.ts`：路径与角色契约。
 
 公开的 `HarnessController` 构造器和 `tick()` 合同保持不变。

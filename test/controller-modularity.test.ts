@@ -11,6 +11,7 @@ const modules = [
   "src/controller/runtime-preflight.ts",
   "src/controller/attempt-integrity.ts",
   "src/controller/attempt-reconciliation.ts",
+  "src/controller/automatic-recovery.ts",
   "src/controller/delivery.ts",
   "src/controller/recovery-flow.ts",
   "src/controller/config-validation.ts",

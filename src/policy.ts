@@ -13,6 +13,7 @@ import type {
   RecoveryAction,
 } from "./model.js";
 import type { SafeRuntimeDiagnostic } from "./pi-rpc-diagnostics.js";
+import { isPreSideEffectTransientProviderCode, runtimeSideEffectBoundaryFrom } from "./pi-rpc-diagnostics.js";
 import { digest, isRetryAction, MAX_CI_REWORKS } from "./model.js";
 import type { Clock, IdGenerator } from "./ports.js";
 
@@ -36,9 +37,19 @@ export function allowedActionsFor(blockClass: BlockClass, lane: Incident["lane"]
   }
 }
 
-export function automaticRecoveryCandidateForAttempt(job: Job, attempt: Attempt): AutomaticRecoveryCandidate | undefined {
+export const PROVIDER_PRE_SIDE_EFFECT_BACKOFF_MS = 5_000;
+
+export function automaticRecoveryCandidateForAttempt(
+  job: Job,
+  attempt: Attempt,
+  runtimeDiagnostic: SafeRuntimeDiagnostic | null = null,
+  observedAt?: string,
+): AutomaticRecoveryCandidate | undefined {
   if (attempt.result !== null) return undefined;
-  if (attempt.lane === "worker" && attempt.phase !== "running" && attempt.phase !== "settled") {
+  const providerCandidate = providerAutomaticRecoveryCandidate(job, attempt, runtimeDiagnostic, observedAt);
+  if (providerCandidate) return providerCandidate;
+  if (attempt.phase === "running" || attempt.phase === "settled") return undefined;
+  if (attempt.lane === "worker") {
     const rule = "worker_pre_dispatch_infrastructure" as const;
     return {
       rule,
@@ -58,7 +69,7 @@ export function automaticRecoveryCandidateForAttempt(job: Job, attempt: Attempt)
   return { rule, fingerprint: digest({ rule, baseSha: attempt.baseSha, headSha: job.headSha }) };
 }
 
-export function automaticRecoveryFor(job: Job, advice: AnalystAdvice): (AutomaticRecoveryCandidate & {
+export function automaticRecoveryFor(job: Job, advice: AnalystAdvice, now?: string): (AutomaticRecoveryCandidate & {
   action: Exclude<RecoveryAction, "hold">;
   attemptId: string;
 }) | null {
@@ -69,7 +80,9 @@ export function automaticRecoveryFor(job: Job, advice: AnalystAdvice): (Automati
     ? "retry_fresh_reviewer"
     : candidate?.rule === "worker_pre_dispatch_infrastructure"
       ? "retry_fresh_worker"
-      : null;
+      : candidate?.rule === "provider_pre_side_effect_transient"
+        ? candidate.lane === "worker" ? "retry_fresh_worker" : "retry_fresh_reviewer"
+        : null;
   if (
     job.state !== "blocked"
     || job.approval !== null
@@ -84,6 +97,19 @@ export function automaticRecoveryFor(job: Job, advice: AnalystAdvice): (Automati
     || advice.action !== action
     || !advice.resolutionBrief.trim()
     || (candidate.rule === "worker_pre_dispatch_infrastructure" && advice.unknowns.length !== 0)
+    || (candidate.rule === "provider_pre_side_effect_transient" && (
+      advice.unknowns.length !== 0
+      || !now
+      || !Number.isFinite(Date.parse(now))
+      || Date.parse(now) < Date.parse(candidate.notBefore)
+      || attempt.lane !== candidate.lane
+      || (attempt.expectedHeadSha ?? attempt.baseSha) !== candidate.headSha
+      || attempt.executionSnapshot?.provider !== candidate.provider
+      || incident.runtimeDiagnostic?.failureCode !== candidate.failureCode
+      || !isPreSideEffectTransientProviderCode(candidate.failureCode)
+      || !preSideEffectProviderFailure(incident.runtimeDiagnostic)
+      || (job.automaticRecoveries ?? []).some((entry) => entry.scopeFingerprint === candidate.scopeFingerprint)
+    ))
     || !incident.allowedActions.includes(action)
     || !allowedActionsFor(incident.class, incident.lane).includes(action)
     || (candidate.rule === "reviewer_same_head_infrastructure" && (
@@ -93,6 +119,14 @@ export function automaticRecoveryFor(job: Job, advice: AnalystAdvice): (Automati
     || (job.automaticRecoveries ?? []).some((entry) => entry.fingerprint === candidate.fingerprint)
   ) return null;
   return { ...candidate, action, attemptId: attempt.id };
+}
+
+export function automaticRecoveryBackoffPending(job: Job, advice: AnalystAdvice, now: string): boolean {
+  const candidate = job.incident?.automaticRecovery;
+  return candidate?.rule === "provider_pre_side_effect_transient"
+    && Number.isFinite(Date.parse(now))
+    && Date.parse(now) < Date.parse(candidate.notBefore)
+    && automaticRecoveryFor(job, advice, candidate.notBefore) !== null;
 }
 
 export function isAutomaticRecoveryApproval(job: Job, approval: Approval): boolean {
@@ -109,7 +143,56 @@ export function isAutomaticRecoveryApproval(job: Job, approval: Approval): boole
       && entry.action === approval.action
       && entry.policyRule === approval.policyRule
       && entry.fingerprint === approval.fingerprint
+      && (candidate.rule !== "provider_pre_side_effect_transient" || (
+        entry.scopeFingerprint === candidate.scopeFingerprint
+        && entry.lane === candidate.lane
+        && entry.headSha === candidate.headSha
+        && entry.provider === candidate.provider
+        && entry.failureCode === candidate.failureCode
+        && entry.notBefore === candidate.notBefore
+      ))
     ));
+}
+
+function providerAutomaticRecoveryCandidate(
+  job: Job,
+  attempt: Attempt,
+  diagnostic: SafeRuntimeDiagnostic | null,
+  observedAt?: string,
+): AutomaticRecoveryCandidate | undefined {
+  const provider = attempt.executionSnapshot?.provider;
+  const headSha = attempt.expectedHeadSha ?? attempt.baseSha;
+  if (
+    attempt.executionSnapshot?.adapter !== "pi-rpc"
+    || !provider
+    || !observedAt
+    || !Number.isFinite(Date.parse(observedAt))
+    || !/^[0-9a-f]{40}$/i.test(headSha)
+    || !diagnostic
+    || !isPreSideEffectTransientProviderCode(diagnostic.failureCode)
+    || !preSideEffectProviderFailure(diagnostic)
+  ) return undefined;
+  const rule = "provider_pre_side_effect_transient" as const;
+  return {
+    rule,
+    provider,
+    failureCode: diagnostic.failureCode,
+    lane: attempt.lane,
+    headSha,
+    fingerprint: digest({ rule, provider, failureCode: diagnostic.failureCode, attemptId: attempt.id, headSha }),
+    scopeFingerprint: digest({ rule, jobId: job.id, lane: attempt.lane, headSha }),
+    notBefore: new Date(Date.parse(observedAt) + PROVIDER_PRE_SIDE_EFFECT_BACKOFF_MS).toISOString(),
+  };
+}
+
+function preSideEffectProviderFailure(diagnostic: SafeRuntimeDiagnostic | undefined): boolean {
+  if (!diagnostic) return false;
+  const boundary = runtimeSideEffectBoundaryFrom(diagnostic);
+  return boundary !== null
+    && !boundary.toolExecutionStarted
+    && !boundary.durableResultPresent
+    && !boundary.worktreeChanged
+    && !boundary.commitCreated;
 }
 
 export type OperatorAction = {

@@ -1,6 +1,7 @@
-import { randomUUID } from "node:crypto";
-import { chmodSync, closeSync, existsSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { createHash, randomUUID } from "node:crypto";
+import { spawnSync } from "node:child_process";
+import { chmodSync, closeSync, existsSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { dirname, join, relative, resolve, sep } from "node:path";
 import { digest, type AgentHandle, type ExecutionSnapshot } from "./model.js";
 
 export type PiRpcPlan = {
@@ -20,6 +21,51 @@ export type PiRpcPlan = {
   };
   snapshot: ExecutionSnapshot & { adapter: "pi-rpc" };
 };
+
+export type RuntimeSideEffectBaseline =
+  | { kind: "git"; headSha: string; statusDigest: string }
+  | { kind: "tree"; treeDigest: string };
+
+export function captureRuntimeSideEffectBaseline(
+  cwd: string,
+  excludedPaths: string[],
+): RuntimeSideEffectBaseline {
+  const root = resolve(cwd);
+  if (existsSync(join(root, ".git"))) {
+    const head = git(root, ["rev-parse", "HEAD"]).trim();
+    if (!/^[0-9a-f]{40}$/i.test(head)) throw new Error("runtime worktree has an invalid Git HEAD");
+    return {
+      kind: "git",
+      headSha: head,
+      statusDigest: digest(filteredGitStatus(root, excludedPaths)),
+    };
+  }
+  return { kind: "tree", treeDigest: treeDigest(root, excludedPaths) };
+}
+
+export function observeRuntimeSideEffects(
+  cwd: string,
+  excludedPaths: string[],
+  baseline: RuntimeSideEffectBaseline,
+): { worktreeChanged: boolean; commitCreated: boolean } {
+  try {
+    const current = captureRuntimeSideEffectBaseline(cwd, excludedPaths);
+    if (baseline.kind !== current.kind) return { worktreeChanged: true, commitCreated: true };
+    return baseline.kind === "git" && current.kind === "git"
+      ? {
+          worktreeChanged: baseline.statusDigest !== current.statusDigest,
+          commitCreated: baseline.headSha !== current.headSha,
+        }
+      : {
+          worktreeChanged: baseline.kind === "tree" && current.kind === "tree"
+            ? baseline.treeDigest !== current.treeDigest
+            : true,
+          commitCreated: false,
+        };
+  } catch {
+    return { worktreeChanged: true, commitCreated: true };
+  }
+}
 
 export function rpcRuntimeRoot(snapshot: ExecutionSnapshot): string {
   if (!snapshot.context) throw new Error("Pi RPC requires an explicit context bundle");
@@ -105,4 +151,48 @@ function pathExists(path: string): boolean {
   } catch {
     return false;
   }
+}
+
+function git(cwd: string, args: string[]): string {
+  const result = spawnSync("git", ["-C", cwd, ...args], { encoding: "utf8", timeout: 15_000, maxBuffer: 16 * 1024 * 1024 });
+  if (result.error || result.status !== 0) throw new Error(`git ${args[0] ?? "command"} failed`);
+  return result.stdout;
+}
+
+function filteredGitStatus(cwd: string, excludedPaths: string[]): string {
+  const excluded = new Set(excludedPaths.flatMap((path) => {
+    const value = relative(cwd, resolve(path)).replace(/\\/g, "/");
+    return value.startsWith("../") || value === ".." ? [] : [value];
+  }));
+  return git(cwd, ["status", "--porcelain=v1", "--untracked-files=all"])
+    .split(/\r?\n/)
+    .filter((line) => line && (!line.startsWith("?? ") || !excluded.has(line.slice(3))))
+    .join("\n");
+}
+
+function treeDigest(root: string, excludedPaths: string[]): string {
+  const excluded = excludedPaths.map((path) => resolve(path));
+  const hash = createHash("sha256");
+  const visit = (path: string): void => {
+    const resolved = resolve(path);
+    if (excluded.some((entry) => resolved === entry || resolved.startsWith(`${entry}${sep}`))) return;
+    const stat = lstatSync(resolved);
+    const name = relative(root, resolved).replace(/\\/g, "/") || ".";
+    hash.update(`${name}\0${stat.mode & 0o777}\0`);
+    if (stat.isDirectory()) {
+      hash.update("directory\0");
+      for (const entry of readdirSync(resolved).sort()) visit(join(resolved, entry));
+      return;
+    }
+    if (stat.isSymbolicLink()) {
+      hash.update(`symlink\0${realpathSync(resolved)}\0`);
+      return;
+    }
+    if (!stat.isFile()) throw new Error(`runtime worktree contains an unsupported entry: ${name}`);
+    hash.update("file\0");
+    hash.update(readFileSync(resolved));
+    hash.update("\0");
+  };
+  visit(root);
+  return hash.digest("hex");
 }

@@ -40,6 +40,16 @@ test("Reviewer Git verification rejects untracked files outside Harness results"
   if (!rejected.ok) assert.match(rejected.reason, /notes\.txt/);
 });
 
+test("automatic recovery Git inspection separates result files from worktree and commit side effects", async () => {
+  const clean = await new GitCli(new WorkerRunner(head, null, "?? .harness/attempt-worker.json\n"))
+    .inspectAttemptSideEffects({ worktree, expectedHeadSha: head, allowedResultPaths });
+  assert.deepEqual(clean, { worktreeChanged: false, commitCreated: false });
+
+  const changed = await new GitCli(new WorkerRunner("c".repeat(40), null, "?? notes.txt\n"))
+    .inspectAttemptSideEffects({ worktree, expectedHeadSha: head, allowedResultPaths });
+  assert.deepEqual(changed, { worktreeChanged: true, commitCreated: true });
+});
+
 test("trusted context is exported from the exact base SHA with Pi-compatible precedence", async () => {
   const root = mkdtempSync(join(tmpdir(), "herdr-context-"));
   const repo = join(root, "repo");

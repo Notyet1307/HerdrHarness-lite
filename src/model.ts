@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { isAbsolute } from "node:path";
-import { isSafePiRpcDiagnostic, type SafeRuntimeDiagnostic } from "./pi-rpc-diagnostics.js";
+import { isPreSideEffectTransientProviderCode, isSafePiRpcDiagnostic, type SafeRuntimeDiagnostic } from "./pi-rpc-diagnostics.js";
 
 export type IssueState = "OPEN" | "CLOSED";
 
@@ -488,12 +488,26 @@ export type BlockClass =
   | "analyst_unavailable";
 
 export type RecoveryAction = "retry_fresh_worker" | "retry_fresh_reviewer" | "hold";
-export type AutomaticRecoveryRule = "worker_pre_dispatch_infrastructure" | "reviewer_same_head_infrastructure";
+export type AutomaticRecoveryRule =
+  | "worker_pre_dispatch_infrastructure"
+  | "reviewer_same_head_infrastructure"
+  | "provider_pre_side_effect_transient";
 
-export type AutomaticRecoveryCandidate = {
-  rule: AutomaticRecoveryRule;
-  fingerprint: string;
-};
+export type AutomaticRecoveryCandidate =
+  | {
+      rule: "worker_pre_dispatch_infrastructure" | "reviewer_same_head_infrastructure";
+      fingerprint: string;
+    }
+  | {
+      rule: "provider_pre_side_effect_transient";
+      fingerprint: string;
+      scopeFingerprint: string;
+      lane: Lane;
+      headSha: string;
+      provider: string;
+      failureCode: SafeRuntimeDiagnostic["failureCode"];
+      notBefore: string;
+    };
 
 export function isRecoveryAction(value: unknown): value is RecoveryAction {
   return value === "retry_fresh_worker" || value === "retry_fresh_reviewer" || value === "hold";
@@ -577,6 +591,12 @@ export type AutomaticRecovery = Approval & {
   policyRule: AutomaticRecoveryRule;
   fingerprint: string;
   attemptId: string;
+  scopeFingerprint?: string;
+  lane?: Lane;
+  headSha?: string;
+  provider?: string;
+  failureCode?: SafeRuntimeDiagnostic["failureCode"];
+  notBefore?: string;
 };
 
 export type Reassessment = {
@@ -801,9 +821,34 @@ export function assertJobInvariant(job: Job): void {
   ) {
     throw new Error("incident has an invalid recovery action");
   }
-  if (job.incident?.automaticRecovery && (
-    !["worker_pre_dispatch_infrastructure", "reviewer_same_head_infrastructure"].includes(job.incident.automaticRecovery.rule)
-    || !/^[0-9a-f]{64}$/i.test(job.incident.automaticRecovery.fingerprint)
+  const recoveryCandidate = job.incident?.automaticRecovery;
+  if (recoveryCandidate && (
+    !/^[0-9a-f]{64}$/i.test(recoveryCandidate.fingerprint)
+    || (recoveryCandidate.rule !== "worker_pre_dispatch_infrastructure"
+      && recoveryCandidate.rule !== "reviewer_same_head_infrastructure"
+      && recoveryCandidate.rule !== "provider_pre_side_effect_transient")
+    || (recoveryCandidate.rule === "provider_pre_side_effect_transient" && (
+      job.incident?.attemptId === null
+      || recoveryCandidate.lane !== job.incident?.lane
+      || !/^[0-9a-f]{40}$/i.test(recoveryCandidate.headSha)
+      || !isBoundedText(recoveryCandidate.provider, 512)
+      || !isPreSideEffectTransientProviderCode(recoveryCandidate.failureCode)
+      || !/^[0-9a-f]{64}$/i.test(recoveryCandidate.scopeFingerprint)
+      || !Number.isFinite(Date.parse(recoveryCandidate.notBefore))
+      || recoveryCandidate.fingerprint !== digest({
+        rule: recoveryCandidate.rule,
+        provider: recoveryCandidate.provider,
+        failureCode: recoveryCandidate.failureCode,
+        attemptId: job.incident?.attemptId,
+        headSha: recoveryCandidate.headSha,
+      })
+      || recoveryCandidate.scopeFingerprint !== digest({
+        rule: recoveryCandidate.rule,
+        jobId: job.id,
+        lane: recoveryCandidate.lane,
+        headSha: recoveryCandidate.headSha,
+      })
+    ))
   )) throw new Error("incident has an invalid automatic recovery candidate");
   if (job.incident?.runtimeDiagnostic !== undefined && !isSafePiRpcDiagnostic(job.incident.runtimeDiagnostic)) {
     throw new Error("incident has an invalid runtime diagnostic");
@@ -834,15 +879,43 @@ export function assertJobInvariant(job: Job): void {
     throw new Error("human decision approval is not auditable");
   }
   const automaticRecoveries = job.automaticRecoveries ?? [];
+  const providerRecoveryScopes = automaticRecoveries
+    .filter((entry) => entry.policyRule === "provider_pre_side_effect_transient")
+    .map((entry) => entry.scopeFingerprint);
   if (
     automaticRecoveries.length > 32
     || new Set(automaticRecoveries.map((entry) => entry.id)).size !== automaticRecoveries.length
     || new Set(automaticRecoveries.map((entry) => entry.fingerprint)).size !== automaticRecoveries.length
+    || new Set(providerRecoveryScopes).size !== providerRecoveryScopes.length
     || automaticRecoveries.some((entry) => (
       entry.basis !== "policy_rule"
       || !isRetryAction(entry.action)
-      || !["worker_pre_dispatch_infrastructure", "reviewer_same_head_infrastructure"].includes(entry.policyRule)
-      || (entry.policyRule === "worker_pre_dispatch_infrastructure") !== (entry.action === "retry_fresh_worker")
+      || !["worker_pre_dispatch_infrastructure", "reviewer_same_head_infrastructure", "provider_pre_side_effect_transient"].includes(entry.policyRule)
+      || (entry.policyRule === "worker_pre_dispatch_infrastructure" && entry.action !== "retry_fresh_worker")
+      || (entry.policyRule === "reviewer_same_head_infrastructure" && entry.action !== "retry_fresh_reviewer")
+      || (entry.policyRule === "provider_pre_side_effect_transient" && (
+        (entry.lane !== "worker" && entry.lane !== "reviewer")
+        || entry.action !== (entry.lane === "worker" ? "retry_fresh_worker" : "retry_fresh_reviewer")
+        || !/^[0-9a-f]{64}$/i.test(entry.scopeFingerprint ?? "")
+        || !/^[0-9a-f]{40}$/i.test(entry.headSha ?? "")
+        || !isBoundedText(entry.provider, 512)
+        || !isPreSideEffectTransientProviderCode(entry.failureCode)
+        || !Number.isFinite(Date.parse(entry.notBefore ?? ""))
+        || Date.parse(entry.createdAt) < Date.parse(entry.notBefore ?? "")
+        || entry.fingerprint !== digest({
+          rule: entry.policyRule,
+          provider: entry.provider,
+          failureCode: entry.failureCode,
+          attemptId: entry.attemptId,
+          headSha: entry.headSha,
+        })
+        || entry.scopeFingerprint !== digest({
+          rule: entry.policyRule,
+          jobId: job.id,
+          lane: entry.lane,
+          headSha: entry.headSha,
+        })
+      ))
       || !/^[0-9a-f]{64}$/i.test(entry.fingerprint)
       || !isBoundedText(entry.id, 512)
       || !isBoundedText(entry.incidentId, 512)

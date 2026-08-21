@@ -9,10 +9,13 @@ import { executionResource, executionResourceDigest } from "./attempt-plan.js";
 import {
   readJson,
   readJsonIfExists,
+  captureRuntimeSideEffectBaseline,
+  observeRuntimeSideEffects,
   preparePiRpcAgentDir,
   sameJson,
   spoolPath,
   type PiRpcPlan,
+  type RuntimeSideEffectBaseline,
   writeAtomicJson,
   writeExclusiveJson,
 } from "./pi-rpc-spool.js";
@@ -30,6 +33,7 @@ import {
   makeSafeRuntimeDiagnostic,
   piRpcRunnerError,
   providerApi,
+  withRuntimeSideEffectBoundary,
   type PiRpcProviderApi,
   type SafeRuntimeDiagnostic,
 } from "./pi-rpc-diagnostics.js";
@@ -261,6 +265,9 @@ async function main(argv: string[]): Promise<void> {
   let assistantMessageCount = 0;
   let toolExecutionCount = 0;
   let toolErrorCount = 0;
+  let assistantContentObserved = false;
+  let toolCallObserved = false;
+  let toolExecutionStarted = false;
   let transcriptBytes = 0;
   let controlledCompactionPhase: "idle" | "started" | "completed" = "idle";
   let controlledCompactionReceipt: JsonObject | null = null;
@@ -272,6 +279,8 @@ async function main(argv: string[]): Promise<void> {
   let deadlineFailure: DeadlineFailure | null = null;
   let noProgressDeadlineActive = false;
   let credentialLease: CredentialStartupLease | null = null;
+  const excludedSideEffectPaths = [plan.runtimeRoot, plan.resultPath, plan.snapshot.context!.agentDir];
+  let sideEffectBaseline: RuntimeSideEffectBaseline | null = null;
 
   const persistProgress = (force = false): void => {
     const now = Date.now();
@@ -298,6 +307,19 @@ async function main(argv: string[]): Promise<void> {
     if (resultPresent || !existsSync(plan.resultPath)) return;
     resultPresent = true;
     markProgress("durable_result");
+  };
+  const sideEffectBoundary = () => {
+    observeDurableResult();
+    const git = sideEffectBaseline
+      ? observeRuntimeSideEffects(plan.cwd, excludedSideEffectPaths, sideEffectBaseline)
+      : { worktreeChanged: true, commitCreated: true };
+    return {
+      assistantContentObserved,
+      toolCallObserved,
+      toolExecutionStarted,
+      durableResultPresent: resultPresent,
+      ...git,
+    };
   };
   const expiredDeadline = (): DeadlineFailure | null => {
     const now = Date.now();
@@ -327,13 +349,23 @@ async function main(argv: string[]): Promise<void> {
     lastEventType = type;
     const eventMessage = object(event.message);
     if (type === "message_start") assistantMessageActive = eventMessage.role === "assistant";
+    if (assistantMessageActive || eventMessage.role === "assistant") {
+      assistantContentObserved ||= event.assistantContentObserved === true || assistantContent(eventMessage) || type === "message_update";
+      toolCallObserved ||= event.toolCallObserved === true || assistantToolCall(eventMessage);
+    }
+    if (["tool_execution_start", "tool_execution_update", "tool_execution_end", "bash_execution_update"].includes(type)) {
+      toolCallObserved = true;
+      toolExecutionStarted = true;
+    }
     if (assistantMessageActive && type === "message_start") markProgress("assistant_message_start");
     if (assistantMessageActive && type === "message_update") markProgress("assistant_message_update");
     if ((assistantMessageActive || eventMessage.role === "assistant") && type === "message_end") {
       markProgress("assistant_message_end");
       assistantMessageActive = false;
     }
-    if (type === "tool_execution_start") markProgress("tool_execution_start");
+    if (type === "tool_execution_start") {
+      markProgress("tool_execution_start");
+    }
     if (type === "tool_execution_update" || type === "bash_execution_update") markProgress("tool_execution_update");
     if (type === "tool_execution_end") markProgress("tool_execution_end");
     if (type === "compaction_start") markProgress("compaction_start");
@@ -411,6 +443,7 @@ async function main(argv: string[]): Promise<void> {
   };
 
   try {
+    sideEffectBaseline = captureRuntimeSideEffectBaseline(plan.cwd, excludedSideEffectPaths);
     const isolatedAgentDir = preparePiRpcAgentDir(plan.snapshot);
     const pinnedTaskDataPath = preparePinnedTaskData(plan);
     if (plan.snapshot.credentialMode === "canonical-oauth") {
@@ -530,7 +563,7 @@ async function main(argv: string[]): Promise<void> {
         ...identity,
         ok: false,
         error: "terminated before dispatch",
-        ...diagnostic,
+        ...withRuntimeSideEffectBoundary(diagnostic, sideEffectBoundary()),
       });
       writeAtomicJson(spoolPath(plan.runtimeRoot, "terminated.json"), { ...identity, ok: true, reason: "pre-dispatch termination" });
       return;
@@ -630,14 +663,15 @@ async function main(argv: string[]): Promise<void> {
     if (ok && (childExit.code !== 0 || childExit.signal !== null)) {
       throw piRpcRunnerError("child_process", "child_exit_after_settled", false);
     }
-    observeDurableResult();
+    const boundary = sideEffectBoundary();
     markProgress("terminal_receipt");
     persistProgress(true);
     writeAtomicJson(spoolPath(plan.runtimeRoot, "terminal.json"), {
       ...identity,
       ok,
       ...(!ok ? { error: terminalError ?? "runtime terminated by Controller" } : {}),
-      ...(terminalDiagnostic ? withChildExit(terminalDiagnostic, childExit) : {}),
+      ...boundary,
+      ...(terminalDiagnostic ? withRuntimeSideEffectBoundary(terminalDiagnostic, boundary, childExit) : {}),
       agentSettled: settled,
       ...(controlledCompactionReceipt ? { controlledCompaction: controlledCompactionReceipt } : {}),
     });
@@ -673,8 +707,8 @@ async function main(argv: string[]): Promise<void> {
       cleanupFailure ??= classifyPiRpcRunnerFailure(leaseError, "credential-postflight");
     }
     const diagnostic = primaryFailure.failureCode === "child_exit_before_settled"
-      && toolExecutionCount > 0
-      && lastEventType === "tool_execution_end"
+      && ((toolExecutionCount > 0 && lastEventType === "tool_execution_end")
+        || (!toolExecutionStarted && assistantContentObserved))
       ? classifyProviderContinuationLost({
           providerApi: effectiveProviderApi,
           phase: failurePhase(toolExecutionCount, toolErrorCount),
@@ -695,14 +729,14 @@ async function main(argv: string[]): Promise<void> {
           childExit,
         })
       : null;
-    observeDurableResult();
+    const boundary = sideEffectBoundary();
     markProgress("terminal_receipt");
     persistProgress(true);
     writeAtomicJson(spoolPath(plan.runtimeRoot, "terminal.json"), {
       ...identity,
       ok: false,
       error: "Pi RPC runner failed",
-      ...diagnostic,
+      ...withRuntimeSideEffectBoundary(diagnostic, boundary),
       agentSettled: settled,
       agentEndObserved,
       lastEventType,
@@ -728,23 +762,24 @@ function observedPayloadBytes(event: JsonObject): number {
     : Buffer.byteLength(JSON.stringify(event), "utf8");
 }
 
-function withChildExit(diagnostic: SafeRuntimeDiagnostic, childExit: ChildExit): SafeRuntimeDiagnostic {
-  if (!diagnostic.domain || !diagnostic.code || !diagnostic.stage) {
-    throw new Error("current runtime diagnostic has no stable classification");
-  }
-  const { diagnosticFingerprint: _fingerprint, ...fields } = diagnostic;
-  return makeSafeRuntimeDiagnostic({
-    ...fields,
-    domain: diagnostic.domain,
-    code: diagnostic.code,
-    stage: diagnostic.stage,
-    childExit,
-  });
-}
-
 function observedPayloadDigest(event: JsonObject): string {
   const projected = event.payloadDigest;
   return typeof projected === "string" && /^[0-9a-f]{64}$/u.test(projected) ? projected : digest(event);
+}
+
+function assistantContent(message: JsonObject): boolean {
+  const content = Array.isArray(message.content) ? message.content.map(object) : [];
+  return content.some((entry) => (
+    entry.type !== "toolCall"
+    && entry.type !== "tool_call"
+    && entry.type !== "tool_use"
+    && Object.entries(entry).some(([key, value]) => key !== "type" && typeof value === "string" && value.length > 0)
+  ));
+}
+
+function assistantToolCall(message: JsonObject): boolean {
+  const content = Array.isArray(message.content) ? message.content.map(object) : [];
+  return content.some((entry) => entry.type === "toolCall" || entry.type === "tool_call" || entry.type === "tool_use");
 }
 
 async function waitForDispatch(

@@ -72,6 +72,20 @@ export const PI_RPC_FAILURE_CODES = [
 export type PiRpcFailureDomain = typeof PI_RPC_FAILURE_DOMAINS[number];
 export type PiRpcFailureCode = typeof PI_RPC_FAILURE_CODES[number];
 
+export const PRE_SIDE_EFFECT_TRANSIENT_PROVIDER_CODES = [
+  "provider_rate_limited",
+  "provider_network",
+  "provider_timeout",
+  "provider_upstream_5xx",
+  "provider_continuation_lost",
+] as const satisfies readonly PiRpcFailureCode[];
+
+const PRE_SIDE_EFFECT_TRANSIENT_PROVIDER_CODE_SET = new Set<PiRpcFailureCode>(PRE_SIDE_EFFECT_TRANSIENT_PROVIDER_CODES);
+
+export function isPreSideEffectTransientProviderCode(value: unknown): value is typeof PRE_SIDE_EFFECT_TRANSIENT_PROVIDER_CODES[number] {
+  return typeof value === "string" && PRE_SIDE_EFFECT_TRANSIENT_PROVIDER_CODE_SET.has(value as PiRpcFailureCode);
+}
+
 export const FAILURE_DOMAINS = [
   "execution",
   "observation",
@@ -194,6 +208,21 @@ export type SafeRuntimeDiagnostic = PiRpcFailureDiagnostic & {
   transcriptSizeBucket?: PiRpcTranscriptSizeBucket;
   failureStage?: FailureStage;
   childExit?: SafeChildExit;
+  assistantContentObserved?: boolean;
+  toolCallObserved?: boolean;
+  toolExecutionStarted?: boolean;
+  durableResultPresent?: boolean;
+  worktreeChanged?: boolean;
+  commitCreated?: boolean;
+};
+
+export type RuntimeSideEffectBoundary = {
+  assistantContentObserved: boolean;
+  toolCallObserved: boolean;
+  toolExecutionStarted: boolean;
+  durableResultPresent: boolean;
+  worktreeChanged: boolean;
+  commitCreated: boolean;
 };
 
 export type ProviderFailureContext = {
@@ -223,6 +252,12 @@ const STRUCTURED_DIAGNOSTIC_FIELDS = [
   "transcriptSizeBucket",
   "failureStage",
   "childExit",
+  "assistantContentObserved",
+  "toolCallObserved",
+  "toolExecutionStarted",
+  "durableResultPresent",
+  "worktreeChanged",
+  "commitCreated",
 ] as const;
 const STRUCTURED_DIAGNOSTIC_MARKERS = ["failureDomain", "failureCode", "diagnosticFingerprint"] as const;
 const SAFE_DIAGNOSTIC_FIELD_SET = new Set<string>([...STRUCTURED_DIAGNOSTIC_FIELDS, "retryable"]);
@@ -321,6 +356,45 @@ export function makeSafeRuntimeDiagnostic(
   return result;
 }
 
+export function withRuntimeSideEffectBoundary(
+  diagnostic: SafeRuntimeDiagnostic,
+  boundary: RuntimeSideEffectBoundary,
+  childExit: SafeChildExit | undefined = diagnostic.childExit,
+): SafeRuntimeDiagnostic {
+  if (!diagnostic.domain || !diagnostic.code || !diagnostic.stage) {
+    throw new Error("current runtime diagnostic has no stable classification");
+  }
+  const { diagnosticFingerprint: _fingerprint, childExit: _childExit, ...fields } = diagnostic;
+  return makeSafeRuntimeDiagnostic({
+    ...fields,
+    domain: diagnostic.domain,
+    code: diagnostic.code,
+    stage: diagnostic.stage,
+    ...boundary,
+    ...(childExit === undefined ? {} : { childExit }),
+  });
+}
+
+export function runtimeSideEffectBoundaryFrom(value: SafeRuntimeDiagnostic): RuntimeSideEffectBoundary | null {
+  const fields = [
+    value.assistantContentObserved,
+    value.toolCallObserved,
+    value.toolExecutionStarted,
+    value.durableResultPresent,
+    value.worktreeChanged,
+    value.commitCreated,
+  ];
+  if (fields.some((field) => typeof field !== "boolean")) return null;
+  return {
+    assistantContentObserved: value.assistantContentObserved!,
+    toolCallObserved: value.toolCallObserved!,
+    toolExecutionStarted: value.toolExecutionStarted!,
+    durableResultPresent: value.durableResultPresent!,
+    worktreeChanged: value.worktreeChanged!,
+    commitCreated: value.commitCreated!,
+  };
+}
+
 /**
  * Converts untrusted Provider text into a bounded, content-free diagnostic.
  * The input must never be logged, persisted, or included in the fingerprint.
@@ -407,6 +481,18 @@ export function isSafePiRpcDiagnostic(value: unknown): value is SafeRuntimeDiagn
   if (diagnostic.transcriptSizeBucket !== undefined && !TRANSCRIPT_SIZE_BUCKETS.has(diagnostic.transcriptSizeBucket)) return false;
   if (diagnostic.failureStage !== undefined && !FAILURE_STAGE_SET.has(diagnostic.failureStage)) return false;
   if (diagnostic.childExit !== undefined && !validChildExit(diagnostic.childExit)) return false;
+  const boundaryFields = [
+    diagnostic.assistantContentObserved,
+    diagnostic.toolCallObserved,
+    diagnostic.toolExecutionStarted,
+    diagnostic.durableResultPresent,
+    diagnostic.worktreeChanged,
+    diagnostic.commitCreated,
+  ];
+  const boundaryCount = boundaryFields.filter((field) => field !== undefined).length;
+  if (boundaryCount !== 0 && (boundaryCount !== boundaryFields.length || boundaryFields.some((field) => typeof field !== "boolean"))) {
+    return false;
+  }
   const countsValid = [
     diagnostic.turnCount,
     diagnostic.assistantMessageCount,
@@ -512,7 +598,7 @@ function classifyProviderError(message: string, httpStatus: number | null): PiRp
   if ((httpStatus !== null && httpStatus >= 500) || /bad gateway|service unavailable|upstream failed/.test(message)) {
     return { failureDomain: "provider", failureCode: "provider_upstream_5xx", retryable: true };
   }
-  if (/econn|enotfound|socket hang up|fetch failed|network|connection reset|\beof\b/.test(message)) {
+  if (/econn|enotfound|socket hang up|fetch failed|network|connection reset|connection (?:was )?closed|websocket.*(?:closed|disconnect)|\beof\b/.test(message)) {
     return { failureDomain: "provider", failureCode: "provider_network", retryable: true };
   }
   if (httpStatus === 400 || httpStatus === 422 || /invalid[_ -]?request[_ -]?error|malformed request/.test(message)) {

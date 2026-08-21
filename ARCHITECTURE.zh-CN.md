@@ -242,7 +242,7 @@ Analyst 绑定当前 Job 和 task digest，只在 blocked flow 中读取有界 E
 
 Worker 与顶层 Reviewer 都可选择 `herdr-pi-cli` 或 `pi-rpc`。两者仍在 Herdr pane 中运行；Reviewer 内部的两个 review-axis child 属于固定 `pi-subagents` contract，不是第三种顶层 Attempt adapter。
 
-RPC 路径由 pane 内 foreground runner 持有 Pi stdin/stdout。Controller 通过 Attempt-private、原子落盘的 intent 与 receipt 观察它，不接管 pipe，也不在 dispatch 结果不确定时重放 prompt。RPC runner 明确关闭 Pi auto-retry 与 Pi-owned auto-compaction。Worker 使用 snapshot 固定的 75% threshold、最多一次、保留最近 20,000 token 的 Harness-controlled compaction；它只在工具轮次之间运行，overflow continuation 与 summarization retry 均关闭。Reviewer compaction 保持关闭。Receipt 只保存次数、阈值、触发时 context/window、前后 token 估计和 summary digest，不保存 summary 内容；exact version compatibility 由 `src/compatibility.ts` 统一定义并 fail closed。
+RPC 路径由 pane 内 foreground runner 持有 Pi stdin/stdout。Controller 通过 Attempt-private、原子落盘的 intent 与 receipt 观察它，不接管 pipe，也不在 dispatch 结果不确定时重放 prompt。RPC runner 明确关闭 Pi auto-retry 与 Pi-owned auto-compaction。Worker 使用 snapshot 固定的 75% threshold、最多一次、保留最近 20,000 token 的 Harness-controlled compaction；它只在工具轮次之间运行，overflow continuation 与 summarization retry 均关闭。Reviewer compaction 保持关闭。Terminal receipt 还记录 content-free 的 `assistantContentObserved`、`toolCallObserved`、`toolExecutionStarted`、`durableResultPresent`、`worktreeChanged` 与 `commitCreated`；Git/status 只保存 digest 或布尔结论，不保存原始 Provider、tool 或私密 transcript 内容。Compaction receipt 只保存次数、阈值、触发时 context/window、前后 token 估计和 summary digest，不保存 summary 内容；exact version compatibility 由 `src/compatibility.ts` 统一定义并 fail closed。
 
 canonical OAuth 仍只存在于原 canonical `auth.json`。Harness 以其 realpath 的 SHA-256 作为 `credentialDomainId`，在 credential store 内的私有 coordination directory 用 `provider + credentialDomainId` O_EXCL lease 协调跨项目 Provider probe、credential load、Herdr/Pi child startup 与 RPC ready handshake。Lease 只保存 domain digest、instanceId、PID、acquiredAt 和 heartbeat；只有 owner 可释放，只有 PID 已死且 heartbeat 超时才可回收，malformed lease fail closed。stale takeover 在原生 advisory lock 内原子 replace lease，回收进程崩溃时 OS 自动释放 lock，且 lease path 不出现可被另一 contender 抢占/误删的空窗。成功 probe 的短 TTL cache 还绑定 provider、model 与 auth 文件元数据 digest；每次 SDK startup 仍执行 credential validation/getAuth，refresh 或 child 启动失败会立即删除 cache。Reviewer axis launcher 在 qualified Pi `0.84.2` 的首个 assistant `message_start`（该版本在 `prepareRequest/getAuth` 打开 Provider stream 后才发出）释放 lease；旧 qualified runtime 保守持有到 child 结束。失败发生在释放后时，launcher 会重新取 lease 再失效 cache，因此不同项目的非 credential review 阶段仍可并行。Axis child JSONL 只保留生命周期/工具元数据和 bounded terminal review JSON；Provider error、`agent_end` messages、delta content 与未知 payload 不转发。
 
@@ -294,7 +294,7 @@ required check 失败时，Controller 记录 HEAD-bound CI evidence、取消 aut
 
 ### Blocked recovery
 
-runtime 外部结果短暂迟到时，同一 Attempt 只做一次 bounded reconciliation，且不重放 prompt。窄范围 pre-dispatch Worker 或 same-HEAD Reviewer runtime infrastructure incident 可由 policy 自动授权一次 fresh retry；`validation_infrastructure` 不在该自动规则内，其余情况依次需要 Incident、EvidencePack、Analyst advice 与精确 human gate。恢复会关闭旧 pane，并创建 fresh Worker 或 Reviewer；Reviewer 可带入一次性、plan-bound 的有效阶段 checkpoint，但不带入旧 session 或 transcript。
+runtime 外部结果短暂迟到时，同一 Attempt 只做一次 bounded reconciliation，且不重放 prompt。窄范围 pre-dispatch Worker/same-HEAD Reviewer infrastructure incident 保留原有一次性 policy；dispatch 后只有明确 transient Provider code 且 `toolExecutionStarted`、durable result、worktree change、commit 全为 false 时，`provider_pre_side_effect_transient` 才能在固定短退避后授权一次 fresh retry。该规则按 job/lane/HEAD 限一次，并把 provider、failure code、Attempt 与 HEAD 绑定到 fingerprint；恢复执行前还会重新检查 result path、Git HEAD 与 clean worktree。Analyst 只能提供建议，不能创建 candidate、Approval 或执行恢复；第二次同 scope 失败、`validation_infrastructure`、auth/tool/result/Git/policy/compaction 错误以及任何已开始工具的失败都保持 blocked。恢复会确认关闭旧 pane/runner，并创建 fresh Worker 或 Reviewer；Reviewer 可带入一次性、plan-bound 的有效阶段 checkpoint，但不带入旧 session 或 transcript。
 
 Analyst `hold` 不授权 retry。`reassess` 只创建新的可审计 Incident/Analysis cycle，也不直接授权执行。
 
@@ -310,7 +310,7 @@ Analyst `hold` 不授权 retry。`reassess` 只创建新的可审计 Incident/An
 | `controller/reviewer-checkpoints.ts` | fresh Reviewer checkpoint source、一次性 input 与运行前复核 |
 | `controller/runtime-preflight.ts` | Provider、Docker、Pi 与 execution snapshot gate |
 | `controller/delivery.ts` | PR、CI、base refresh 与 merge observation |
-| `controller/recovery-flow.ts` | EvidencePack、Analyst、late result、CI reconciliation 与 fresh retry |
+| `controller/recovery-flow.ts` / `controller/automatic-recovery.ts` | EvidencePack、Analyst、late result、CI reconciliation，以及 policy fresh retry 的授权与副作用复核 |
 | `controller/config-validation.ts` | 单项目路径、runtime 与 Pi role contract |
 | `fleet-cli.ts` / `fleet/*` | 多项目配置隔离、进程监督、退避、熔断、状态与聚合观察 |
 | `shutdown-signal.ts` | 单项目长运行循环的可中断 poll 与正常资源释放 |

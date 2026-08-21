@@ -60,6 +60,12 @@ type RuntimeReceipt = {
   toolErrorCount?: number;
   transcriptSizeBucket?: string;
   childExit?: { code: number | null; signal: string | null } | null;
+  assistantContentObserved?: boolean;
+  toolCallObserved?: boolean;
+  toolExecutionStarted?: boolean;
+  durableResultPresent?: boolean;
+  worktreeChanged?: boolean;
+  commitCreated?: boolean;
 };
 
 type OwnerReceipt = RuntimeReceipt & { runnerPid: number };
@@ -309,6 +315,7 @@ export class PiRpcRuntime implements AttemptRuntimePort {
         await this.closePane(input.handle);
         throw new Error(`Pi RPC termination failed: ${already.error ?? "unknown failure"}`);
       }
+      await this.closePane(input.handle);
       return;
     }
     if (!await this.cleanupRuntime(plan, input.handle, input.reason)) {
