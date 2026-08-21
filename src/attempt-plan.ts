@@ -13,6 +13,8 @@ export function buildExecutionSnapshot(input: {
   compactionMode?: ExecutionSnapshot["compactionMode"];
   compactionPolicy?: ExecutionSnapshot["compactionPolicy"];
   credentialMode?: ExecutionSnapshot["credentialMode"];
+  credentialDomainId?: string;
+  axisConcurrency?: 1 | 2;
   runtimeTimeouts?: ExecutionSnapshot["runtimeTimeouts"];
   runtimeDeadlineAt?: string;
   validationTimeoutMs?: number;
@@ -20,6 +22,15 @@ export function buildExecutionSnapshot(input: {
   context?: ExecutionContext;
   extraResources?: Array<{ kind: "agent" | "runtime" | "model-config"; path: string }>;
 }): ExecutionSnapshot {
+  if (input.credentialDomainId !== undefined && !/^[0-9a-f]{64}$/i.test(input.credentialDomainId)) {
+    throw new Error("credentialDomainId must be a SHA-256 path digest");
+  }
+  if (input.axisConcurrency !== undefined && input.axisConcurrency !== 1 && input.axisConcurrency !== 2) {
+    throw new Error("Reviewer axis concurrency must be 1 or 2");
+  }
+  if (input.credentialDomainId !== undefined && input.credentialMode !== "canonical-oauth") {
+    throw new Error("credentialDomainId requires canonical-oauth");
+  }
   const compactionMode = input.compactionMode ?? "runtime-default";
   if (compactionMode === "controlled-threshold"
     ? !isWorkerControlledCompactionPolicy(input.compactionPolicy)
@@ -41,6 +52,8 @@ export function buildExecutionSnapshot(input: {
     compactionMode,
     ...(input.compactionPolicy ? { compactionPolicy: { ...input.compactionPolicy } } : {}),
     credentialMode: input.credentialMode ?? (input.adapter === "pi-rpc" ? "canonical-oauth" : "runtime-default"),
+    ...(input.credentialDomainId ? { credentialDomainId: input.credentialDomainId } : {}),
+    ...(input.axisConcurrency ? { axisConcurrency: input.axisConcurrency } : {}),
     ...(input.runtimeTimeouts ? { runtimeTimeouts: { ...input.runtimeTimeouts } } : {}),
     ...(input.runtimeDeadlineAt !== undefined ? { runtimeDeadlineAt: input.runtimeDeadlineAt } : {}),
     ...(input.validationTimeoutMs !== undefined ? { validationTimeoutMs: input.validationTimeoutMs } : {}),

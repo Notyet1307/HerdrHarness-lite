@@ -49,7 +49,9 @@ codex --version
 
 Worker 启用 Ponytail 时，extension 顺序必须严格为 bundled `worker-tools.js` 后接 `@dietrichgebert/ponytail` `4.9.0` 的 manifest entry。Harness 会强制 `PONYTAIL_DEFAULT_MODE=full`、`PONYTAIL_HIDE_STATUS=1`、`PONYTAIL_QUIET_STARTUP=1`；不要为 Ponytail 放宽 Worker UI allowlist。
 
-`stateDir` 不得与 source 或 `worktreeRoot` 重叠。包含 token、OAuth 或 custom model credentials 的 canonical Pi 文件保持原位和私有 mode；不要复制到配置、Attempt 目录、日志或 ledger。
+`stateDir` 不得与 source 或 `worktreeRoot` 重叠。包含 token、OAuth 或 custom model credentials 的 canonical Pi 文件保持原位和私有 mode；不要复制到配置、Attempt 目录、日志或 ledger。Harness 只记录 canonical `auth.json` realpath 的 SHA-256 domain ID，并在 credential store 内的私有 coordination directory 写无 credential 内容的 startup lease/probe cache。
+
+`reviewer.axisConcurrency` 只接受 1 或 2。custom Provider 默认 2 并可显式改为 1；`credentialMode=canonical-oauth + provider=openai-codex` 无条件收紧为 1，Standards 完成并释放 axis startup lease 后才启动 Spec。
 
 配置要求 Docker 时，preflight 只接受本地 Unix socket，并验证 daemon 与 Compose。不要把远端 Docker credential boundary 隐式带入 Attempt。
 
@@ -58,6 +60,8 @@ Worker 启用 Ponytail 时，extension 顺序必须严格为 bundled `worker-too
 Pi RPC 的 no-progress 只由 assistant message、tool execution、controlled compaction、明确 Provider retry、durable result 和 terminal/settled 事件刷新。`herdr-pi-cli` lane 改用 bounded `agent wait`，只对去除 queue/heartbeat/poll 行后的 terminal text digest 变化刷新进展；原文不落盘。Reviewer validation 使用 Controller-owned validation heartbeat，no-progress 取 Reviewer no-progress 与 validation total 的较小值，total 始终是硬上限。重复读取状态和 Controller/Fleet heartbeat 都不刷新业务进展。`runtime-progress.json`/`validation-progress.json` 只保存时间、类型、计数、PID、result-present 与 digest，不保存 Provider 原文、token 或 transcript。
 
 `runtime_stall` 表示已 dispatch 后超过 no-progress，`attempt_deadline` 表示无论期间是否持续进展都到达 total。两者都会写 terminate intent，经过 bounded SIGTERM/SIGKILL 收尾并要求 fresh Attempt；不得向旧 Attempt 重发 prompt。若 `terminated.json` 未确认，先核对 owned pane、runner/child PID 与 heartbeat，再按当前 operator option 处理，不能手工伪造 receipt。
+
+OAuth startup 的稳定诊断为 `credential_lock_timeout`、`credential_lock_stale`、`oauth_refresh_timeout`、`oauth_missing`、`oauth_probe_failed`。前两项先检查同 credential domain 的 owner PID/heartbeat；malformed lease 不得手工删除。只有确认 PID 已死且 heartbeat 已超时后，下一次 acquisition 才会自动回收。诊断与 receipt 不包含 auth path、token、Provider 原始响应或 transcript。
 
 ## 4. 启动前检查
 

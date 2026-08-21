@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { appendFileSync, existsSync, readFileSync, realpathSync } from "node:fs";
 import { spawn } from "node:child_process";
-import { basename, dirname, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { Buffer } from "node:buffer";
 import { digest, type RuntimeTimeouts } from "./model.js";
@@ -34,6 +34,13 @@ import {
   type SafeRuntimeDiagnostic,
 } from "./pi-rpc-diagnostics.js";
 import { snapshotRuntimeTimeouts, validTimeoutMs } from "./runtime-timeouts.js";
+import {
+  acquireCredentialStartupLease,
+  credentialStartupErrorCode,
+  credentialStartupRetryable,
+  resolveCredentialDomain,
+  type CredentialStartupLease,
+} from "./credential-startup.js";
 
 const MAX_RPC_LINE_BYTES = 1024 * 1024;
 const MAX_EVENT_LOG_BYTES = 512 * 1024;
@@ -264,6 +271,7 @@ async function main(argv: string[]): Promise<void> {
   let resultPresent = existsSync(plan.resultPath);
   let deadlineFailure: DeadlineFailure | null = null;
   let noProgressDeadlineActive = false;
+  let credentialLease: CredentialStartupLease | null = null;
 
   const persistProgress = (force = false): void => {
     const now = Date.now();
@@ -309,6 +317,11 @@ async function main(argv: string[]): Promise<void> {
 
   const persistEvent = (event: JsonObject): void => {
     const reportedType = typeof event.type === "string" ? event.type : "";
+    if (reportedType === "harness_credential_failure") {
+      const code = credentialStartupErrorCode({ code: event.code });
+      if (!code) throw piRpcRunnerError("rpc_protocol", "rpc_command_failed", false);
+      throw piRpcRunnerError("credential", code, credentialStartupRetryable(code));
+    }
     const type = KNOWN_EVENT_TYPES.has(reportedType) ? reportedType : "unknown";
     eventCount += 1;
     lastEventType = type;
@@ -400,11 +413,22 @@ async function main(argv: string[]): Promise<void> {
   try {
     const isolatedAgentDir = preparePiRpcAgentDir(plan.snapshot);
     const pinnedTaskDataPath = preparePinnedTaskData(plan);
+    if (plan.snapshot.credentialMode === "canonical-oauth") {
+      const provider = plan.snapshot.provider;
+      if (!provider || !plan.snapshot.credentialDomainId) {
+        throw piRpcRunnerError("credential", "credential_lock_stale", false);
+      }
+      const domain = resolveCredentialDomain(
+        join(plan.snapshot.context!.agentDir, "auth.json"),
+        plan.snapshot.credentialDomainId,
+      );
+      credentialLease = await acquireCredentialStartupLease(domain, provider);
+    }
     child = spawn(process.execPath, [
       sdkEntryPath,
       "--pi-executable", plan.snapshot.executable,
       "--expected-version", plan.snapshot.runtimeVersion,
-      ...credentialHostArgs(plan),
+      ...credentialHostArgs(plan, credentialLease?.instanceId),
       "--private-agent-dir", isolatedAgentDir,
       ...runtimeControlHostArgs(plan, pinnedTaskDataPath),
       "--",
@@ -469,6 +493,8 @@ async function main(argv: string[]): Promise<void> {
       credentialMode: plan.snapshot.credentialMode,
       isolatedAgentDir,
     });
+    credentialLease?.stop();
+    credentialLease = null;
 
     failureStage = "await-dispatch";
     const dispatch = await waitForDispatch(plan, client, () => {
@@ -639,6 +665,12 @@ async function main(argv: string[]): Promise<void> {
         piRpcRunnerError("child_process", "child_shutdown_unconfirmed", false),
         "child-shutdown",
       );
+    }
+    try {
+      credentialLease?.stop();
+      credentialLease = null;
+    } catch (leaseError) {
+      cleanupFailure ??= classifyPiRpcRunnerFailure(leaseError, "credential-postflight");
     }
     const diagnostic = primaryFailure.failureCode === "child_exit_before_settled"
       && toolExecutionCount > 0
@@ -965,13 +997,20 @@ function allowedReviewerLifecycleCleanup(plan: PiRpcPlan, event: JsonObject, set
     && Object.keys(event).every((key) => allowedKeys.has(key));
 }
 
-function credentialHostArgs(plan: PiRpcPlan): string[] {
+function credentialHostArgs(plan: PiRpcPlan, leaseInstanceId?: string): string[] {
   const agentDir = plan.snapshot.context?.agentDir;
   if (!agentDir) throw new Error("Pi RPC plan has no canonical credential agent directory");
   const modelConfigs = plan.snapshot.resources.filter((resource) => resource.kind === "model-config");
   if (plan.snapshot.credentialMode === "canonical-oauth") {
-    if (modelConfigs.length !== 0) throw new Error("subscription OAuth RPC must not bind models.json");
-    return ["--credential-mode", "canonical-oauth", "--credential-agent-dir", agentDir];
+    if (modelConfigs.length !== 0 || !plan.snapshot.credentialDomainId) {
+      throw new Error("subscription OAuth RPC must bind one canonical credential domain and no models.json");
+    }
+    return [
+      "--credential-mode", "canonical-oauth",
+      "--credential-agent-dir", agentDir,
+      "--credential-domain-id", plan.snapshot.credentialDomainId,
+      ...(leaseInstanceId ? ["--credential-lease-instance", leaseInstanceId] : []),
+    ];
   }
   if (plan.snapshot.credentialMode !== "canonical-model-config" || modelConfigs.length !== 1) {
     throw new Error("custom-model RPC must bind exactly one models.json");

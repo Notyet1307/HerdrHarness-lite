@@ -7,6 +7,7 @@ import { RuntimePreflightCli } from "../src/adapters/runtime-preflight.js";
 import type { CommandResult, CommandRunner } from "../src/adapters/command.js";
 import { executionResource, executionResourceDigest } from "../src/attempt-plan.js";
 import type { ExecutionResource } from "../src/model.js";
+import { credentialLeasePath, resolveCredentialDomain } from "../src/credential-startup.js";
 
 class RecordingRunner implements CommandRunner {
   calls: Array<{
@@ -65,6 +66,45 @@ test("ambient Pi SYSTEM prompts fail closed while an empty bound agent directory
   );
 });
 
+test("canonical OAuth domain reports oauth_missing without exposing its path", async () => {
+  const root = mkdtempSync(join(tmpdir(), "harness-oauth-missing-"));
+  const agentDir = join(root, "agent");
+  mkdirSync(agentDir);
+  try {
+    await assert.rejects(
+      () => new RuntimePreflightCli(new RecordingRunner([]), {}).credentialDomain({ credentialAgentDir: agentDir }),
+      (error) => error instanceof Error && error.message === "oauth_missing" && !error.message.includes(root),
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("direct Pi OAuth probe coordinates the bound default Provider without requiring argv selectors", async () => {
+  const root = mkdtempSync(join(tmpdir(), "harness-direct-oauth-probe-"));
+  const agentDir = join(root, "agent");
+  mkdirSync(agentDir);
+  writeFileSync(join(agentDir, "auth.json"), "{}\n", { mode: 0o600 });
+  const domain = resolveCredentialDomain(join(agentDir, "auth.json"));
+  const runner = new RecordingRunner([ok("HERDR_HARNESS_PROVIDER_OK\n")]);
+  try {
+    await new RuntimePreflightCli(runner, {}).probeProvider({
+      lane: "worker",
+      cwd: "/repo",
+      piBin: "pi",
+      roleArgv: ["--thinking", "high"],
+      credentialAgentDir: agentDir,
+      credentialMode: "canonical-oauth",
+      credentialDomainId: domain.credentialDomainId,
+      credentialProvider: "openai-codex",
+    });
+    assert.equal(runner.calls[0]?.command, "pi");
+    assert.equal(existsSync(credentialLeasePath(domain, "openai-codex")), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("RPC Provider preflight uses canonical OAuth with an Attempt-private settings directory", async () => {
   const root = mkdtempSync(join(tmpdir(), "harness-pi-rpc-preflight-"));
   const sourceAgentDir = join(root, "source-agent");
@@ -104,6 +144,7 @@ test("RPC Provider preflight uses canonical OAuth with an Attempt-private settin
         "--expected-version", "0.84.2",
         "--credential-mode", "canonical-oauth",
         "--credential-agent-dir", sourceAgentDir,
+        "--credential-domain-id", resolveCredentialDomain(join(sourceAgentDir, "auth.json")).credentialDomainId,
         "--private-agent-dir", isolatedAgentDir,
         "--probe-message", "Reply with exactly HERDR_HARNESS_PROVIDER_OK",
         "--",

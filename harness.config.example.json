@@ -17,7 +17,8 @@
   },
   "reviewer": {
     "totalTimeoutMs": 2700000,
-    "noProgressTimeoutMs": 600000
+    "noProgressTimeoutMs": 600000,
+    "axisConcurrency": 2
   },
   "validation": {
     "totalTimeoutMs": 1800000

@@ -1,4 +1,4 @@
-import { join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { executionPlanMatches } from "../attempt-plan.js";
 import { digest, evolveJob, type Attempt, type HarnessState, type Job } from "../model.js";
 import { renderAttemptPrompt } from "../prompts.js";
@@ -134,6 +134,29 @@ export async function driveAttempt(ctx: ControllerContext, state: HarnessState, 
         if (!preparedAttempt.expectedHeadSha || !preparedAttempt.reviewerValidationReceipt) throw new Error("Reviewer attempt has no validation-bound expected HEAD");
         const reviewAxisAgents = preparedAttempt.executionSnapshot!.resources.filter((resource) => resource.kind === "agent");
         if (reviewAxisAgents.length !== 1) throw new Error("Reviewer execution snapshot must bind exactly one child agent");
+        let credentialLaunchers = preparedAttempt.executionSnapshot!.resources.filter((resource) => (
+          resource.kind === "runtime" && basename(resource.path) === "credential-startup.js"
+        ));
+        const credentialDomainId = preparedAttempt.executionSnapshot!.credentialDomainId ?? null;
+        if (credentialDomainId && credentialLaunchers.length === 0) {
+          const sdkHost = preparedAttempt.executionSnapshot!.resources.find((resource) => (
+            resource.kind === "runtime" && basename(resource.path) === "pi-rpc-sdk-entry.js"
+          ));
+          if (sdkHost) credentialLaunchers = [{
+            kind: "runtime",
+            path: resolve(dirname(sdkHost.path), "credential-startup.js"),
+            digest: sdkHost.digest,
+          }];
+        }
+        if ((credentialDomainId === null) !== (credentialLaunchers.length === 0)
+          || credentialLaunchers.length > 1) {
+          throw new Error("Reviewer credential startup launcher does not match its canonical OAuth domain");
+        }
+        if (preparedAttempt.executionSnapshot!.credentialMode === "canonical-oauth"
+          && preparedAttempt.executionSnapshot!.provider === "openai-codex"
+          && (credentialDomainId === null || preparedAttempt.executionSnapshot!.axisConcurrency !== 1)) {
+          throw new Error("openai-codex subscription Reviewer requires a bound serial credential startup policy");
+        }
         const reviewerPrompt = renderAttemptPrompt(preparedAttempt);
         const validationInput = reviewerValidationInput(job, preparedAttempt);
         const reviewerInput = reviewerOwnValidationInput(job, preparedAttempt);
@@ -147,6 +170,11 @@ export async function driveAttempt(ctx: ControllerContext, state: HarnessState, 
           piExecutable: preparedAttempt.executionSnapshot!.executable,
           piRuntimeVersion: preparedAttempt.executionSnapshot!.runtimeVersion,
           piAgentDir: preparedAttempt.executionSnapshot!.context!.agentDir,
+          provider: preparedAttempt.executionSnapshot!.provider,
+          model: preparedAttempt.executionSnapshot!.model,
+          axisConcurrency: preparedAttempt.executionSnapshot!.axisConcurrency ?? 2,
+          credentialDomainId,
+          credentialLauncher: credentialLaunchers[0] ?? null,
           prompt: reviewerPrompt,
           trustedContextPath: attempt.executionSnapshot!.context!.bundlePath,
           reviewerSkillPath: join(BUNDLED_CODE_REVIEW_SKILL, "SKILL.md"),

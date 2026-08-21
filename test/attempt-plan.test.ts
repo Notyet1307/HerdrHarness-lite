@@ -62,6 +62,24 @@ test("controlled compaction snapshot requires the exact qualified policy", () =>
   }), /exact qualified policy/);
 });
 
+test("credential domain cannot be downgraded to runtime-default", () => {
+  const input = {
+    adapter: "herdr-pi-cli" as const,
+    executable: "/pi",
+    runtimeVersion: "0.84.2",
+    argv: ["--thinking", "high", "--tools", "read"],
+    credentialDomainId: "a".repeat(64),
+  };
+  assert.throws(() => buildExecutionSnapshot({
+    ...input,
+    credentialMode: "runtime-default",
+  }), /requires canonical-oauth/);
+  assert.equal(buildExecutionSnapshot({
+    ...input,
+    credentialMode: "canonical-oauth",
+  }).credentialMode, "canonical-oauth");
+});
+
 test("model config execution resources require one private regular file", () => {
   const root = mkdtempSync(join(tmpdir(), "harness-model-config-"));
   try {

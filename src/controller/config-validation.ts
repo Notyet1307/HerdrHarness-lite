@@ -64,7 +64,9 @@ export function validateHarnessConfig(config: HarnessConfig): void {
   }
   for (const [name, value] of [["worker", config.worker], ["reviewer", config.reviewer]] as const) {
     if (value !== undefined && (!value || typeof value !== "object" || Array.isArray(value))) throw new Error(`${name} must be an object`);
-    if (value && Object.keys(value).some((key) => key !== "totalTimeoutMs" && key !== "noProgressTimeoutMs")) {
+    if (value && Object.keys(value).some((key) => (
+      key !== "totalTimeoutMs" && key !== "noProgressTimeoutMs" && !(name === "reviewer" && key === "axisConcurrency")
+    ))) {
       throw new Error(`${name} contains an unknown timeout field`);
     }
     const timeouts = configuredRuntimeTimeouts(config, name);
@@ -74,6 +76,9 @@ export function validateHarnessConfig(config: HarnessConfig): void {
     if (timeouts.noProgressTimeoutMs > timeouts.totalTimeoutMs) {
       throw new Error(`${name}.noProgressTimeoutMs must not exceed ${name}.totalTimeoutMs`);
     }
+  }
+  if (config.reviewer?.axisConcurrency !== undefined && ![1, 2].includes(config.reviewer.axisConcurrency)) {
+    throw new Error("reviewer.axisConcurrency must be 1 or 2");
   }
   if (config.validation !== undefined && (!config.validation || typeof config.validation !== "object" || Array.isArray(config.validation))) {
     throw new Error("validation must be an object");

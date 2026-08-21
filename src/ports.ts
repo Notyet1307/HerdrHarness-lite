@@ -46,7 +46,7 @@ export type HarnessConfig = {
   workerRuntime?: "herdr-pi-cli" | "pi-rpc";
   reviewerRuntime?: "herdr-pi-cli" | "pi-rpc";
   worker?: { totalTimeoutMs?: number; noProgressTimeoutMs?: number };
-  reviewer?: { totalTimeoutMs?: number; noProgressTimeoutMs?: number };
+  reviewer?: { totalTimeoutMs?: number; noProgressTimeoutMs?: number; axisConcurrency?: 1 | 2 };
   validation?: { totalTimeoutMs?: number };
   termination?: { sigtermGraceMs?: number; sigkillGraceMs?: number };
   preflight?: {
@@ -73,6 +73,7 @@ export type ReviewerProviderProfiles = {
 export interface RuntimePreflightPort {
   inspectPi(input: { cwd: string; piBin: string }): Promise<{ executable: string; version: string }>;
   assertNoAmbientSystemPrompt(input: { cwd: string }): Promise<{ agentDir: string }>;
+  credentialDomain(input: { credentialAgentDir: string }): Promise<{ credentialDomainId: string }>;
   probeProvider(input: {
     lane: Attempt["lane"];
     cwd: string;
@@ -82,6 +83,8 @@ export interface RuntimePreflightPort {
     agentDir?: string;
     credentialAgentDir?: string;
     credentialMode?: PiRpcCredentialMode;
+    credentialDomainId?: string;
+    credentialProvider?: string;
     modelConfig?: ExecutionResource;
     rpcHost?: ExecutionResource;
   }): Promise<void>;
@@ -244,6 +247,11 @@ export interface GitPort {
     piExecutable: string;
     piRuntimeVersion: string;
     piAgentDir: string;
+    provider: string | null;
+    model: string | null;
+    axisConcurrency: 1 | 2;
+    credentialDomainId: string | null;
+    credentialLauncher: ExecutionResource | null;
     prompt: string;
     trustedContextPath: string;
     reviewerSkillPath: string;

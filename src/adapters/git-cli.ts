@@ -491,6 +491,11 @@ export class GitCli implements GitPort {
     piExecutable: string;
     piRuntimeVersion: string;
     piAgentDir: string;
+    provider: string | null;
+    model: string | null;
+    axisConcurrency: 1 | 2;
+    credentialDomainId: string | null;
+    credentialLauncher: ExecutionResource | null;
     prompt: string;
     trustedContextPath: string;
     reviewerSkillPath: string;
@@ -534,10 +539,32 @@ export class GitCli implements GitPort {
     if (!input.piRuntimeVersion.trim() || /[\0\r\n]/.test(input.piRuntimeVersion)) throw new Error("Reviewer Pi runtime version is invalid");
     if (!isAbsolute(input.piAgentDir) || /[\0\r\n]/.test(input.piAgentDir)) throw new Error("Reviewer Pi agent directory is invalid");
     const piAgentDir = resolve(input.piAgentDir);
+    if (![1, 2].includes(input.axisConcurrency)) throw new Error("Reviewer axis concurrency is invalid");
+    if (input.credentialDomainId !== null) {
+      if (!input.provider || !input.model || /[\0\r\n]/.test(input.provider) || /[\0\r\n]/.test(input.model)
+        || !/^[0-9a-f]{64}$/i.test(input.credentialDomainId)
+        || input.credentialLauncher?.kind !== "runtime"
+        || basename(input.credentialLauncher.path) !== "credential-startup.js"
+        || executionResourceDigest(dirname(input.credentialLauncher.path)) !== input.credentialLauncher.digest) {
+        throw new Error("Reviewer canonical OAuth startup launcher is missing or changed");
+      }
+    } else if (input.credentialLauncher !== null) {
+      throw new Error("Reviewer custom Provider must not bind an OAuth startup launcher");
+    }
     const emptyAppendSystemPromptPath = join(paths.runtimePath, "empty-append-system.md");
     const emptyAppendSystemPromptDigest = textDigest("");
     const piSubagentWrapperPath = join(paths.runtimePath, "pi-subagent");
-    const piSubagentWrapperContent = piSubagentWrapper(piExecutable, input.piRuntimeVersion, emptyAppendSystemPromptPath);
+    const piSubagentWrapperContent = piSubagentWrapper(
+      piExecutable,
+      input.piRuntimeVersion,
+      emptyAppendSystemPromptPath,
+      input.credentialDomainId === null ? null : {
+        provider: input.provider!,
+        model: input.model!,
+        credentialDomainId: input.credentialDomainId,
+        launcherPath: input.credentialLauncher!.path,
+      },
+    );
     const piSubagentWrapperDigest = textDigest(piSubagentWrapperContent);
     const descriptor = {
       version: 1,
@@ -565,6 +592,8 @@ export class GitCli implements GitPort {
       piExecutable,
       piRuntimeVersion: input.piRuntimeVersion,
       piAgentDir,
+      axisConcurrency: input.axisConcurrency,
+      credentialDomainId: input.credentialDomainId,
       emptyAppendSystemPromptPath,
       emptyAppendSystemPromptDigest,
       piSubagentWrapperPath,
@@ -925,7 +954,15 @@ function textDigest(value: string | Uint8Array): string {
   return hash.digest("hex");
 }
 
-function piSubagentWrapper(executable: string, runtimeVersion: string, emptyAppendSystemPromptPath: string): string {
+function piSubagentWrapper(
+  executable: string,
+  runtimeVersion: string,
+  emptyAppendSystemPromptPath: string,
+  credential: { provider: string; model: string; credentialDomainId: string; launcherPath: string } | null,
+): string {
+  if (credential) {
+    return `#!/bin/sh\nexec ${shellQuote(process.execPath)} ${shellQuote(credential.launcherPath)} --provider ${shellQuote(credential.provider)} --model ${shellQuote(credential.model)} --credential-agent-dir "$PI_CODING_AGENT_DIR" --credential-domain-id ${shellQuote(credential.credentialDomainId)} --pi-executable ${shellQuote(executable)} --expected-version ${shellQuote(runtimeVersion)} -- --append-system-prompt ${shellQuote(emptyAppendSystemPromptPath)} "$@"\n`;
+  }
   return `#!/bin/sh\nactual_version=$(${shellQuote(executable)} --version) || exit $?\nif [ "$actual_version" != ${shellQuote(runtimeVersion)} ]; then\n  printf 'Pi runtime version changed: expected %s, got %s\\n' ${shellQuote(runtimeVersion)} "$actual_version" >&2\n  exit 70\nfi\nexec ${shellQuote(executable)} --append-system-prompt ${shellQuote(emptyAppendSystemPromptPath)} "$@"\n`;
 }
 

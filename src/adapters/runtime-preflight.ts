@@ -7,6 +7,13 @@ import { basename, delimiter, dirname, isAbsolute, join, resolve } from "node:pa
 import { preparePiRpcAgentDirAt } from "../pi-rpc-spool.js";
 import { assertQualifiedPiRpcVersion } from "../compatibility.js";
 import { executionResourceDigest } from "../attempt-plan.js";
+import {
+  acquireCredentialStartupLease,
+  CredentialStartupError,
+  credentialStartupErrorCode,
+  resolveCredentialDomain,
+  type CredentialStartupLease,
+} from "../credential-startup.js";
 
 const PROVIDER_MARKER = "HERDR_HARNESS_PROVIDER_OK";
 const PROVIDER_TIMEOUT_MS = 120_000;
@@ -40,6 +47,11 @@ export class RuntimePreflightCli implements RuntimePreflightPort {
     return { agentDir };
   }
 
+  async credentialDomain(input: { credentialAgentDir: string }): Promise<{ credentialDomainId: string }> {
+    const domain = resolveCredentialDomain(join(resolve(input.credentialAgentDir), "auth.json"));
+    return { credentialDomainId: domain.credentialDomainId };
+  }
+
   async probeProvider(input: {
     lane: "worker" | "reviewer";
     cwd: string;
@@ -49,6 +61,8 @@ export class RuntimePreflightCli implements RuntimePreflightPort {
     agentDir?: string;
     credentialAgentDir?: string;
     credentialMode?: "canonical-oauth" | "canonical-model-config";
+    credentialDomainId?: string;
+    credentialProvider?: string;
     modelConfig?: ExecutionResource;
     rpcHost?: ExecutionResource;
   }): Promise<void> {
@@ -62,6 +76,9 @@ export class RuntimePreflightCli implements RuntimePreflightPort {
     if (agentDir && (!input.credentialAgentDir || !input.credentialMode)) {
       throw new Error("RPC Provider probe requires a canonical credential mode and agent directory");
     }
+    const credentialDomain = input.credentialMode === "canonical-oauth" && input.credentialAgentDir
+      ? resolveCredentialDomain(join(resolve(input.credentialAgentDir), "auth.json"), input.credentialDomainId)
+      : null;
     if (agentDir && (
       input.rpcHost?.kind !== "runtime"
       || basename(input.rpcHost.path) !== "pi-rpc-sdk-entry.js"
@@ -86,33 +103,47 @@ export class RuntimePreflightCli implements RuntimePreflightPort {
       "--no-tools",
       ...runtimeSelectors(input.roleArgv),
     ];
-    const result = this.runner.run(agentDir ? process.execPath : input.piBin, agentDir ? [
-      input.rpcHost!.path,
-      "--pi-executable", input.piBin,
-      "--expected-version", input.piVersion!,
-      "--credential-mode", input.credentialMode!,
-      "--credential-agent-dir", input.credentialAgentDir!,
-      ...(input.modelConfig ? ["--model-config-path", input.modelConfig.path, "--model-config-digest", input.modelConfig.digest] : []),
-      "--private-agent-dir", agentDir,
-      "--probe-message", `Reply with exactly ${PROVIDER_MARKER}`,
-      "--",
-      ...probeArgs,
-    ] : [
-      ...probeArgs,
-      "-p",
-      `Reply with exactly ${PROVIDER_MARKER}`,
-    ], {
-      cwd: input.cwd,
-      timeoutMs: PROVIDER_TIMEOUT_MS,
-      ...(agentDir ? { env: { ...this.environment, PI_CODING_AGENT_DIR: agentDir } } : {}),
-    });
-    if (!result.ok) {
-      throw new Error(`${input.lane} Provider probe failed: ${diagnostic(result)}`);
+    let lease: CredentialStartupLease | null = null;
+    try {
+      if (!agentDir && credentialDomain) {
+        lease = await acquireCredentialStartupLease(
+          credentialDomain,
+          input.credentialProvider ?? providerSelector(input.roleArgv),
+        );
+      }
+      const result = this.runner.run(agentDir ? process.execPath : input.piBin, agentDir ? [
+        input.rpcHost!.path,
+        "--pi-executable", input.piBin,
+        "--expected-version", input.piVersion!,
+        "--credential-mode", input.credentialMode!,
+        "--credential-agent-dir", input.credentialAgentDir!,
+        ...(credentialDomain ? ["--credential-domain-id", credentialDomain.credentialDomainId] : []),
+        ...(input.modelConfig ? ["--model-config-path", input.modelConfig.path, "--model-config-digest", input.modelConfig.digest] : []),
+        "--private-agent-dir", agentDir,
+        "--probe-message", `Reply with exactly ${PROVIDER_MARKER}`,
+        "--",
+        ...probeArgs,
+      ] : [
+        ...probeArgs,
+        "-p",
+        `Reply with exactly ${PROVIDER_MARKER}`,
+      ], {
+        cwd: input.cwd,
+        timeoutMs: PROVIDER_TIMEOUT_MS,
+        ...(agentDir ? { env: { ...this.environment, PI_CODING_AGENT_DIR: agentDir } } : {}),
+      });
+      if (!result.ok) {
+        if (credentialDomain) throw new CredentialStartupError(credentialFailureOutput(result.stdout) ?? "oauth_probe_failed");
+        throw new Error(`${input.lane} Provider probe failed: ${diagnostic(result)}`);
+      }
+      if (!result.stdout.split(/\r?\n/).some((line) => line.trim() === PROVIDER_MARKER)) {
+        if (credentialDomain) throw new CredentialStartupError("oauth_probe_failed");
+        throw new Error(`${input.lane} Provider probe returned no success marker`);
+      }
+      if (agentDir) preparePiRpcAgentDirAt(agentDir);
+    } finally {
+      lease?.stop();
     }
-    if (!result.stdout.split(/\r?\n/).some((line) => line.trim() === PROVIDER_MARKER)) {
-      throw new Error(`${input.lane} Provider probe returned no success marker`);
-    }
-    if (agentDir) preparePiRpcAgentDirAt(agentDir);
   }
 
   async probeDocker(input: { cwd: string }): Promise<{ host: string }> {
@@ -173,6 +204,28 @@ function runtimeSelectors(argv: string[]): string[] {
     index += 1;
   }
   return selected;
+}
+
+function providerSelector(argv: string[]): string {
+  const selectors = runtimeSelectors(argv);
+  const index = selectors.indexOf("--provider");
+  const provider = index < 0 ? undefined : selectors[index + 1];
+  if (!provider) throw new CredentialStartupError("oauth_probe_failed");
+  return provider;
+}
+
+function credentialFailureOutput(output: string): ReturnType<typeof credentialStartupErrorCode> {
+  for (const line of output.split(/\r?\n/)) {
+    try {
+      const value = JSON.parse(line) as { type?: unknown; code?: unknown };
+      if (value.type === "harness_credential_failure") {
+        return credentialStartupErrorCode({ code: value.code });
+      }
+    } catch {
+      // Only the fixed structured failure record is accepted.
+    }
+  }
+  return null;
 }
 
 function dockerContextHost(runner: CommandRunner, cwd: string): string {

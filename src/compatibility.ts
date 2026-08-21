@@ -4,6 +4,7 @@ import type { ControlledCompactionPolicy } from "./model.js";
 
 export const QUALIFIED_PI_RPC_VERSIONS = ["0.84.0", "0.84.1", "0.84.2"] as const;
 export const QUALIFIED_CONTROLLED_COMPACTION_PI_VERSION = "0.84.2";
+export const QUALIFIED_PI_AUTHENTICATED_READY_VERSION = "0.84.2";
 export const SUPPORTED_PI_SUBAGENTS_VERSION = "0.42.1";
 export const SUPPORTED_PONYTAIL_VERSION = "4.9.0";
 export const WORKER_CONTROLLED_COMPACTION_POLICY = Object.freeze({

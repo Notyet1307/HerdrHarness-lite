@@ -19,6 +19,7 @@ export const ModelRuntime = {
       getProvider() { return undefined; },
       async getAuth() {
         if (process.env.FAKE_PI_SDK_OAUTH_LOCK_CONTENTION) throw new Error("OAuth lock contention access_token_SENTINEL");
+        if (process.env.FAKE_PI_SDK_AUTH_TIMEOUT) { const error = new Error("refresh timeout access_token_SENTINEL"); error.name = "TimeoutError"; throw error; }
         if (process.env.FAKE_PI_SDK_AUTH_ERROR) throw new Error(process.env.FAKE_PI_SDK_AUTH_ERROR);
         state.authChecked = true;
         return registered ? { source: "configured API key", auth: { token: "redacted" } } : { auth: { token: "redacted" } };
@@ -48,6 +49,8 @@ export async function createAgentSessionFromServices() {
   const session = {
     state: { messages: [] },
     async prompt() {
+      state.promptCount = (state.promptCount ?? 0) + 1;
+      if (process.env.FAKE_PI_SDK_PROBE_FAIL) throw new Error("probe failed access_token_SENTINEL");
       session.state.messages.push({ role: "assistant", stopReason: "stop", content: [{ type: "text", text: "HERDR_HARNESS_PROVIDER_OK" }] });
     },
   };

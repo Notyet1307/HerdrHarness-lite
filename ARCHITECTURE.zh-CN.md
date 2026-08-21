@@ -91,7 +91,7 @@ IssueSnapshot -> TaskSnapshot -> Job -> Attempt
 
 - adapter、Pi executable 与 exact inspected version；
 - 完整 argv、provider、model、thinking、tools；
-- session、retry、compaction、credential 模式，以及可选的受控压缩策略；
+- session、retry、compaction、credential 模式、canonical auth realpath digest，以及 Reviewer axis concurrency；
 - Docker host；
 - skill、extension、agent、runtime、model config 等资源及 digest；
 - trusted context manifest/bundle 与 Attempt-private agent directory。
@@ -208,7 +208,7 @@ Reviewer 是 fresh、read-only、exact-HEAD 审查者。固定 validation argv �
 Reviewer 必须：
 
 - 先做 `review_preflight`；
-- 只为缺失阶段在只读 exact-HEAD source snapshot 上逐个启动 fresh Standards / Spec child；
+- 只为缺失阶段在只读 exact-HEAD source snapshot 上启动 fresh Standards / Spec child；`openai-codex + canonical-oauth` 固定 `axisConcurrency=1` 并按 Standards、Spec 串行，custom Provider 使用绑定的 1 或 2；
 - 只读取 exact-HEAD、digest-bound 的 Controller validation receipt，不启动或等待 validation 进程；
 - 通过 `review_submit` 写身份绑定结果；
 - 保持 candidate repository 中的 instruction files 只是审查对象。
@@ -243,6 +243,8 @@ Analyst 绑定当前 Job 和 task digest，只在 blocked flow 中读取有界 E
 Worker 与顶层 Reviewer 都可选择 `herdr-pi-cli` 或 `pi-rpc`。两者仍在 Herdr pane 中运行；Reviewer 内部的两个 review-axis child 属于固定 `pi-subagents` contract，不是第三种顶层 Attempt adapter。
 
 RPC 路径由 pane 内 foreground runner 持有 Pi stdin/stdout。Controller 通过 Attempt-private、原子落盘的 intent 与 receipt 观察它，不接管 pipe，也不在 dispatch 结果不确定时重放 prompt。RPC runner 明确关闭 Pi auto-retry 与 Pi-owned auto-compaction。Worker 使用 snapshot 固定的 75% threshold、最多一次、保留最近 20,000 token 的 Harness-controlled compaction；它只在工具轮次之间运行，overflow continuation 与 summarization retry 均关闭。Reviewer compaction 保持关闭。Receipt 只保存次数、阈值、触发时 context/window、前后 token 估计和 summary digest，不保存 summary 内容；exact version compatibility 由 `src/compatibility.ts` 统一定义并 fail closed。
+
+canonical OAuth 仍只存在于原 canonical `auth.json`。Harness 以其 realpath 的 SHA-256 作为 `credentialDomainId`，在 credential store 内的私有 coordination directory 用 `provider + credentialDomainId` O_EXCL lease 协调跨项目 Provider probe、credential load、Herdr/Pi child startup 与 RPC ready handshake。Lease 只保存 domain digest、instanceId、PID、acquiredAt 和 heartbeat；只有 owner 可释放，只有 PID 已死且 heartbeat 超时才可回收，malformed lease fail closed。stale takeover 在原生 advisory lock 内原子 replace lease，回收进程崩溃时 OS 自动释放 lock，且 lease path 不出现可被另一 contender 抢占/误删的空窗。成功 probe 的短 TTL cache 还绑定 provider、model 与 auth 文件元数据 digest；每次 SDK startup 仍执行 credential validation/getAuth，refresh 或 child 启动失败会立即删除 cache。Reviewer axis launcher 在 qualified Pi `0.84.2` 的首个 assistant `message_start`（该版本在 `prepareRequest/getAuth` 打开 Provider stream 后才发出）释放 lease；旧 qualified runtime 保守持有到 child 结束。失败发生在释放后时，launcher 会重新取 lease 再失效 cache，因此不同项目的非 credential review 阶段仍可并行。Axis child JSONL 只保留生命周期/工具元数据和 bounded terminal review JSON；Provider error、`agent_end` messages、delta content 与未知 payload 不转发。
 
 Worker 工具文本结果在进入后续模型上下文前还有 24 KiB 总上限，超限时保留头尾并给出原始字节数和 digest。Pi 内建分页/完整输出路径仍是重新读取事实的入口；截断结果和 compaction summary 都不是 workflow truth。
 
@@ -361,6 +363,8 @@ Fleet 只持久化项目进程生命周期：`pending`、`starting`、`running`�
 Fleet 加载时绑定每个项目配置的 digest，并把该 digest 交给单项目 CLI 在产生项目副作用前复核。运行中的 Supervisor 不热加载项目配置；配置漂移只会让新 child fail closed，修改后必须重启 Fleet 重新验证全部隔离边界。
 
 项目的重启历史和熔断状态按项目配置 digest 恢复；其他项目或 Fleet 全局配置变化不能隐式重置该项目的故障预算。child stdout/stderr 只以带项目身份的 envelope 转发，不复制进持久 Fleet state。
+
+项目 state/worktree/Herdr session 继续完全隔离；canonical OAuth credential store 是显式共享的外部资源，只通过上述 digest-keyed startup lease 协调，不进入任何项目 `stateDir`。
 
 Fleet 状态位于独立 `fleet-state.json`，项目业务真相仍位于各项目 `state.json`。Supervisor 在启动 child 前要求初始 Fleet checkpoint 成功；运行中的观测 checkpoint 失败只告警并继续隔离监督，避免 Fleet 存储降级扩散成兄弟项目失控。两类状态在原子提交成功后，即使后续 audit append 失败，也不得向调用方伪装成状态未提交。
 

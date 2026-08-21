@@ -23,6 +23,7 @@ This project is not a general multi-agent platform, an intra-project parallel sc
 - Analyst advises only; policy or an exact human gate authorizes recovery.
 - Pi RPC auto-retry and Pi-owned auto-compaction remain disabled. Worker RPC alone may use the snapshot-bound, one-shot controlled threshold compaction; Reviewer compaction stays disabled.
 - Credentials never enter results, receipts, the ledger, documentation, or copied credential files.
+- Projects sharing canonical OAuth coordinate through a realpath-digest startup lease; openai-codex Reviewer axes serialize by default while custom Providers may use concurrency 1 or 2.
 - Fleet manages project processes only; it never writes project workflow transitions.
 - Single-project `run` handles `SIGINT`/`SIGTERM`, interrupts the poll sleep, and releases its heartbeat and Controller lease through normal `finally` cleanup.
 - Every Fleet project has a distinct repo, source checkout, state directory, worktree root, and Herdr session.

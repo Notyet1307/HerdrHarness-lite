@@ -21,6 +21,7 @@ import {
   writeAtomicJson,
   writeExclusiveJson,
 } from "../src/pi-rpc-spool.js";
+import { resolveCredentialDomain } from "../src/credential-startup.js";
 
 test("Pi RPC adapter persists one launch and one dispatch across Controller restarts", async () => {
   const fixture = rpcFixture();
@@ -1730,6 +1731,9 @@ function rpcFixture(): {
   const attemptRoot = join(root, "attempt");
   const runtimeRoot = join(attemptRoot, "runtime");
   mkdirSync(runtimeRoot, { recursive: true });
+  const credentialAgentDir = join(root, "agent");
+  mkdirSync(credentialAgentDir);
+  writeFileSync(join(credentialAgentDir, "auth.json"), "{}\n", { mode: 0o600 });
   const handle = { agentName: "worker-1", paneId: "pane-1", tabId: "tab-1", workspaceId: "workspace-1" };
   const snapshot: ExecutionSnapshot & { adapter: "pi-rpc" } = {
     version: 1,
@@ -1751,6 +1755,7 @@ function rpcFixture(): {
       overflowContinuation: false,
     },
     credentialMode: "canonical-oauth",
+    credentialDomainId: resolveCredentialDomain(join(credentialAgentDir, "auth.json")).credentialDomainId,
     dockerHost: null,
     resources: [
       ...["implement", "tdd", "focused-self-check"].map((name) => ({
@@ -1771,7 +1776,7 @@ function rpcFixture(): {
       bundleDigest: "c".repeat(64),
       manifestPath: join(attemptRoot, "trusted-context.json"),
       manifestDigest: "d".repeat(64),
-      agentDir: join(root, "agent"),
+      agentDir: credentialAgentDir,
     },
   };
   const attempt: Attempt = {
@@ -1891,6 +1896,7 @@ function reviewerPlan(fixture: ReturnType<typeof rpcFixture>): { plan: PiRpcPlan
   fixture.snapshot.compactionMode = "disabled";
   delete fixture.snapshot.compactionPolicy;
   fixture.snapshot.credentialMode = "canonical-model-config";
+  delete fixture.snapshot.credentialDomainId;
   fixture.snapshot.thinking = "max";
   fixture.snapshot.tools = ["read", "subagent", "review_submit"];
   fixture.snapshot.resources = [

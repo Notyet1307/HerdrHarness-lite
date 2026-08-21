@@ -84,6 +84,12 @@ export function buildAttemptContextEnvelope(input: {
         ? { compactionPolicy: { ...input.executionSnapshot.compactionPolicy } }
         : {}),
       credentialMode: input.executionSnapshot.credentialMode,
+      ...(input.executionSnapshot.credentialDomainId
+        ? { credentialDomainId: input.executionSnapshot.credentialDomainId }
+        : {}),
+      ...(input.executionSnapshot.axisConcurrency
+        ? { axisConcurrency: input.executionSnapshot.axisConcurrency }
+        : {}),
       ...(input.executionSnapshot.runtimeTimeouts
         ? { runtimeTimeouts: { ...input.executionSnapshot.runtimeTimeouts } }
         : {}),
