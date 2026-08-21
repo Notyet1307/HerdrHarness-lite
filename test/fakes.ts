@@ -74,6 +74,8 @@ export class FakeRuntimePreflight implements RuntimePreflightPort {
     agentDir?: string;
     credentialAgentDir?: string;
     credentialMode?: "canonical-oauth" | "canonical-model-config";
+    credentialDomainId?: string;
+    credentialProvider?: string;
     modelConfig?: ExecutionResource;
     rpcHost?: ExecutionResource;
   }> = [];
@@ -84,6 +86,7 @@ export class FakeRuntimePreflight implements RuntimePreflightPort {
   executable = "/opt/pi";
   version = "0.84.0";
   agentDir = "/pi-agent";
+  credentialDomainId = "d".repeat(64);
   ambientFailure: Error | null = null;
 
   async inspectPi(input: { cwd: string; piBin: string }): Promise<{ executable: string; version: string }> {
@@ -96,6 +99,10 @@ export class FakeRuntimePreflight implements RuntimePreflightPort {
     return { agentDir: this.agentDir };
   }
 
+  async credentialDomain(): Promise<{ credentialDomainId: string }> {
+    return { credentialDomainId: this.credentialDomainId };
+  }
+
   async probeProvider(input: {
     lane: "worker" | "reviewer";
     cwd: string;
@@ -105,6 +112,8 @@ export class FakeRuntimePreflight implements RuntimePreflightPort {
     agentDir?: string;
     credentialAgentDir?: string;
     credentialMode?: "canonical-oauth" | "canonical-model-config";
+    credentialDomainId?: string;
+    credentialProvider?: string;
     modelConfig?: ExecutionResource;
     rpcHost?: ExecutionResource;
   }): Promise<void> {

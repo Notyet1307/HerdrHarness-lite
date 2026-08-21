@@ -6,6 +6,8 @@ import { makeSafeRuntimeDiagnostic, PiRpcRuntimeFailure } from "../pi-rpc-diagno
 import { snapshotRuntimeTimeouts } from "../runtime-timeouts.js";
 import { ensurePrivateDirectory, readJsonIfExists, rpcRuntimeRoot, spoolPath, writeAtomicJson, writeExclusiveJson } from "../pi-rpc-spool.js";
 import { type CommandResult, type CommandRunner, requireSuccess, SyncCommandRunner } from "./command.js";
+import { join } from "node:path";
+import { acquireCredentialStartupLease, invalidateProbeSuccess, resolveCredentialDomain, type CredentialDomain, type CredentialStartupLease } from "../credential-startup.js";
 
 const SHELL_READY_RETRY_MS = 100;
 const SHELL_READY_TIMEOUT_MS = 30_000;
@@ -182,6 +184,19 @@ export class HerdrCli implements HerdrPort {
       }
       return;
     }
+    let credentialLease: CredentialStartupLease | null = null;
+    let credentialDomain: CredentialDomain | null = null;
+    let startupReady = false;
+    const snapshot = input.attempt?.executionSnapshot;
+    if (snapshot?.credentialDomainId) {
+      if (!snapshot.context) throw new Error("Attempt credential domain has no bound Provider context");
+      credentialDomain = resolveCredentialDomain(
+        join(snapshot.context.agentDir, "auth.json"),
+        snapshot.credentialDomainId,
+      );
+      credentialLease = await acquireCredentialStartupLease(credentialDomain, snapshot.provider ?? "openai-codex");
+    }
+    try {
     const startArgs = [
       "agent",
       "start",
@@ -195,6 +210,7 @@ export class HerdrCli implements HerdrPort {
     let startedValue: Record<string, unknown> | null = null;
     const retryAttempts = SHELL_READY_TIMEOUT_MS / SHELL_READY_RETRY_MS;
     for (let retryIndex = 0; retryIndex < retryAttempts; retryIndex += 1) {
+      credentialLease?.heartbeat();
       const remaining = input.attempt ? remainingTotalMs(input.attempt) : SHELL_READY_TIMEOUT_MS;
       const result = this.runner.run(this.bin, this.args(startArgs), { timeoutMs: Math.min(SHELL_READY_TIMEOUT_MS, remaining) });
       if (result.ok) {
@@ -226,6 +242,21 @@ export class HerdrCli implements HerdrPort {
       throw new Error("Herdr agent identity does not match the prepared tab");
     }
     if (object(startedValue.agent).interactive_ready !== true) throw new Error("Herdr agent is not ready for interactive input");
+    startupReady = true;
+    } finally {
+      try {
+        if (!startupReady && credentialLease && credentialDomain && snapshot?.model) {
+          invalidateProbeSuccess({
+            domain: credentialDomain,
+            provider: snapshot.provider ?? "openai-codex",
+            model: snapshot.model,
+            leaseInstanceId: credentialLease.instanceId,
+          });
+        }
+      } finally {
+        credentialLease?.stop();
+      }
+    }
   }
 
   async runInPane(input: { handle: AgentHandle; command: string; argv: string[]; timeoutMs?: number }): Promise<void> {

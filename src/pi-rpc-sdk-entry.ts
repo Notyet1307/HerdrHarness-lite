@@ -8,6 +8,19 @@ import { executionResourceDigest } from "./attempt-plan.js";
 import { isWorkerControlledCompactionPolicy } from "./compatibility.js";
 import { digest, type ControlledCompactionPolicy } from "./model.js";
 import { preparePiRpcAgentDirAt } from "./pi-rpc-spool.js";
+import {
+  acquireCredentialStartupLease,
+  assertCredentialStartupLease,
+  credentialAuthRevisionId,
+  credentialStartupErrorCode,
+  CredentialStartupError,
+  invalidateProbeSuccess,
+  probeCacheIsFresh,
+  recordProbeSuccess,
+  resolveCredentialDomain,
+  type CredentialDomain,
+  type CredentialStartupLease,
+} from "./credential-startup.js";
 
 type Model = { provider: string; id: string; contextWindow?: number; baseUrl?: string };
 type Diagnostic = { type: "info" | "warning" | "error"; message: string };
@@ -118,6 +131,8 @@ type HostArgs = {
   expectedVersion: string;
   credentialMode: "canonical-oauth" | "canonical-model-config";
   credentialAgentDir: string;
+  credentialDomainId: string | null;
+  credentialLeaseInstance: string | null;
   modelConfigPath: string | null;
   modelConfigDigest: string | null;
   privateAgentDir: string;
@@ -140,6 +155,14 @@ type RuntimeArgs = {
 };
 
 let failureStage = "arguments";
+let ownedCredentialLease: CredentialStartupLease | null = null;
+let activeCredential: {
+  domain: CredentialDomain;
+  provider: string;
+  model: string;
+  leaseInstanceId: string;
+} | null = null;
+let authRevisionId: string | null = null;
 
 async function main(argv: string[]): Promise<void> {
   const host = parseHostArgs(argv);
@@ -159,11 +182,33 @@ async function main(argv: string[]): Promise<void> {
   const credentialAgentDir = resolve(host.credentialAgentDir);
   if (credentialAgentDir === privateAgentDir) throw new Error("Pi RPC credential and private agent directories must differ");
   const authPath = join(credentialAgentDir, "auth.json");
+  const credentialDomain = host.credentialMode === "canonical-oauth"
+    ? resolveCredentialDomain(authPath, host.credentialDomainId ?? undefined)
+    : null;
+  if (credentialDomain) {
+    if (host.probeMessage === null && host.credentialLeaseInstance === null) {
+      throw new CredentialStartupError("credential_lock_stale");
+    }
+    const leaseInstanceId = host.credentialLeaseInstance
+      ?? (ownedCredentialLease = await acquireCredentialStartupLease(credentialDomain, runtimeArgs.provider)).instanceId;
+    assertCredentialStartupLease(
+      credentialDomain,
+      runtimeArgs.provider,
+      leaseInstanceId,
+      host.credentialLeaseInstance === null ? undefined : process.ppid,
+    );
+    activeCredential = {
+      domain: credentialDomain,
+      provider: runtimeArgs.provider,
+      model: runtimeArgs.model,
+      leaseInstanceId,
+    };
+  }
   const assertCredentialInputs = (): void => {
     if (host.credentialMode === "canonical-oauth") {
       if (host.modelConfigPath || host.modelConfigDigest) throw new Error("subscription OAuth RPC must not load models.json");
       // Keep Pi's exact logical path: AuthStorage locks by pathname with realpath:false.
-      assertCanonicalAuthFile(authPath);
+      resolveCredentialDomain(authPath, credentialDomain!.credentialDomainId);
       return;
     }
     if (!host.modelConfigPath || !host.modelConfigDigest
@@ -198,7 +243,12 @@ async function main(argv: string[]): Promise<void> {
     }, { projectTrusted: false });
     let modelRuntime: ModelRuntime;
     if (host.credentialMode === "canonical-oauth") {
-      modelRuntime = await pi.ModelRuntime.create({ authPath, modelsPath: null, allowModelNetwork: false });
+      failureStage = "oauth-refresh";
+      try {
+        modelRuntime = await pi.ModelRuntime.create({ authPath, modelsPath: null, allowModelNetwork: false });
+      } catch (error) {
+        throw oauthFailure(error);
+      }
     } else {
       const providerConfig = loadBoundProviderConfig(
         host.modelConfigPath!,
@@ -220,15 +270,31 @@ async function main(argv: string[]): Promise<void> {
     if (!model || model.provider !== runtimeArgs.provider || model.id !== runtimeArgs.model) {
       throw new Error(`Pi RPC model is not the exact configured model: ${runtimeArgs.provider}/${runtimeArgs.model}`);
     }
-    const auth = await modelRuntime.getAuth(model, {
-      minOAuthValidityMs: 5 * 60_000,
-      signal: AbortSignal.timeout(15_000),
-    });
+    let auth;
+    try {
+      auth = await modelRuntime.getAuth(model, {
+        minOAuthValidityMs: 5 * 60_000,
+        signal: AbortSignal.timeout(15_000),
+      });
+    } catch (error) {
+      if (host.credentialMode === "canonical-oauth") throw oauthFailure(error);
+      throw error;
+    }
     if (!auth || (host.credentialMode === "canonical-oauth"
       ? !modelRuntime.isUsingSubscription(runtimeArgs.provider)
       : auth.source !== "configured API key" || modelRuntime.isUsingSubscription(runtimeArgs.provider))) {
       throw new Error(`Pi RPC credential mode does not match provider ${runtimeArgs.provider}`);
     }
+    if (activeCredential) {
+      assertCredentialStartupLease(
+        activeCredential.domain,
+        activeCredential.provider,
+        activeCredential.leaseInstanceId,
+        host.credentialLeaseInstance === null ? undefined : process.ppid,
+      );
+      authRevisionId = credentialAuthRevisionId(activeCredential.domain);
+    }
+    failureStage = "model-runtime";
     const services = await pi.createAgentSessionServices({
       cwd,
       agentDir: privateAgentDir,
@@ -283,9 +349,18 @@ async function main(argv: string[]): Promise<void> {
   });
   if (host.probeMessage !== null) {
     failureStage = "provider-probe";
-    await runProbe(runtime, host.probeMessage);
+    const cached = activeCredential && authRevisionId
+      ? probeCacheIsFresh({ ...activeCredential, authRevisionId })
+      : false;
+    const marker = await runProbe(runtime, host.probeMessage, cached);
+    if (!cached && activeCredential && authRevisionId) {
+      recordProbeSuccess({ ...activeCredential, authRevisionId });
+    }
+    process.stdout.write(`${marker}\n`);
     assertCredentialInputs();
     preparePiRpcAgentDirAt(privateAgentDir);
+    ownedCredentialLease?.stop();
+    ownedCredentialLease = null;
     return;
   }
   failureStage = "rpc-mode";
@@ -594,19 +669,21 @@ function record(value: unknown): PiRpcEvent {
   return value && typeof value === "object" && !Array.isArray(value) ? value as PiRpcEvent : {};
 }
 
-async function runProbe(runtime: RuntimeHost, prompt: string): Promise<void> {
+async function runProbe(runtime: RuntimeHost, prompt: string, cached: boolean): Promise<string> {
   const marker = /^Reply with exactly ([A-Z0-9_]{1,100})$/u.exec(prompt)?.[1];
   if (!marker) throw new Error("invalid Pi RPC Provider probe");
   try {
-    await runtime.session.prompt(prompt);
-    const last = runtime.session.state.messages.at(-1);
-    const text = Array.isArray(last?.content)
-      ? last.content.flatMap((part) => part && typeof part === "object" && "type" in part && part.type === "text" && "text" in part && typeof part.text === "string" ? [part.text] : []).join("").trim()
-      : "";
-    if (last?.role !== "assistant" || last.stopReason === "error" || last.stopReason === "aborted" || text !== marker) {
-      throw new Error("Pi RPC Provider probe failed");
+    if (!cached) {
+      await runtime.session.prompt(prompt);
+      const last = runtime.session.state.messages.at(-1);
+      const text = Array.isArray(last?.content)
+        ? last.content.flatMap((part) => part && typeof part === "object" && "type" in part && part.type === "text" && "text" in part && typeof part.text === "string" ? [part.text] : []).join("").trim()
+        : "";
+      if (last?.role !== "assistant" || last.stopReason === "error" || last.stopReason === "aborted" || text !== marker) {
+        throw new CredentialStartupError("oauth_probe_failed");
+      }
     }
-    process.stdout.write(`${marker}\n`);
+    return marker;
   } finally {
     await runtime.dispose();
   }
@@ -629,6 +706,7 @@ function parseHostArgs(argv: string[]): HostArgs {
   };
   const allowed = new Set([
     "--pi-executable", "--expected-version", "--credential-mode", "--credential-agent-dir",
+    "--credential-domain-id", "--credential-lease-instance",
     "--model-config-path", "--model-config-digest", "--private-agent-dir", "--probe-message",
     "--pinned-task-data-path", "--pinned-task-data-digest", "--controlled-compaction-policy",
   ]);
@@ -661,6 +739,8 @@ function parseHostArgs(argv: string[]): HostArgs {
     expectedVersion: read("--expected-version")!,
     credentialMode,
     credentialAgentDir: read("--credential-agent-dir")!,
+    credentialDomainId: read("--credential-domain-id", false),
+    credentialLeaseInstance: read("--credential-lease-instance", false),
     modelConfigPath: read("--model-config-path", false),
     modelConfigDigest: read("--model-config-digest", false),
     privateAgentDir: read("--private-agent-dir")!,
@@ -752,12 +832,25 @@ function parseRuntimeArgs(argv: string[], probe: boolean): RuntimeArgs {
   };
 }
 
-function assertCanonicalAuthFile(path: string): void {
-  if (!existsSync(path)) throw new Error(`Pi subscription OAuth is not logged in: ${path}`);
-  const stat = lstatSync(path);
-  if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || (stat.mode & 0o777) !== 0o600) {
-    throw new Error("Pi subscription OAuth auth.json must be a private regular file at its canonical path");
-  }
+function oauthFailure(error: unknown): CredentialStartupError {
+  const existing = credentialStartupErrorCode(error);
+  if (existing) return new CredentialStartupError(existing);
+  const record = error && typeof error === "object" ? error as { name?: unknown; message?: unknown } : {};
+  const name = typeof record.name === "string" ? record.name.toLowerCase() : "";
+  const message = typeof record.message === "string" ? record.message.toLowerCase() : "";
+  return new CredentialStartupError(
+    name.includes("timeout") || name.includes("abort") || /timed? out|timeout|aborted/.test(message)
+      ? "oauth_refresh_timeout"
+      : "oauth_probe_failed",
+  );
+}
+
+function credentialFailureFor(error: unknown): ReturnType<typeof credentialStartupErrorCode> {
+  const existing = credentialStartupErrorCode(error);
+  if (existing) return existing;
+  return activeCredential && ["credential-binding", "credentials", "oauth-refresh", "provider-probe"].includes(failureStage)
+    ? oauthFailure(error).code
+    : null;
 }
 
 function assertCanonicalModelConfig(path: string, expectedDigest: string): void {
@@ -1016,7 +1109,22 @@ function emptyCredentialStore(): Record<string, unknown> {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  main(process.argv.slice(2)).catch(() => {
+  main(process.argv.slice(2)).catch((error) => {
+    const code = credentialFailureFor(error);
+    if (code && activeCredential) {
+      try {
+        invalidateProbeSuccess({ ...activeCredential });
+      } catch {
+        // The stable startup failure remains primary; the runner still owns cleanup.
+      }
+    }
+    try {
+      ownedCredentialLease?.stop();
+      ownedCredentialLease = null;
+    } catch {
+      // A malformed or replaced lease is already fail-closed.
+    }
+    if (code) process.stdout.write(`${JSON.stringify({ type: "harness_credential_failure", code })}\n`);
     process.stderr.write(`FAIL: Pi RPC SDK host failed at ${failureStage}\n`);
     process.exitCode = 1;
   });

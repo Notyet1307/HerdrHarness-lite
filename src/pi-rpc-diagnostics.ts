@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { credentialStartupErrorCode, credentialStartupRetryable } from "./credential-startup.js";
 
 export const PI_RPC_FAILURE_DOMAINS = [
   "provider",
@@ -46,6 +47,11 @@ export const PI_RPC_FAILURE_CODES = [
   "child_exit_after_settled",
   "child_shutdown_unconfirmed",
   "credential_postflight_failed",
+  "credential_lock_timeout",
+  "credential_lock_stale",
+  "oauth_refresh_timeout",
+  "oauth_missing",
+  "oauth_probe_failed",
   "runner_unclassified",
   "provider_continuation_lost",
   "rpc_event_oversize",
@@ -93,6 +99,11 @@ export const FAILURE_CODES = [
   "runtime_internal",
   "child_exit",
   "credential_integrity",
+  "credential_lock_timeout",
+  "credential_lock_stale",
+  "oauth_refresh_timeout",
+  "oauth_missing",
+  "oauth_probe_failed",
   "tool_contract",
   "result_missing",
   "result_identity",
@@ -229,6 +240,8 @@ const RETRYABLE_FAILURE_CODES = new Set<FailureCode>([
   "provider_network",
   "provider_timeout",
   "provider_unavailable",
+  "credential_lock_timeout",
+  "oauth_refresh_timeout",
   "validation_infrastructure",
 ]);
 
@@ -268,6 +281,11 @@ export function classifyPiRpcRunnerFailure(error: unknown, failureStage: string)
       ...stableRunnerFailure(error.failureDomain, error.failureCode, stage),
       failureStage: stage,
     };
+  }
+
+  const credentialCode = credentialStartupErrorCode(error);
+  if (credentialCode) {
+    return withStableRunnerFailure("credential", credentialCode, credentialStartupRetryable(credentialCode), stage);
   }
 
   const systemCode = systemErrorCode(error);
@@ -428,7 +446,16 @@ export function safePiRpcDiagnosticFrom(value: unknown): SafeRuntimeDiagnostic |
 }
 
 export function safePiRpcDiagnosticFromError(error: unknown): SafeRuntimeDiagnostic | null {
-  return error instanceof PiRpcRuntimeFailure ? error.diagnostic : null;
+  if (error instanceof PiRpcRuntimeFailure) return error.diagnostic;
+  const code = credentialStartupErrorCode(error);
+  return code ? makeSafeRuntimeDiagnostic({
+    domain: "execution",
+    code,
+    stage: "startup",
+    failureDomain: "credential",
+    failureCode: code,
+    retryable: credentialStartupRetryable(code),
+  }) : null;
 }
 
 export function formatSafePiRpcDiagnostic(diagnostic: SafeRuntimeDiagnostic): string {
@@ -605,7 +632,12 @@ function stableRunnerFailure(
   if (failureDomain === "rpc_protocol") return { domain: "observation", code: "rpc_protocol", stage };
   if (failureDomain === "rpc_transport") return { domain: "observation", code: "rpc_transport", stage };
   if (failureDomain === "child_process") return { domain: "execution", code: "child_exit", stage };
-  if (failureDomain === "credential") return { domain: "execution", code: "credential_integrity", stage };
+  if (failureDomain === "credential") {
+    if ([
+      "credential_lock_timeout", "credential_lock_stale", "oauth_refresh_timeout", "oauth_missing", "oauth_probe_failed",
+    ].includes(failureCode)) return { domain: "execution", code: failureCode as FailureCode, stage };
+    return { domain: "execution", code: "credential_integrity", stage };
+  }
   if (failureDomain === "runtime") {
     if (failureCode === "runtime_stall") return { domain: "observation", code: "runtime_stall", stage };
     if (failureCode === "attempt_deadline") return { domain: "execution", code: "attempt_deadline", stage };
@@ -653,6 +685,9 @@ function stableIdentityMatches(diagnostic: SafeRuntimeDiagnostic & FailureClassi
       : same("execution", "child_exit");
   }
   if (diagnostic.failureDomain === "credential") {
+    if ([
+      "credential_lock_timeout", "credential_lock_stale", "oauth_refresh_timeout", "oauth_missing", "oauth_probe_failed",
+    ].includes(diagnostic.failureCode)) return same("execution", diagnostic.failureCode as FailureCode);
     return diagnostic.failureCode === "credential_postflight_failed" && same("execution", "credential_integrity");
   }
   if (diagnostic.failureDomain === "runner_internal") {

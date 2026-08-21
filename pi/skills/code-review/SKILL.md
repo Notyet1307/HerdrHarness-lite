@@ -75,10 +75,12 @@ Skip checks already enforced by tooling.
 
 ## 3. Launch each missing axis once, fresh and foreground
 
-Use the `missingAxes` and `reusedAxes` returned by `review_preflight`. Preserve
+Use the `missingAxes`, `reusedAxes`, and `axisConcurrency` returned by
+`review_preflight`. Preserve
 reused structured results exactly and never try to recover their old session or
-transcript. For each missing axis, use one Pi `subagent` workflow call with one
-task, Standards before Spec when both are missing. Do not launch background
+transcript. When `axisConcurrency=1`, use one Pi `subagent` workflow call per
+missing axis, Standards before Spec. When `axisConcurrency=2`, one call may
+contain both missing axes in Standards then Spec order. Do not launch background
 work, fork the parent conversation, or pass Harness dispatch IDs, pane/agent
 handles, lifecycle commands, result paths, or controller state to a child.
 

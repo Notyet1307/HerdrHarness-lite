@@ -73,6 +73,9 @@ export default function reviewerTools(pi) {
     }
     const tasks = reviewCall.tasks;
     const axes = tasks.map((task) => reviewAxis(task));
+    if (!reviewerAxisStartupAllowed(descriptor.axisConcurrency, Boolean(axisResults.Standards), axes)) {
+      return { block: true, reason: `Reviewer axis startup policy requires concurrency=${descriptor.axisConcurrency} and Standards before Spec` };
+    }
     if (axes.some((axis) => !axis || axisResults[axis] || launchedAxes.has(axis))) {
       return { block: true, reason: "Reviewer may launch each missing review axis only once" };
     }
@@ -151,6 +154,7 @@ export default function reviewerTools(pi) {
           reusedStages,
           missingAxes: ["Standards", "Spec"].filter((axis) => !axisResults[axis]),
           reusedAxes: Object.fromEntries(Object.entries(axisResults).filter(([, value]) => value)),
+          axisConcurrency: descriptor.axisConcurrency,
         };
         if (axesCompleted) {
           const aggregated = aggregateFinalResult(axisResults, validationReceipt, descriptor);
@@ -397,6 +401,16 @@ function sha256(value) {
 function reviewAxis(task) {
   const match = /^Axis: (Standards|Spec)\r?\n[\s\S]*\S$/.exec(task.trimEnd());
   return match?.[1] ?? null;
+}
+
+export function reviewerAxisStartupAllowed(axisConcurrency, standardsComplete, axes) {
+  const expectedNextAxis = standardsComplete ? "Spec" : "Standards";
+  return [1, 2].includes(axisConcurrency)
+    && Array.isArray(axes)
+    && axes.length >= 1
+    && axes.length <= axisConcurrency
+    && axes[0] === expectedNextAxis
+    && (axes.length !== 2 || (axes[0] === "Standards" && axes[1] === "Spec"));
 }
 
 function projectReviewAxes(event, expectedTasks, descriptor) {
@@ -760,6 +774,8 @@ function readDescriptor() {
     || !isAbsolute(value.subagentConfigPath ?? "")
     || !/^[0-9a-f]{64}$/i.test(value.subagentConfigDigest ?? "")
     || !isAbsolute(value.resultPath ?? "")
+    || ![1, 2].includes(value.axisConcurrency)
+    || !(value.credentialDomainId === null || /^[0-9a-f]{64}$/i.test(value.credentialDomainId ?? ""))
     || value.privateEvidenceDir !== join(dirname(value.resultPath ?? ""), "evidence")
     || !Number.isSafeInteger(value.initialContextBytes) || value.initialContextBytes < 0
     || !Number.isSafeInteger(value.contextBudgetBytes) || value.contextBudgetBytes < 1

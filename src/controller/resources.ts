@@ -10,6 +10,7 @@ export const BUNDLED_REVIEWER_TOOLS_EXTENSION = resolve(import.meta.dirname, "..
 export const BUNDLED_REVIEW_AXIS_AGENT = resolve(import.meta.dirname, "../../../pi/agents/herdr-harness-review-axis.md");
 export const PI_RPC_RUNNER = resolve(import.meta.dirname, "../pi-rpc-runner.js");
 export const PI_RPC_SDK_ENTRY = resolve(import.meta.dirname, "../pi-rpc-sdk-entry.js");
+export const CREDENTIAL_STARTUP_LAUNCHER = resolve(import.meta.dirname, "../credential-startup.js");
 
 export const WORKER_DESCRIPTOR_ENV = "HERDR_HARNESS_WORKER_DESCRIPTOR";
 export const REVIEW_DESCRIPTOR_ENV = "HERDR_HARNESS_REVIEW_DESCRIPTOR";

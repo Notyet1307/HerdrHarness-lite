@@ -24,6 +24,9 @@ export async function runRuntimePreflight(
       dockerHost = (await ctx.deps.preflight.probeDocker({ cwd: ctx.deps.config.localPath })).host;
     }
     const preclaimNeedsRpc = !executionSnapshot && lanes.some((lane) => rpcEnabled(ctx.deps.config, lane));
+    const preclaimNeedsCanonicalOAuth = !executionSnapshot && lanes.some((lane) => (
+      runtimeRole(ctx.deps.config, lane).credentialMode === "canonical-oauth"
+    ));
     const preclaimRuntime = preclaimNeedsRpc
       ? await ctx.deps.preflight.inspectPi({
           cwd: ctx.deps.config.localPath,
@@ -34,23 +37,29 @@ export async function runRuntimePreflight(
       && preclaimRuntime?.version !== QUALIFIED_CONTROLLED_COMPACTION_PI_VERSION) {
       throw new Error(`controlled Worker compaction requires Pi ${QUALIFIED_CONTROLLED_COMPACTION_PI_VERSION}`);
     }
-    const preclaimCredentialAgentDir = preclaimNeedsRpc
+    const preclaimCredentialAgentDir = preclaimNeedsRpc || preclaimNeedsCanonicalOAuth
       ? (await ctx.deps.preflight.assertNoAmbientSystemPrompt({ cwd: ctx.deps.config.localPath })).agentDir
+      : null;
+    const preclaimCredentialDomainId = preclaimNeedsCanonicalOAuth
+      ? (await ctx.deps.preflight.credentialDomain({ credentialAgentDir: preclaimCredentialAgentDir! })).credentialDomainId
       : null;
     for (const lane of lanes) {
       const useRpc = executionSnapshot?.adapter === "pi-rpc" || (!executionSnapshot && rpcEnabled(ctx.deps.config, lane));
       const role = runtimeRole(ctx.deps.config, lane);
-      const credentialMode = useRpc
-        ? executionSnapshot ? snapshotCredentialMode(executionSnapshot) : role.credentialMode
-        : undefined;
-      const credentialAgentDir = useRpc
+      const credentialMode = executionSnapshot
+        ? executionSnapshot.credentialDomainId ? "canonical-oauth" : useRpc ? snapshotCredentialMode(executionSnapshot) : undefined
+        : useRpc || role.credentialMode === "canonical-oauth" ? role.credentialMode : undefined;
+      const credentialAgentDir = useRpc || credentialMode === "canonical-oauth"
         ? executionSnapshot?.context?.agentDir ?? preclaimCredentialAgentDir ?? undefined
+        : undefined;
+      const credentialDomainId = credentialMode === "canonical-oauth"
+        ? executionSnapshot?.credentialDomainId ?? preclaimCredentialDomainId ?? undefined
         : undefined;
       const modelConfigs = executionSnapshot?.resources.filter((resource) => resource.kind === "model-config") ?? [];
       if (credentialMode === "canonical-model-config" && executionSnapshot && modelConfigs.length !== 1) {
         throw new Error("Reviewer RPC snapshot must bind exactly one models.json");
       }
-      const modelConfig = credentialMode === "canonical-model-config"
+      const modelConfig = useRpc && credentialMode === "canonical-model-config"
         ? modelConfigs[0] ?? executionResource("model-config", join(credentialAgentDir!, "models.json"))
         : undefined;
       const rpcHost = useRpc
@@ -67,6 +76,10 @@ export async function runRuntimePreflight(
         ...(useRpc ? { agentDir: executionSnapshot ? piRpcAgentDir(executionSnapshot) : resolve(ctx.deps.config.stateDir, "preflight", `pi-rpc-${lane}-agent`) } : {}),
         ...(credentialAgentDir ? { credentialAgentDir } : {}),
         ...(credentialMode ? { credentialMode } : {}),
+        ...(credentialDomainId ? { credentialDomainId } : {}),
+        ...(credentialMode === "canonical-oauth" && (executionSnapshot?.provider ?? role.provider)
+          ? { credentialProvider: executionSnapshot?.provider ?? role.provider! }
+          : {}),
         ...(modelConfig ? { modelConfig } : {}),
         ...(rpcHost ? { rpcHost } : {}),
       });
@@ -93,6 +106,9 @@ export async function verifyExecutionSnapshot(
       throw new Error("Pi agent directory changed after attempt preparation");
     }
     await ctx.deps.git.verifyTrustedContext(expected.context);
+    const credentialDomainId = expected.credentialDomainId
+      ? (await ctx.deps.preflight.credentialDomain({ credentialAgentDir: expected.context.agentDir })).credentialDomainId
+      : undefined;
     if (expected.dockerHost !== null) {
       const docker = await ctx.deps.preflight.probeDocker({ cwd: ctx.deps.config.localPath });
       if (docker.host !== expected.dockerHost) throw new Error("Docker host changed after attempt preparation");
@@ -107,6 +123,8 @@ export async function verifyExecutionSnapshot(
       compactionMode: expected.compactionMode,
       compactionPolicy: expected.compactionPolicy,
       credentialMode: expected.credentialMode,
+      ...(credentialDomainId ? { credentialDomainId } : {}),
+      ...(expected.axisConcurrency ? { axisConcurrency: expected.axisConcurrency } : {}),
       ...(expected.runtimeTimeouts ? { runtimeTimeouts: expected.runtimeTimeouts } : {}),
       ...(expected.runtimeDeadlineAt !== undefined ? { runtimeDeadlineAt: expected.runtimeDeadlineAt } : {}),
       ...(expected.validationTimeoutMs !== undefined ? { validationTimeoutMs: expected.validationTimeoutMs } : {}),

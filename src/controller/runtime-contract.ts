@@ -10,10 +10,19 @@ export function rpcEnabled(config: HarnessConfig, lane: Attempt["lane"]): boolea
 export function runtimeRole(config: HarnessConfig, lane: Attempt["lane"]): {
   argv: string[];
   credentialMode: PiRpcCredentialMode;
+  provider: string | null;
 } {
-  if (lane === "worker") return { argv: [...config.workerArgv], credentialMode: "canonical-oauth" };
+  if (lane === "worker") return {
+    argv: [...config.workerArgv],
+    credentialMode: "canonical-oauth",
+    provider: selector(config.workerArgv, "--provider") ?? "openai-codex",
+  };
   const selected = resolveReviewerProviderProfile(config.reviewerArgv, config.reviewerProviderProfiles);
-  return { argv: selected.argv, credentialMode: selected.credentialMode };
+  return {
+    argv: selected.argv,
+    credentialMode: selected.credentialMode,
+    provider: selector(selected.argv, "--provider"),
+  };
 }
 
 export function snapshotCredentialMode(snapshot: ExecutionSnapshot): PiRpcCredentialMode {
@@ -32,4 +41,10 @@ export function ponytailEnvironment(snapshot: ExecutionSnapshot): Record<string,
     PONYTAIL_HIDE_STATUS: "1",
     PONYTAIL_QUIET_STARTUP: "1",
   };
+}
+
+function selector(argv: readonly string[], flag: string): string | null {
+  const values = argv.flatMap((value, index) => value === flag && argv[index + 1] ? [argv[index + 1]!] : []);
+  if (values.length > 1) throw new Error(`${flag} must appear at most once`);
+  return values[0] ?? null;
 }

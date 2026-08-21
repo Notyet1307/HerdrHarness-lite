@@ -311,6 +311,13 @@ test("Pi RPC SDK host shares only canonical subscription OAuth and keeps setting
     assert.equal(existsSync(join(privateAgentDir, "models.json")), false);
     assert.equal(existsSync(join(privateAgentDir, "settings.json")), false);
 
+    const cached = runner.run(process.execPath, commandArgs, {
+      ...options,
+      env: { ...options.env, FAKE_PI_SDK_PROBE_FAIL: "1" },
+    });
+    assert.equal(cached.ok, true, cached.stderr);
+    assert.equal((JSON.parse(readFileSync(capturePath, "utf8")) as Record<string, unknown>).promptCount, undefined);
+
     const sentinel = "refresh_token_SENTINEL";
     const authFailure = runner.run(process.execPath, commandArgs, {
       ...options,
@@ -319,12 +326,28 @@ test("Pi RPC SDK host shares only canonical subscription OAuth and keeps setting
     assert.equal(authFailure.ok, false);
     assert.equal(authFailure.stderr.includes(sentinel), false);
 
+    const invalidated = runner.run(process.execPath, commandArgs, {
+      ...options,
+      env: { ...options.env, FAKE_PI_SDK_PROBE_FAIL: "1" },
+    });
+    assert.equal(invalidated.ok, false);
+    assert.match(invalidated.stdout, /"code":"oauth_probe_failed"/);
+
+    const refreshTimeout = runner.run(process.execPath, commandArgs, {
+      ...options,
+      env: { ...options.env, FAKE_PI_SDK_AUTH_TIMEOUT: "1" },
+    });
+    assert.equal(refreshTimeout.ok, false);
+    assert.match(refreshTimeout.stdout, /"code":"oauth_refresh_timeout"/);
+    assert.equal(refreshTimeout.stdout.includes("access_token_SENTINEL"), false);
+
     const lockContention = runner.run(process.execPath, commandArgs, {
       ...options,
       env: { ...options.env, FAKE_PI_SDK_OAUTH_LOCK_CONTENTION: "1" },
     });
     assert.equal(lockContention.ok, false);
-    assert.equal(lockContention.stderr, "FAIL: Pi RPC SDK host failed at model-runtime\n");
+    assert.equal(lockContention.stderr, "FAIL: Pi RPC SDK host failed at oauth-refresh\n");
+    assert.match(lockContention.stdout, /"code":"oauth_probe_failed"/);
 
     linkSync(authPath, join(root, "auth-hardlink.json"));
     const rejected = runner.run(process.execPath, commandArgs, options);

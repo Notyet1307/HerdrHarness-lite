@@ -11,6 +11,17 @@ export type ReviewerProviderSelection = {
   argv: string[];
 };
 
+/** Subscription OAuth serializes child startup; custom Providers keep their configured fan-out. */
+export function reviewerAxisConcurrency(input: {
+  credentialMode: PiRpcCredentialMode;
+  provider: string | null;
+  configured?: 1 | 2;
+}): 1 | 2 {
+  return input.credentialMode === "canonical-oauth" && input.provider === "openai-codex"
+    ? 1
+    : input.configured ?? 2;
+}
+
 /** Resolve and validate the one Reviewer provider selection bound into an Attempt snapshot. */
 export function resolveReviewerProviderProfile(
   reviewerArgv: readonly string[],

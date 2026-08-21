@@ -13,6 +13,7 @@ const exampleConfig = JSON.parse(readFileSync("harness.config.example.json", "ut
     active: string;
     profiles: Record<string, { credentialMode: string; provider: string; model: string }>;
   };
+  reviewer: { axisConcurrency: number };
 };
 
 test("Pi package exposes the focused Worker check, independent review skill, and child agent", () => {
@@ -48,8 +49,8 @@ test("Pi review adapter uses fresh foreground Attempt-private project reviewers"
   assert.match(skill, /`Skill`, `Read`, `Glob`, `PowerShell`/);
   assert.match(skill, /returns at most 12 KiB per\s+axis/);
   assert.match(skill, /stdout and stderr content is replaced by a fixed redaction marker/);
-  assert.match(skill, /`missingAxes` and `reusedAxes`/);
-  assert.match(skill, /For each missing axis, use one Pi `subagent` workflow call with one\s+task/);
+  assert.match(skill, /`missingAxes`, `reusedAxes`, and `axisConcurrency`/);
+  assert.match(skill, /When `axisConcurrency=1`, use one Pi `subagent` workflow call per\s+missing axis/);
   assert.match(skill, /atomically creates the\s+Attempt-private axis checkpoint/);
   assert.match(skill, /only the fresh\s+Attempt's successful `review_submit` is authoritative/);
   for (const forbidden of ["docs/agents/issue-tracker.md", "gh issue", "fetch the issue"]) {
@@ -99,6 +100,7 @@ test("example config pins the Worker and Reviewer Pi role contracts", () => {
   assert.deepEqual(flagValues(exampleConfig.workerArgv, "--thinking"), ["high"]);
   assert.deepEqual(flagValues(exampleConfig.reviewerArgv, "--thinking"), ["max"]);
   assert.equal(exampleConfig.reviewerRuntime, "pi-rpc");
+  assert.equal(exampleConfig.reviewer.axisConcurrency, 2);
   assert.equal(exampleConfig.reviewerProviderProfiles.active, "openai-subscription");
   assert.deepEqual(exampleConfig.reviewerProviderProfiles.profiles["openai-subscription"], {
     credentialMode: "canonical-oauth",

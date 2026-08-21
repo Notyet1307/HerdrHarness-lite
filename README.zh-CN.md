@@ -24,6 +24,7 @@ Fleet 是独立的进程生命周期层：每个项目对应一个单项目 Cont
 - Analyst 只有建议权；policy 或精确 human gate 才能授权恢复。
 - Pi RPC auto-retry 与 Pi 自有 auto-compaction 保持关闭。只有 Worker RPC 可使用 snapshot 绑定、最多一次的受控阈值压缩；Reviewer 压缩仍关闭。
 - 凭据不进入 result、receipt、ledger、文档或复制出的 credential 文件。
+- 多项目共享 canonical OAuth 时，以 auth realpath digest 绑定跨进程 startup lease；openai-codex Reviewer axes 默认串行，custom Provider 可配置 1 或 2。
 - Fleet 只管理项目进程，不写项目 workflow transition。
 - 单项目 `run` 响应 `SIGINT`/`SIGTERM`，中断 poll sleep 后通过正常 `finally` 释放 heartbeat 与 Controller lease。
 - 每个 Fleet 项目必须拥有独立 repo、source checkout、state、worktree root 和 Herdr session。

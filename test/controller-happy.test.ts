@@ -113,6 +113,18 @@ test("config allows Worker high, xhigh, or max and requires Reviewer max thinkin
     ids: new SequenceIds(),
     preflight: new FakeRuntimePreflight(),
   }), /reviewerArgv must enforce the Pi role contract: --thinking max is required/);
+  assert.throws(() => new HarnessController({
+    config: { ...config, reviewer: { axisConcurrency: 3 as never } },
+    store: new MemoryStore(),
+    github: new FakeGitHub([]),
+    git: new FakeGit(),
+    herdr: new FakeHerdr([]),
+    analyst: new FakeAnalyst(),
+    evidence: new FakeEvidence(),
+    clock: new FakeClock(),
+    ids: new SequenceIds(),
+    preflight: new FakeRuntimePreflight(),
+  }), /reviewer\.axisConcurrency must be 1 or 2/);
 });
 
 test("config rejects incomplete Pi role contracts", () => {
@@ -335,6 +347,10 @@ test("Attempt binds one immutable execution snapshot and ignores later config dr
   assert.equal(attempt?.executionSnapshot?.runtimeVersion, "0.84.0");
   assert.equal(attempt?.executionSnapshot?.resources.length, 4);
   assert.equal(attempt?.executionSnapshot?.sessionMode, "ephemeral");
+  assert.equal(attempt?.executionSnapshot?.credentialMode, "canonical-oauth");
+  assert.equal(attempt?.executionSnapshot?.credentialDomainId, preflight.credentialDomainId);
+  assert.equal(attempt?.contextEnvelope?.runtime.credentialMode, "canonical-oauth");
+  assert.equal(attempt?.contextEnvelope?.runtime.credentialDomainId, preflight.credentialDomainId);
   assert.deepEqual(attempt?.executionSnapshot?.runtimeTimeouts, {
     totalTimeoutMs: 12_000,
     noProgressTimeoutMs: 3_000,
@@ -642,6 +658,8 @@ test("Pi RPC routes Reviewer through the durable runtime with one bound custom m
     const reviewer = store.state.activeJob?.attempts.find((attempt) => attempt.lane === "reviewer");
     assert.equal(reviewer?.executionSnapshot?.adapter, "pi-rpc");
     assert.equal(reviewer?.executionSnapshot?.credentialMode, "canonical-model-config");
+    assert.equal(reviewer?.executionSnapshot?.axisConcurrency, 2);
+    assert.equal(reviewer?.executionSnapshot?.credentialDomainId, undefined);
     assert.deepEqual(reviewer?.executionSnapshot?.argv.slice(-2), ["--mode", "rpc"]);
     assert.equal(reviewer?.executionSnapshot?.resources.filter((resource) => resource.kind === "model-config").length, 1);
     const pane = herdr.prepared.find((entry) => entry.lane === "reviewer");
@@ -713,6 +731,8 @@ test("Pi RPC routes Reviewer through canonical subscription OAuth selected by an
     assert.equal(reviewer?.executionSnapshot?.model, "gpt-5.6-sol");
     assert.equal(reviewer?.executionSnapshot?.thinking, "max");
     assert.equal(reviewer?.executionSnapshot?.credentialMode, "canonical-oauth");
+    assert.equal(reviewer?.executionSnapshot?.axisConcurrency, 1);
+    assert.equal(reviewer?.executionSnapshot?.credentialDomainId, preflight.credentialDomainId);
     assert.equal(reviewer?.executionSnapshot?.resources.some((resource) => resource.kind === "model-config"), false);
     const probes = preflight.providerCalls.filter((call) => call.lane === "reviewer");
     assert.equal(probes.length, 2);

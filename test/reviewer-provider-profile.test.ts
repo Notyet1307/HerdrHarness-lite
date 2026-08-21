@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { resolveReviewerProviderProfile } from "../src/reviewer-provider-profile.js";
+import { resolveReviewerProviderProfile, reviewerAxisConcurrency } from "../src/reviewer-provider-profile.js";
 
 const reviewerArgv = [
   "--provider", "legacy-custom",
@@ -54,6 +54,23 @@ test("Reviewer provider profiles preserve legacy custom-provider behavior when o
     credentialMode: "canonical-model-config",
     argv: reviewerArgv,
   });
+});
+
+test("Reviewer axis policy forces openai subscription serial while custom Providers remain configurable", () => {
+  assert.equal(reviewerAxisConcurrency({
+    credentialMode: "canonical-oauth",
+    provider: "openai-codex",
+    configured: 2,
+  }), 1);
+  assert.equal(reviewerAxisConcurrency({
+    credentialMode: "canonical-model-config",
+    provider: "custom",
+    configured: 1,
+  }), 1);
+  assert.equal(reviewerAxisConcurrency({
+    credentialMode: "canonical-model-config",
+    provider: "custom",
+  }), 2);
 });
 
 test("Reviewer provider profiles reject stale, malformed, or unusable switches", () => {

@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  classifyPiRpcRunnerFailure,
   classifyProviderFailure,
   FAILURE_CODES,
   FAILURE_DOMAINS,
@@ -8,9 +9,11 @@ import {
   isSafePiRpcDiagnostic,
   makeSafeRuntimeDiagnostic,
   providerApi,
+  safePiRpcDiagnosticFromError,
   type PiRpcFailureCode,
   type ProviderFailureContext,
 } from "../src/pi-rpc-diagnostics.js";
+import { CredentialStartupError } from "../src/credential-startup.js";
 
 const context: ProviderFailureContext = {
   providerApi: "anthropic-messages",
@@ -63,6 +66,11 @@ test("runtime failure taxonomy exposes the stable cross-layer baseline", () => {
     "provider_network",
     "provider_timeout",
     "provider_continuation_lost",
+    "credential_lock_timeout",
+    "credential_lock_stale",
+    "oauth_refresh_timeout",
+    "oauth_missing",
+    "oauth_probe_failed",
     "rpc_protocol",
     "rpc_event_oversize",
     "rpc_terminal_missing",
@@ -129,6 +137,26 @@ test("runtime failure taxonomy exposes the stable cross-layer baseline", () => {
   });
   assert.equal(isSafePiRpcDiagnostic(deadline), true);
   assert.equal(isSafePiRpcDiagnostic({ ...deadline, code: "provider_timeout" }), false);
+});
+
+test("credential startup failures keep the five stable content-free codes", () => {
+  for (const code of [
+    "credential_lock_timeout",
+    "credential_lock_stale",
+    "oauth_refresh_timeout",
+    "oauth_missing",
+    "oauth_probe_failed",
+  ] as const) {
+    const classified = classifyPiRpcRunnerFailure(new CredentialStartupError(code), "handshake");
+    assert.equal(classified.failureDomain, "credential");
+    assert.equal(classified.failureCode, code);
+    assert.equal(classified.code, code);
+    assert.equal(classified.retryable, code === "credential_lock_timeout" || code === "oauth_refresh_timeout");
+    assert.equal(JSON.stringify(classified).includes("token"), false);
+    const runtime = safePiRpcDiagnosticFromError(new CredentialStartupError(code));
+    assert.equal(runtime?.code, code);
+    assert.equal(runtime?.stage, "startup");
+  }
 });
 
 test("canonical Codex Responses API remains identifiable in safe diagnostics", () => {

@@ -45,6 +45,115 @@ const reviewCall = {
   workflowScript: reviewWorkflowScript(),
 };
 
+test("Reviewer axis startup policy serializes OAuth and preserves custom Provider fan-out", async () => {
+  const extension = await import(pathToFileURL(resolve("pi/extensions/reviewer-tools.js")).href) as {
+    reviewerAxisStartupAllowed(concurrency: number, standardsComplete: boolean, axes: Array<string | null>): boolean;
+  };
+  assert.equal(extension.reviewerAxisStartupAllowed(1, false, ["Standards", "Spec"]), false);
+  assert.equal(extension.reviewerAxisStartupAllowed(1, false, ["Spec"]), false);
+  assert.equal(extension.reviewerAxisStartupAllowed(1, false, ["Standards"]), true);
+  assert.equal(extension.reviewerAxisStartupAllowed(1, true, ["Spec"]), true);
+  assert.equal(extension.reviewerAxisStartupAllowed(2, false, ["Standards", "Spec"]), true);
+});
+
+test("axisConcurrency=1 descriptor blocks dual launch and admits Standards then Spec checkpoints", async () => {
+  const root = mkdtempSync(join(tmpdir(), "herdr-review-serial-axis-"));
+  const source = join(root, "source");
+  const evidence = join(root, "evidence");
+  const resultPath = join(root, "result.json");
+  const descriptorPath = join(root, "descriptor.json");
+  const previous = {
+    descriptor: process.env.HERDR_HARNESS_REVIEW_DESCRIPTOR,
+    agentDir: process.env.PI_CODING_AGENT_DIR,
+    originalAgentDir: process.env.HERDR_HARNESS_REVIEW_ORIGINAL_PI_AGENT_DIR,
+    canonicalAgentDir: process.env.HERDR_HARNESS_REVIEW_CANONICAL_PI_AGENT_DIR,
+    subagentBinary: process.env.PI_SUBAGENT_PI_BINARY,
+    packageRoot: process.env.PI_SUBAGENTS_PI_CODING_AGENT_PACKAGE_ROOT,
+  };
+  try {
+    mkdirSync(source);
+    mkdirSync(evidence, { mode: 0o700 });
+    const runtime = prepareReviewRuntime(root, source);
+    const originalAgentDir = join(root, "original-agent");
+    const privateAgentDir = join(root, "top-level-private-agent");
+    mkdirSync(originalAgentDir);
+    mkdirSync(privateAgentDir);
+    const descriptor = withCheckpointValidationReceipt(root, {
+      version: 1,
+      jobId: "job-serial",
+      attemptId: "reviewer-serial",
+      reviewedHeadSha: "b".repeat(40),
+      piAgentDir: originalAgentDir,
+      ...runtime,
+      axisConcurrency: 1,
+      credentialDomainId: "a".repeat(64),
+      resultPath,
+      privateEvidenceDir: evidence,
+      initialContextBytes: 10_000,
+      contextBudgetBytes: REVIEWER_CONTEXT_BUDGET_BYTES,
+      contextBudgetReserveBytes: REVIEWER_CONTEXT_BUDGET_RESERVE_BYTES,
+    }, "passed");
+    writeFileSync(descriptorPath, JSON.stringify(descriptor));
+    process.env.HERDR_HARNESS_REVIEW_DESCRIPTOR = descriptorPath;
+    process.env.PI_CODING_AGENT_DIR = privateAgentDir;
+    process.env.HERDR_HARNESS_REVIEW_CANONICAL_PI_AGENT_DIR = originalAgentDir;
+    const configExtension = await import(pathToFileURL(resolve("pi/extensions/reviewer-subagent-config.js")).href) as { default(): void };
+    configExtension.default();
+
+    const tools = new Map<string, Tool>();
+    let toolCallHook: ToolCallHook | undefined;
+    let toolResultHook: ToolResultHook | undefined;
+    const extension = await import(pathToFileURL(resolve("pi/extensions/reviewer-tools.js")).href) as {
+      default(pi: {
+        registerTool(tool: Tool & { name: string }): void;
+        on(event: "tool_call" | "tool_result", hook: ToolCallHook | ToolResultHook): void;
+      }): void;
+    };
+    extension.default({
+      registerTool(tool) { tools.set(tool.name, tool); },
+      on(event, hook) {
+        if (event === "tool_call") toolCallHook = hook as ToolCallHook;
+        else toolResultHook = hook as ToolResultHook;
+      },
+    });
+    const preflight = JSON.parse((await tools.get("review_preflight")!.execute("preflight", {})).content[0]!.text) as {
+      axisConcurrency: number;
+    };
+    assert.equal(preflight.axisConcurrency, 1);
+    assert.equal((await toolCallHook!({ toolCallId: "dual", toolName: "subagent", input: { ...reviewCall } }))?.block, true);
+    const specFirst = { ...reviewCall, workflowScript: reviewWorkflowScript([reviewTasks[1]!]) };
+    assert.equal((await toolCallHook!({ toolCallId: "spec-first", toolName: "subagent", input: specFirst }))?.block, true);
+
+    const standards = { ...reviewCall, workflowScript: reviewWorkflowScript([reviewTasks[0]!]) };
+    assert.equal(await toolCallHook!({ toolCallId: "standards", toolName: "subagent", input: standards }), undefined);
+    const standardsTask = workflowEntries(standards.workflowScript)[0]!.task;
+    await toolResultHook!({
+      toolCallId: "standards",
+      toolName: "subagent",
+      input: standards,
+      content: [{ type: "text", text: "done" }],
+      isError: false,
+      details: { mode: "workflow", results: [{
+        agent: "herdr-harness-review-axis",
+        task: standardsTask,
+        exitCode: 0,
+        finalOutput: JSON.stringify({ status: "pass", summary: "Standards passed", findings: [], evidenceRefs: [] }),
+      }] },
+    });
+    assert.equal(existsSync(join(root, "standards-axis.json")), true);
+    const spec = { ...reviewCall, workflowScript: reviewWorkflowScript([reviewTasks[1]!]) };
+    assert.equal(await toolCallHook!({ toolCallId: "spec", toolName: "subagent", input: spec }), undefined);
+  } finally {
+    restoreEnv("HERDR_HARNESS_REVIEW_DESCRIPTOR", previous.descriptor);
+    restoreEnv("PI_CODING_AGENT_DIR", previous.agentDir);
+    restoreEnv("HERDR_HARNESS_REVIEW_ORIGINAL_PI_AGENT_DIR", previous.originalAgentDir);
+    restoreEnv("HERDR_HARNESS_REVIEW_CANONICAL_PI_AGENT_DIR", previous.canonicalAgentDir);
+    restoreEnv("PI_SUBAGENT_PI_BINARY", previous.subagentBinary);
+    restoreEnv("PI_SUBAGENTS_PI_CODING_AGENT_PACKAGE_ROOT", previous.packageRoot);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("Reviewer tools read one bound validation receipt and write one identity-bound result", async () => {
   const root = mkdtempSync(join(tmpdir(), "herdr-review-tools-"));
   const source = join(root, "source");
@@ -899,6 +1008,8 @@ function prepareReviewRuntime(root: string, reviewPath: string): {
   piSubagentWrapperDigest: string;
   piExecutable: string;
   piRuntimeVersion: string;
+  axisConcurrency: 2;
+  credentialDomainId: null;
 } {
   const runtimePath = join(root, "review-runtime");
   const reviewAxisAgentPath = join(runtimePath, ".agents", "herdr-harness-review-axis.md");
@@ -947,6 +1058,8 @@ function prepareReviewRuntime(root: string, reviewPath: string): {
     piSubagentWrapperDigest: wrapperHash.digest("hex"),
     piExecutable,
     piRuntimeVersion,
+    axisConcurrency: 2,
+    credentialDomainId: null,
   };
 }
 

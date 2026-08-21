@@ -110,6 +110,10 @@ export type ExecutionSnapshot = {
   compactionMode: "runtime-default" | "disabled" | "controlled-threshold";
   compactionPolicy?: ControlledCompactionPolicy;
   credentialMode: "runtime-default" | "canonical-oauth" | "canonical-model-config";
+  /** SHA-256 of canonical auth.json realpath; present only for canonical OAuth. */
+  credentialDomainId?: string;
+  /** Reviewer-only child-axis startup concurrency bound into the immutable plan. */
+  axisConcurrency?: 1 | 2;
   /** Missing only on snapshots prepared before bounded runtime deadlines. */
   runtimeTimeouts?: RuntimeTimeouts;
   /** Absolute Attempt deadline; missing only on snapshots prepared before bounded runtime deadlines. */
@@ -379,6 +383,8 @@ export type AttemptContextEnvelope = {
     compactionMode: ExecutionSnapshot["compactionMode"];
     compactionPolicy?: ControlledCompactionPolicy;
     credentialMode: ExecutionSnapshot["credentialMode"];
+    credentialDomainId?: string;
+    axisConcurrency?: 1 | 2;
     runtimeTimeouts?: RuntimeTimeouts;
     runtimeDeadlineAt?: string;
     validationTimeoutMs?: number;

@@ -8,9 +8,10 @@ import { renderAttemptPrompt } from "../prompts.js";
 import { reviewerCheckpointIdentity } from "../reviewer-checkpoints.js";
 import type { ControllerContext } from "./context.js";
 import { message, result, safeToken, trimSlash } from "./helpers.js";
-import { BUNDLED_REVIEW_AXIS_AGENT, PI_RPC_RUNNER, PI_RPC_SDK_ENTRY } from "./resources.js";
+import { BUNDLED_REVIEW_AXIS_AGENT, CREDENTIAL_STARTUP_LAUNCHER, PI_RPC_RUNNER, PI_RPC_SDK_ENTRY } from "./resources.js";
 import { rpcEnabled, runtimeRole } from "./runtime-contract.js";
 import { configuredRuntimeTimeouts, configuredValidationTimeoutMs } from "../runtime-timeouts.js";
+import { reviewerAxisConcurrency } from "../reviewer-provider-profile.js";
 import type { TickResult } from "./types.js";
 
 export async function prepareAttempt(ctx: ControllerContext, state: HarnessState, job: Job, lane: Attempt["lane"]): Promise<TickResult> {
@@ -83,6 +84,18 @@ export async function prepareAttempt(ctx: ControllerContext, state: HarnessState
       throw new Error(`controlled Worker compaction requires Pi ${QUALIFIED_CONTROLLED_COMPACTION_PI_VERSION}`);
     }
     const role = runtimeRole(ctx.deps.config, lane);
+    const credentialDomainId = role.credentialMode === "canonical-oauth"
+      ? (await ctx.deps.preflight.credentialDomain({ credentialAgentDir: context.agentDir })).credentialDomainId
+      : undefined;
+    const axisConcurrency = lane === "reviewer"
+      ? reviewerAxisConcurrency({
+          credentialMode: role.credentialMode,
+          provider: role.provider,
+          ...(ctx.deps.config.reviewer?.axisConcurrency
+            ? { configured: ctx.deps.config.reviewer.axisConcurrency }
+            : {}),
+        })
+      : undefined;
     const runtimeTimeouts = configuredRuntimeTimeouts(ctx.deps.config, lane);
     executionSnapshot = buildExecutionSnapshot({
       adapter: useRpc ? "pi-rpc" : "herdr-pi-cli",
@@ -102,13 +115,18 @@ export async function prepareAttempt(ctx: ControllerContext, state: HarnessState
       ...(useRpc && lane === "worker"
         ? { compactionPolicy: WORKER_CONTROLLED_COMPACTION_POLICY }
         : {}),
-      credentialMode: useRpc ? role.credentialMode : "runtime-default",
+      credentialMode: role.credentialMode,
+      ...(credentialDomainId ? { credentialDomainId } : {}),
+      ...(axisConcurrency ? { axisConcurrency } : {}),
       runtimeTimeouts,
       runtimeDeadlineAt: new Date(Date.parse(now) + runtimeTimeouts.totalTimeoutMs).toISOString(),
       ...(lane === "reviewer" ? { validationTimeoutMs: configuredValidationTimeoutMs(ctx.deps.config) } : {}),
       dockerHost,
       extraResources: [
         ...(lane === "reviewer" ? [{ kind: "agent" as const, path: BUNDLED_REVIEW_AXIS_AGENT }] : []),
+        ...(lane === "reviewer" && credentialDomainId && !useRpc
+          ? [{ kind: "runtime" as const, path: CREDENTIAL_STARTUP_LAUNCHER }]
+          : []),
         ...(useRpc ? [
           { kind: "runtime" as const, path: PI_RPC_RUNNER },
           { kind: "runtime" as const, path: PI_RPC_SDK_ENTRY },

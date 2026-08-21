@@ -6,6 +6,8 @@ import { join } from "node:path";
 import { HerdrCli } from "../src/adapters/herdr-cli.js";
 import type { CommandResult, CommandRunner } from "../src/adapters/command.js";
 import type { Attempt } from "../src/model.js";
+import { credentialLeasePath, resolveCredentialDomain } from "../src/credential-startup.js";
+import { safePiRpcDiagnosticFromError } from "../src/pi-rpc-diagnostics.js";
 
 class RecordingRunner implements CommandRunner {
   calls: Array<{ command: string; args: string[] }> = [];
@@ -525,6 +527,52 @@ test("Herdr adapter rejects a wait response for a different tab", async () => {
 test("Herdr adapter requires an explicit named session", () => {
   const runner: CommandRunner = { run: () => fail("unexpected call") };
   assert.throws(() => new HerdrCli({ runner, session: "" }), /session is required/);
+});
+
+test("Herdr canonical OAuth startup surfaces a stable malformed-lease diagnostic before child launch", async () => {
+  const root = mkdtempSync(join(tmpdir(), "herdr-oauth-lock-"));
+  const agentDir = join(root, "agent");
+  mkdirSync(agentDir);
+  writeFileSync(join(agentDir, "auth.json"), "{}\n", { mode: 0o600 });
+  const domain = resolveCredentialDomain(join(agentDir, "auth.json"));
+  mkdirSync(domain.coordinationDir, { mode: 0o700 });
+  writeFileSync(credentialLeasePath(domain, "openai-codex"), "{}\n", { mode: 0o600 });
+  const calls: string[][] = [];
+  const herdr = new HerdrCli({
+    session: "test-session",
+    runner: {
+      run: (_command, args) => {
+        calls.push([...args]);
+        const plain = args.slice(2);
+        if (plain[0] === "agent" && plain[1] === "get") return fail(error("agent_not_found", "missing"));
+        return fail("unexpected call");
+      },
+    },
+  });
+  const attempt = {
+    ...boundedAttempt(root, 1_000, 100),
+    executionSnapshot: {
+      ...boundedAttempt(root, 1_000, 100).executionSnapshot,
+      provider: "openai-codex",
+      model: "gpt-test",
+      credentialMode: "canonical-oauth",
+      credentialDomainId: domain.credentialDomainId,
+      context: { agentDir, bundlePath: join(root, "attempt", "trusted-context.md") },
+    },
+  } as Attempt;
+  try {
+    await assert.rejects(
+      () => herdr.startAgent({
+        handle: { agentName: "hhw-oauth", paneId: "w1:p2", tabId: "w1:t2", workspaceId: "w1" },
+        attempt,
+        argv: [],
+      }),
+      (failure) => safePiRpcDiagnosticFromError(failure)?.code === "credential_lock_stale",
+    );
+    assert.equal(calls.some((args) => args.includes("start")), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("Herdr Worker and Reviewer waits use the Attempt-bound total deadline", async () => {
