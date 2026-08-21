@@ -9,7 +9,7 @@ import { GitCli } from "../src/adapters/git-cli.js";
 import { executionResourceDigest } from "../src/attempt-plan.js";
 import { type CommandResult, type CommandRunner, requireSuccess, SyncCommandRunner } from "../src/adapters/command.js";
 import { REVIEWER_CONTEXT_BUDGET_BYTES, REVIEWER_CONTEXT_BUDGET_RESERVE_BYTES } from "../src/reviewer-context-budget.js";
-import type { ReviewerValidationCheckpoint, ReviewerValidationReceipt } from "../src/model.js";
+import { digest, type ReviewerValidationCheckpoint, type ReviewerValidationReceipt } from "../src/model.js";
 import type { ReviewerCheckpointIdentity } from "../src/model.js";
 
 const head = "b".repeat(40);
@@ -279,17 +279,64 @@ test("Reviewer preparation exports a read-only exact-HEAD snapshot and writable 
     assert.equal(missingReceipt.result.status, "infrastructure-error");
     assert.match(missingReceipt.result.error ?? "", /executable is unavailable/);
     const timeoutRoot = join(root, "state", "attempt-timeout");
-    const timedOut = await new GitCli(runner, 25).runReviewerValidation({
+    const timedOut = await new GitCli(runner).runReviewerValidation({
       ...input,
       rootPath: timeoutRoot,
       resultPath: join(timeoutRoot, "result.json"),
       attemptId: "reviewer-timeout",
       checkpointIdentity: { ...input.checkpointIdentity, sourceAttemptId: "reviewer-timeout" },
       validationArgv: [process.execPath, resolve("test/fixtures/reviewer-validation.js"), "--sleep-ms", "200"],
+      totalTimeoutMs: 25,
+      sigtermGraceMs: 10,
+      sigkillGraceMs: 10,
     });
     const timedOutReceipt = requireValidationCheckpoint(timedOut.receipt);
     assert.equal(timedOutReceipt.result.status, "infrastructure-error");
     assert.equal(timedOutReceipt.result.timeout, true);
+    assert.match(timedOutReceipt.result.error ?? "", /attempt_deadline/);
+    const validationProgress = JSON.parse(readFileSync(join(timeoutRoot, "runtime", "validation-progress.json"), "utf8")) as Record<string, unknown>;
+    const { digest: validationProgressDigest, ...validationProgressBody } = validationProgress;
+    assert.equal(validationProgressDigest, digest(validationProgressBody));
+    assert.equal(validationProgress.lastProgressType, "validation_heartbeat");
+    assert.ok(Number(validationProgress.eventCount) >= 2);
+    assert.equal(existsSync(join(timeoutRoot, "runtime", "validation-terminate.json")), true);
+    assert.equal(existsSync(join(timeoutRoot, "runtime", "validation-terminating.json")), true);
+    assert.equal(existsSync(join(timeoutRoot, "runtime", "validation-terminated.json")), true);
+
+    const killRoot = join(root, "state", "attempt-kill");
+    const killed = await cli.runReviewerValidation({
+      ...input,
+      rootPath: killRoot,
+      resultPath: join(killRoot, "result.json"),
+      attemptId: "reviewer-kill",
+      checkpointIdentity: { ...input.checkpointIdentity, sourceAttemptId: "reviewer-kill" },
+      validationArgv: [process.execPath, resolve("test/fixtures/reviewer-validation.js"), "--sleep-ms", "10000", "--ignore-sigterm"],
+      totalTimeoutMs: 2_000,
+      noProgressTimeoutMs: 500,
+      sigtermGraceMs: 50,
+      sigkillGraceMs: 50,
+    });
+    const killedReceipt = requireValidationCheckpoint(killed.receipt);
+    assert.equal(killedReceipt.result.timeout, true);
+    assert.equal(killedReceipt.result.signal, "SIGKILL");
+    assert.match(killedReceipt.result.error ?? "", /attempt_deadline/);
+    const killedProgress = JSON.parse(readFileSync(join(killRoot, "runtime", "validation-progress.json"), "utf8")) as Record<string, unknown>;
+    assert.equal(processAlive(Number(killedProgress.childPid)), false);
+
+    const orphanRoot = join(root, "state", "attempt-orphan");
+    const orphanPidPath = join(root, "validation-orphan.pid");
+    const orphaned = await cli.runReviewerValidation({
+      ...input,
+      rootPath: orphanRoot,
+      resultPath: join(orphanRoot, "result.json"),
+      attemptId: "reviewer-orphan",
+      checkpointIdentity: { ...input.checkpointIdentity, sourceAttemptId: "reviewer-orphan" },
+      validationArgv: [process.execPath, resolve("test/fixtures/reviewer-validation.js"), "--spawn-orphan-pid-path", orphanPidPath],
+      sigtermGraceMs: 50,
+      sigkillGraceMs: 50,
+    });
+    assert.equal(requireValidationCheckpoint(orphaned.receipt).result.status, "passed");
+    assert.equal(processAlive(Number(readFileSync(orphanPidPath, "utf8"))), false);
     const preparedInput = {
       ...input,
       validationSource: input,
@@ -633,6 +680,16 @@ class WorkerRunner implements CommandRunner {
 
 function ok(stdout: string): CommandResult {
   return { ok: true, code: 0, stdout, stderr: "", error: null };
+}
+
+function processAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function baseSyncFixture(conflict: boolean): {

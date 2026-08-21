@@ -5,6 +5,7 @@ import type { HarnessConfig } from "../ports.js";
 import { pathsOverlap } from "../path-safety.js";
 import { message, validReviewerValidationArgv } from "./helpers.js";
 import { runtimeRole } from "./runtime-contract.js";
+import { configuredRuntimeTimeouts, configuredValidationTimeoutMs, validTimeoutMs } from "../runtime-timeouts.js";
 import {
   BUNDLED_CODE_REVIEW_SKILL,
   BUNDLED_FOCUSED_SELF_CHECK_SKILL,
@@ -60,6 +61,38 @@ export function validateHarnessConfig(config: HarnessConfig): void {
     if (config.preflight.dockerRequired !== undefined && typeof config.preflight.dockerRequired !== "boolean") {
       throw new Error("preflight.dockerRequired must be boolean");
     }
+  }
+  for (const [name, value] of [["worker", config.worker], ["reviewer", config.reviewer]] as const) {
+    if (value !== undefined && (!value || typeof value !== "object" || Array.isArray(value))) throw new Error(`${name} must be an object`);
+    if (value && Object.keys(value).some((key) => key !== "totalTimeoutMs" && key !== "noProgressTimeoutMs")) {
+      throw new Error(`${name} contains an unknown timeout field`);
+    }
+    const timeouts = configuredRuntimeTimeouts(config, name);
+    if (!validTimeoutMs(timeouts.totalTimeoutMs) || !validTimeoutMs(timeouts.noProgressTimeoutMs)) {
+      throw new Error(`${name} timeouts must be positive integers within the runtime timer limit`);
+    }
+    if (timeouts.noProgressTimeoutMs > timeouts.totalTimeoutMs) {
+      throw new Error(`${name}.noProgressTimeoutMs must not exceed ${name}.totalTimeoutMs`);
+    }
+  }
+  if (config.validation !== undefined && (!config.validation || typeof config.validation !== "object" || Array.isArray(config.validation))) {
+    throw new Error("validation must be an object");
+  }
+  if (config.validation && Object.keys(config.validation).some((key) => key !== "totalTimeoutMs")) {
+    throw new Error("validation contains an unknown timeout field");
+  }
+  if (!validTimeoutMs(configuredValidationTimeoutMs(config))) {
+    throw new Error("validation.totalTimeoutMs must be a positive integer within the runtime timer limit");
+  }
+  if (config.termination !== undefined && (!config.termination || typeof config.termination !== "object" || Array.isArray(config.termination))) {
+    throw new Error("termination must be an object");
+  }
+  if (config.termination && Object.keys(config.termination).some((key) => key !== "sigtermGraceMs" && key !== "sigkillGraceMs")) {
+    throw new Error("termination contains an unknown grace field");
+  }
+  const termination = configuredRuntimeTimeouts(config, "worker");
+  if (!validTimeoutMs(termination.sigtermGraceMs) || !validTimeoutMs(termination.sigkillGraceMs)) {
+    throw new Error("termination grace values must be positive integers within the runtime timer limit");
   }
   const reviewerRole = runtimeRole(config, "reviewer");
   for (const [name, runtime, argv] of [

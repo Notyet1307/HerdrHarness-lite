@@ -1,4 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { basename, dirname, join } from "node:path";
 import { digest, type AgentHandle, type Attempt, type AttemptResult, type ExecutionSnapshot } from "../model.js";
 import { executionResourceDigest } from "../attempt-plan.js";
@@ -12,6 +13,7 @@ import {
   sameJson,
   spoolPath,
   type PiRpcPlan,
+  writeAtomicJson,
   writeExclusiveJson,
 } from "../pi-rpc-spool.js";
 import { assertQualifiedPiRpcVersion } from "../compatibility.js";
@@ -22,10 +24,10 @@ import {
   safePiRpcDiagnosticFrom,
 } from "../pi-rpc-diagnostics.js";
 import { renderPinnedWorkerTaskData } from "../prompts.js";
+import { MAX_TIMEOUT_MS, snapshotRuntimeTimeouts } from "../runtime-timeouts.js";
 
 const READY_TIMEOUT_MS = 30_000;
 const ACCEPT_TIMEOUT_MS = 30_000;
-const TERMINATE_TIMEOUT_MS = 30_000;
 const POLL_MS = 50;
 const RUNNER_FAILURE_STAGES = new Set([
   "startup", "handshake", "await-dispatch", "dispatch", "agent-run",
@@ -62,6 +64,7 @@ type RuntimeReceipt = {
 
 type OwnerReceipt = RuntimeReceipt & { runnerPid: number };
 type ReadyReceipt = RuntimeReceipt & {
+  piPid?: number;
   autoRetryDisableAccepted: true;
   autoCompactionEnabled: false;
   compactionMode: ExecutionSnapshot["compactionMode"];
@@ -70,11 +73,34 @@ type ReadyReceipt = RuntimeReceipt & {
   isolatedAgentDir: string;
 };
 
+type RuntimeProgressReceipt = {
+  version: 1;
+  attemptId: string;
+  generation: string;
+  planDigest: string;
+  lastProgressAt: string;
+  lastProgressType: string;
+  eventCount: number;
+  elapsedMs: number;
+  resultPresent: boolean;
+  runnerPid: number;
+  childPid: number | null;
+  digest: string;
+};
+
 export class PiRpcRuntime implements AttemptRuntimePort {
-  constructor(private readonly host: Pick<HerdrPort, "runInPane">) {}
+  constructor(private readonly host: Pick<HerdrPort, "runInPane"> & Partial<Pick<HerdrPort, "close">>) {}
 
   async startAgent(input: { handle: AgentHandle; attempt: Attempt; cwd: string; argv: string[] }): Promise<void> {
     const plan = this.plan(input);
+    let remainingTotalMs: number;
+    try {
+      remainingTotalMs = remainingAttemptTimeout(input.attempt);
+    } catch (error) {
+      if (existsSync(spoolPath(plan.runtimeRoot, "owner.json"))) await this.cleanupRuntime(plan, input.handle, "attempt_deadline");
+      else await this.closePane(input.handle);
+      throw error;
+    }
     const runnerPath = boundRuntimeResource(plan, "pi-rpc-runner.js");
     const sdkEntryPath = boundRuntimeResource(plan, "pi-rpc-sdk-entry.js");
     ensurePrivateDirectory(plan.runtimeRoot);
@@ -87,23 +113,42 @@ export class PiRpcRuntime implements AttemptRuntimePort {
     const ready = readJsonIfExists<ReadyReceipt>(readyPath);
     if (ready) {
       assertReceipt(ready, plan, "ready");
-      if (!ready.ok) throw runtimeFailure(ready, "Pi RPC runner is not ready");
+      if (!ready.ok) {
+        if (!await this.cleanupRuntime(plan, input.handle, "runtime_stall")) throw terminalMissingFailure();
+        throw runtimeFailure(ready, "Pi RPC runner is not ready");
+      }
       assertRuntimePolicy(ready, plan);
       return;
     }
     const terminal = readJsonIfExists<RuntimeReceipt>(spoolPath(plan.runtimeRoot, "terminal.json"));
-    if (terminal) throw runtimeFailure(terminal, "Pi RPC runner terminated before ready");
+    if (terminal) {
+      if (!await this.cleanupRuntime(plan, input.handle, "runtime_stall")) throw terminalMissingFailure();
+      throw runtimeFailure(terminal, "Pi RPC runner terminated before ready");
+    }
 
     if (!existsSync(spoolPath(plan.runtimeRoot, "owner.json"))) {
       await this.host.runInPane({
         handle: input.handle,
         command: process.execPath,
         argv: [runnerPath, "--sdk-entry", sdkEntryPath, "--plan", planPath],
+        timeoutMs: Math.min(READY_TIMEOUT_MS, remainingTotalMs),
       });
     }
-    const observed = waitForReceipt(plan, "ready.json", READY_TIMEOUT_MS) as ReadyReceipt;
+    let observed: ReadyReceipt;
+    try {
+      observed = await waitForReceipt(plan, "ready.json", Math.min(READY_TIMEOUT_MS, remainingTotalMs)) as ReadyReceipt;
+    } catch {
+      const failure = deadlineObservationFailure(plan);
+      if (!await this.cleanupRuntime(plan, input.handle, failure.diagnostic.code ?? "runtime_stall")) {
+        throw terminalMissingFailure();
+      }
+      throw failure;
+    }
     assertReceipt(observed, plan, "ready");
-    if (!observed.ok) throw runtimeFailure(observed, "Pi RPC runner is not ready");
+    if (!observed.ok) {
+      if (!await this.cleanupRuntime(plan, input.handle, "runtime_stall")) throw terminalMissingFailure();
+      throw runtimeFailure(observed, "Pi RPC runner is not ready");
+    }
     assertRuntimePolicy(observed, plan);
   }
 
@@ -121,8 +166,21 @@ export class PiRpcRuntime implements AttemptRuntimePort {
       argv: input.attempt.executionSnapshot?.argv ?? [],
     }, false);
     const expectedSkill = input.attempt.lane === "worker" ? "implement" : "code-review";
-    if (input.skill !== expectedSkill) throw new Error(`Pi RPC ${input.attempt.lane} dispatch requires ${expectedSkill}`);
-    if (digest(input.text) !== input.attempt.promptDigest) throw new Error("Pi RPC prompt body differs from the immutable prompt digest");
+    let remainingTotalMs: number;
+    try {
+      remainingTotalMs = remainingAttemptTimeout(input.attempt);
+    } catch (error) {
+      await this.cleanupRuntime(plan, input.handle, "attempt_deadline");
+      throw error;
+    }
+    if (input.skill !== expectedSkill) {
+      await this.cleanupRuntime(plan, input.handle, "policy_violation");
+      throw new Error(`Pi RPC ${input.attempt.lane} dispatch requires ${expectedSkill}`);
+    }
+    if (digest(input.text) !== input.attempt.promptDigest) {
+      await this.cleanupRuntime(plan, input.handle, "policy_violation");
+      throw new Error("Pi RPC prompt body differs from the immutable prompt digest");
+    }
     const dispatch = {
       version: 1,
       attemptId: plan.attemptId,
@@ -134,13 +192,29 @@ export class PiRpcRuntime implements AttemptRuntimePort {
     };
     const path = spoolPath(plan.runtimeRoot, "dispatch.json");
     const existing = readJsonIfExists<typeof dispatch>(path);
-    if (existing && !sameJson(existing, dispatch)) throw new Error("Pi RPC dispatch identity changed after persistence");
+    if (existing && !sameJson(existing, dispatch)) {
+      await this.cleanupRuntime(plan, input.handle, "policy_violation");
+      throw new Error("Pi RPC dispatch identity changed after persistence");
+    }
     if (!existing) writeExclusiveJson(path, dispatch);
 
-    const accepted = waitForReceipt(plan, "accepted.json", ACCEPT_TIMEOUT_MS);
+    let accepted: RuntimeReceipt;
+    try {
+      accepted = await waitForReceipt(plan, "accepted.json", Math.min(ACCEPT_TIMEOUT_MS, remainingTotalMs));
+    } catch {
+      const failure = deadlineObservationFailure(plan);
+      if (!await this.cleanupRuntime(plan, input.handle, failure.diagnostic.code ?? "runtime_stall")) {
+        throw terminalMissingFailure();
+      }
+      throw failure;
+    }
     assertReceipt(accepted, plan, "accepted");
-    if (!accepted.ok) throw new Error(`Pi RPC prompt was rejected: ${accepted.error ?? "unknown failure"}`);
+    if (!accepted.ok) {
+      if (!await this.cleanupRuntime(plan, input.handle, "runtime_stall")) throw terminalMissingFailure();
+      throw new Error(`Pi RPC prompt was rejected: ${accepted.error ?? "unknown failure"}`);
+    }
     if ((accepted as RuntimeReceipt & { dispatchId?: string }).dispatchId !== input.dispatchId) {
+      await this.cleanupRuntime(plan, input.handle, "policy_violation");
       throw new Error("Pi RPC accepted receipt has a different dispatch identity");
     }
   }
@@ -160,14 +234,38 @@ export class PiRpcRuntime implements AttemptRuntimePort {
       argv: input.attempt.executionSnapshot?.argv ?? [],
     }, false);
     if (!existsSync(spoolPath(plan.runtimeRoot, "dispatch.json"))) {
+      await this.cleanupRuntime(plan, input.handle, "policy_violation");
       throw new Error("Pi RPC running Attempt has no durable dispatch intent; prompt will not be replayed");
     }
-    const terminal = waitForReceipt(plan, "terminal.json", null);
+    let terminal: RuntimeReceipt;
+    try {
+      terminal = await waitForReceipt(plan, "terminal.json", terminalTimeoutMs(plan));
+    } catch {
+      const failure = deadlineObservationFailure(plan);
+      if (!await this.cleanupRuntime(plan, input.handle, failure.diagnostic.code ?? "runtime_stall")) {
+        throw terminalMissingFailure();
+      }
+      throw failure;
+    }
     assertReceipt(terminal, plan, "terminal");
-    if (!terminal.ok) throw runtimeFailure(terminal, "Pi RPC policy/runtime failure");
-    const terminated = waitForReceipt(plan, "terminated.json", TERMINATE_TIMEOUT_MS);
+    let terminated: RuntimeReceipt;
+    try {
+      terminated = await waitForReceipt(plan, "terminated.json", terminationTimeoutMs(plan));
+    } catch {
+      if (!await this.cleanupRuntime(plan, input.handle, "runtime_stall")) throw terminalMissingFailure();
+      const fallback = readJsonIfExists<RuntimeReceipt>(spoolPath(plan.runtimeRoot, "terminated.json"));
+      if (!fallback) throw terminalMissingFailure();
+      terminated = fallback;
+    }
     assertReceipt(terminated, plan, "terminated");
-    if (!terminated.ok) throw new Error(`Pi RPC termination is not confirmed: ${terminated.error ?? "unknown failure"}`);
+    if (!terminated.ok) {
+      await this.closePane(input.handle);
+      throw new Error(`Pi RPC termination is not confirmed: ${terminated.error ?? "unknown failure"}`);
+    }
+    if (!terminal.ok) {
+      await this.closePane(input.handle);
+      throw runtimeFailure(terminal, "Pi RPC policy/runtime failure");
+    }
     const result = existsSync(input.resultPath)
       ? JSON.parse(readFileSync(input.resultPath, "utf8")) as AttemptResult
       : null;
@@ -180,6 +278,7 @@ export class PiRpcRuntime implements AttemptRuntimePort {
         failureCode: "result_missing",
         retryable: false,
       });
+      await this.closePane(input.handle);
       throw new PiRpcRuntimeFailure(
         `Pi RPC settled without a durable result (${formatSafePiRpcDiagnostic(diagnostic)})`,
         diagnostic,
@@ -206,23 +305,46 @@ export class PiRpcRuntime implements AttemptRuntimePort {
     const already = readJsonIfExists<RuntimeReceipt>(spoolPath(plan.runtimeRoot, "terminated.json"));
     if (already) {
       assertReceipt(already, plan, "terminated");
-      if (!already.ok) throw new Error(`Pi RPC termination failed: ${already.error ?? "unknown failure"}`);
+      if (!already.ok) {
+        await this.closePane(input.handle);
+        throw new Error(`Pi RPC termination failed: ${already.error ?? "unknown failure"}`);
+      }
       return;
     }
-    const intent = {
-      version: 1,
-      attemptId: plan.attemptId,
-      generation: plan.generation,
-      planDigest: plan.planDigest,
-      reason: input.reason,
-    };
-    const path = spoolPath(plan.runtimeRoot, "terminate.json");
-    const existing = readJsonIfExists<typeof intent>(path);
-    if (existing && !sameJson(existing, intent)) throw new Error("Pi RPC terminate intent changed after persistence");
-    if (!existing) writeExclusiveJson(path, intent);
-    const receipt = waitForReceipt(plan, "terminated.json", TERMINATE_TIMEOUT_MS);
-    assertReceipt(receipt, plan, "terminated");
-    if (!receipt.ok) throw new Error(`Pi RPC termination failed: ${receipt.error ?? "unknown failure"}`);
+    if (!await this.cleanupRuntime(plan, input.handle, input.reason)) {
+      throw new Error("Pi RPC termination failed: child and runner exit are not confirmed");
+    }
+  }
+
+  private async closePane(handle: AgentHandle): Promise<void> {
+    if (this.host.close) await this.host.close(handle);
+  }
+
+  private async cleanupRuntime(plan: PiRpcPlan, handle: AgentHandle, reason: string): Promise<boolean> {
+    const existing = readJsonIfExists<RuntimeReceipt>(spoolPath(plan.runtimeRoot, "terminated.json"));
+    if (existing) {
+      assertReceipt(existing, plan, "terminated");
+      await this.closePane(handle);
+      return existing.ok;
+    }
+    writeTerminateIntent(plan, reason);
+    if (!existsSync(spoolPath(plan.runtimeRoot, "owner.json"))) {
+      const confirmed = await forceRuntimeCleanup(plan);
+      await this.closePane(handle);
+      return confirmed;
+    }
+    let confirmed = false;
+    try {
+      const acknowledged = await waitForReceipt(plan, "terminating.json", runtimeTimeouts(plan).sigtermGraceMs);
+      assertReceipt(acknowledged, plan, "terminating");
+      const terminated = await waitForReceipt(plan, "terminated.json", terminationTimeoutMs(plan));
+      assertReceipt(terminated, plan, "terminated");
+      confirmed = terminated.ok;
+    } catch {
+      confirmed = await forceRuntimeCleanup(plan);
+    }
+    await this.closePane(handle);
+    return confirmed;
   }
 
   private plan(
@@ -270,18 +392,234 @@ export class PiRpcRuntime implements AttemptRuntimePort {
   }
 }
 
-function waitForReceipt(plan: PiRpcPlan, name: string, timeoutMs: number | null): RuntimeReceipt {
+async function waitForReceipt(plan: PiRpcPlan, name: string, timeoutMs: number): Promise<RuntimeReceipt> {
   const started = Date.now();
   for (;;) {
     const receipt = readJsonIfExists<RuntimeReceipt>(spoolPath(plan.runtimeRoot, name));
     if (receipt) return receipt;
-    const terminal = name === "terminal.json" ? null : readJsonIfExists<RuntimeReceipt>(spoolPath(plan.runtimeRoot, "terminal.json"));
+    const terminal = ["ready.json", "accepted.json", "terminating.json"].includes(name)
+      ? readJsonIfExists<RuntimeReceipt>(spoolPath(plan.runtimeRoot, "terminal.json"))
+      : null;
     if (terminal && !terminal.ok) return terminal;
     const owner = readJsonIfExists<OwnerReceipt>(spoolPath(plan.runtimeRoot, "owner.json"));
     if (owner && !processAlive(owner.runnerPid)) throw new Error(`Pi RPC runner exited before ${name}`);
-    if (timeoutMs !== null && Date.now() - started >= timeoutMs) throw new Error(`timed out waiting for Pi RPC ${name}`);
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, POLL_MS);
+    if (Date.now() - started >= timeoutMs) throw new Error(`timed out waiting for Pi RPC ${name}`);
+    await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, POLL_MS));
   }
+}
+
+function runtimeTimeouts(plan: PiRpcPlan) {
+  return snapshotRuntimeTimeouts(plan.snapshot, plan.snapshot.context!.lane);
+}
+
+function remainingAttemptTimeout(attempt: Attempt): number {
+  const snapshot = attempt.executionSnapshot;
+  if (!snapshot) throw new Error("Pi RPC Attempt has no execution snapshot");
+  const started = Date.parse(attempt.startedAt);
+  if (!Number.isFinite(started)) throw new Error("Pi RPC Attempt has an invalid start time");
+  const deadline = snapshot.runtimeDeadlineAt ? Date.parse(snapshot.runtimeDeadlineAt) : started + snapshotRuntimeTimeouts(snapshot, attempt.lane).totalTimeoutMs;
+  if (!Number.isFinite(deadline)) throw new Error("Pi RPC Attempt has an invalid runtime deadline");
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) {
+    const diagnostic = makeSafeRuntimeDiagnostic({
+      domain: "execution",
+      code: "attempt_deadline",
+      stage: "startup",
+      failureDomain: "runtime",
+      failureCode: "attempt_deadline",
+      retryable: false,
+    });
+    throw new PiRpcRuntimeFailure("Pi RPC Attempt ended with attempt_deadline before launch or dispatch", diagnostic);
+  }
+  return remaining;
+}
+
+function terminationTimeoutMs(plan: PiRpcPlan): number {
+  const timeouts = runtimeTimeouts(plan);
+  return Math.min(MAX_TIMEOUT_MS, timeouts.sigtermGraceMs + (3 * timeouts.sigkillGraceMs) + (2 * POLL_MS));
+}
+
+function terminalTimeoutMs(plan: PiRpcPlan): number {
+  const totalTimeoutMs = runtimeTimeouts(plan).totalTimeoutMs;
+  const elapsedMs = readRuntimeProgress(plan)?.elapsedMs ?? 0;
+  const remaining = plan.snapshot.runtimeDeadlineAt
+    ? Date.parse(plan.snapshot.runtimeDeadlineAt) - Date.now()
+    : totalTimeoutMs - elapsedMs;
+  return Math.max(POLL_MS, Math.min(MAX_TIMEOUT_MS, remaining + terminationTimeoutMs(plan)));
+}
+
+function writeTerminateIntent(plan: PiRpcPlan, reason: string): void {
+  const intent = {
+    version: 1,
+    attemptId: plan.attemptId,
+    generation: plan.generation,
+    planDigest: plan.planDigest,
+    reason,
+  };
+  const path = spoolPath(plan.runtimeRoot, "terminate.json");
+  const existing = readJsonIfExists<typeof intent>(path);
+  if (existing) {
+    if (
+      existing.version !== intent.version
+      || existing.attemptId !== intent.attemptId
+      || existing.generation !== intent.generation
+      || existing.planDigest !== intent.planDigest
+      || typeof existing.reason !== "string"
+    ) throw new Error("Pi RPC terminate intent changed after persistence");
+    return;
+  }
+  writeExclusiveJson(path, intent);
+}
+
+function deadlineObservationFailure(plan: PiRpcPlan): PiRpcRuntimeFailure {
+  const timeouts = runtimeTimeouts(plan);
+  const progress = readRuntimeProgress(plan);
+  const code = (plan.snapshot.runtimeDeadlineAt && Date.now() >= Date.parse(plan.snapshot.runtimeDeadlineAt))
+    || (progress && progress.elapsedMs >= timeouts.totalTimeoutMs)
+    ? "attempt_deadline"
+    : "runtime_stall";
+  const diagnostic = makeSafeRuntimeDiagnostic({
+    domain: code === "runtime_stall" ? "observation" : "execution",
+    code,
+    stage: "terminal-observation",
+    failureDomain: "runtime",
+    failureCode: code,
+    retryable: false,
+  });
+  return new PiRpcRuntimeFailure(`Pi RPC terminal observation exceeded the ${code}`, diagnostic);
+}
+
+function terminalMissingFailure(): PiRpcRuntimeFailure {
+  const diagnostic = makeSafeRuntimeDiagnostic({
+    domain: "observation",
+    code: "rpc_terminal_missing",
+    stage: "terminal-observation",
+    failureDomain: "runtime",
+    failureCode: "rpc_terminal_missing",
+    retryable: false,
+  });
+  return new PiRpcRuntimeFailure("Pi RPC rpc_terminal_missing: terminated receipt or process cleanup is not confirmed", diagnostic);
+}
+
+function readRuntimeProgress(plan: PiRpcPlan): RuntimeProgressReceipt | null {
+  const value = readJsonIfExists<RuntimeProgressReceipt>(spoolPath(plan.runtimeRoot, "runtime-progress.json"));
+  if (!value) return null;
+  const { digest: claimedDigest, ...body } = value;
+  if (
+    Object.keys(value).sort().join(",") !== "attemptId,childPid,digest,elapsedMs,eventCount,generation,lastProgressAt,lastProgressType,planDigest,resultPresent,runnerPid,version"
+    ||
+    value.version !== 1
+    || value.attemptId !== plan.attemptId
+    || value.generation !== plan.generation
+    || value.planDigest !== plan.planDigest
+    || !Number.isFinite(Date.parse(value.lastProgressAt))
+    || !/^[a-z][a-z0-9_]{0,63}$/.test(value.lastProgressType)
+    || !Number.isSafeInteger(value.eventCount) || value.eventCount < 0
+    || !Number.isSafeInteger(value.elapsedMs) || value.elapsedMs < 0
+    || typeof value.resultPresent !== "boolean"
+    || !validPid(value.runnerPid)
+    || (value.childPid !== null && !validPid(value.childPid))
+    || !/^[0-9a-f]{64}$/.test(claimedDigest)
+    || digest(body) !== claimedDigest
+  ) return null;
+  return value;
+}
+
+async function forceRuntimeCleanup(plan: PiRpcPlan): Promise<boolean> {
+  const owner = readJsonIfExists<OwnerReceipt>(spoolPath(plan.runtimeRoot, "owner.json"));
+  const ready = readJsonIfExists<ReadyReceipt>(spoolPath(plan.runtimeRoot, "ready.json"));
+  const progress = readRuntimeProgress(plan);
+  try {
+    if (owner) assertReceipt(owner, plan, "owner");
+    if (ready) assertReceipt(ready, plan, "ready");
+  } catch {
+    return false;
+  }
+  const runnerPid = owner && validPid(owner.runnerPid) && owner.runnerPid !== process.pid ? owner.runnerPid : null;
+  if (ready && validPid(ready.piPid) && progress?.childPid !== null && progress?.childPid !== undefined && progress.childPid !== ready.piPid) {
+    return false;
+  }
+  const childPid = progress?.childPid ?? (ready && validPid(ready.piPid) ? ready.piPid : null);
+  const childIdentityComplete = owner === null || progress !== null || (ready !== null && validPid(ready.piPid));
+  const timeouts = runtimeTimeouts(plan);
+  if (!runnerPid && !childPid) {
+    if (!childIdentityComplete) return false;
+    writeFallbackTerminated(plan);
+    return true;
+  }
+  try {
+    const runnerOwned = !runnerPid || !processAlive(runnerPid) || processCommandMatches(runnerPid, [
+      boundRuntimeResource(plan, "pi-rpc-runner.js"),
+      spoolPath(plan.runtimeRoot, "plan.json"),
+    ]);
+    const childOwned = !childPid || !processAlive(childPid) || processCommandMatches(childPid, [
+      boundRuntimeResource(plan, "pi-rpc-sdk-entry.js"),
+      spoolPath(plan.runtimeRoot, "pi-agent"),
+    ]);
+    if (!runnerOwned || !childOwned) return false;
+  } catch {
+    return false;
+  }
+  if (childPid && processGroupAlive(childPid)) signalGroup(childPid, "SIGTERM");
+  if (runnerPid && processAlive(runnerPid)) signalPid(runnerPid, "SIGTERM");
+  await delay(timeouts.sigtermGraceMs);
+  if (childPid && processGroupAlive(childPid)) signalGroup(childPid, "SIGKILL");
+  if (runnerPid && processAlive(runnerPid)) signalPid(runnerPid, "SIGKILL");
+  await delay(timeouts.sigkillGraceMs);
+  const confirmed = childIdentityComplete
+    && (!childPid || !processGroupAlive(childPid))
+    && (!runnerPid || !processAlive(runnerPid));
+  if (confirmed) writeFallbackTerminated(plan);
+  return confirmed;
+}
+
+function writeFallbackTerminated(plan: PiRpcPlan): void {
+  if (existsSync(spoolPath(plan.runtimeRoot, "terminated.json"))) return;
+  writeAtomicJson(spoolPath(plan.runtimeRoot, "terminated.json"), {
+    version: 1,
+    attemptId: plan.attemptId,
+    generation: plan.generation,
+    planDigest: plan.planDigest,
+    ok: true,
+    reason: "controller fallback process exit confirmed",
+    source: "controller-fallback",
+  });
+}
+
+function validPid(value: unknown): value is number {
+  return Number.isInteger(value) && Number(value) > 0;
+}
+
+function processGroupAlive(pid: number): boolean {
+  try {
+    process.kill(-pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function signalGroup(pid: number, signal: "SIGTERM" | "SIGKILL"): void {
+  try { process.kill(-pid, signal); } catch { /* Already exited. */ }
+}
+
+function signalPid(pid: number, signal: "SIGTERM" | "SIGKILL"): void {
+  try { process.kill(pid, signal); } catch { /* Already exited. */ }
+}
+
+function processCommandMatches(pid: number, expectedTokens: string[]): boolean {
+  const result = spawnSync("/bin/ps", ["-ww", "-p", String(pid), "-o", "command="], {
+    encoding: "utf8",
+    timeout: 2_000,
+    maxBuffer: 1024 * 1024,
+  });
+  if (result.error || result.status !== 0) return false;
+  const command = result.stdout.trim();
+  return command.length > 0 && expectedTokens.every((token) => command.includes(token));
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
 }
 
 function assertReceipt(receipt: RuntimeReceipt, plan: PiRpcPlan, label: string): void {

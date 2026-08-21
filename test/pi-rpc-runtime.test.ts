@@ -118,6 +118,7 @@ test("Pi RPC adapter never invents a missing dispatch and reports only sanitized
       retryable: true,
       childExit: { code: 0, signal: null },
     });
+    writeAtomicJson(join(plan.runtimeRoot, "terminated.json"), { ...receiptIdentity(plan), ok: true });
     await assert.rejects(() => new PiRpcRuntime({ runInPane: async () => undefined }).wait({
       handle: fixture.handle,
       attempt: fixture.attempt,
@@ -127,6 +128,159 @@ test("Pi RPC adapter never invents a missing dispatch and reports only sanitized
       expectedLane: "worker",
     }), /Pi RPC assistant ended with error \(class=rate_limit, retryable=yes, stage=agent-run, child=exit:0\)/);
   } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("Pi RPC terminal observation remains bounded without runner receipts", async () => {
+  const fixture = rpcFixture();
+  try {
+    const plan = fixture.plan();
+    Object.assign(plan.snapshot, {
+      runtimeTimeouts: {
+        totalTimeoutMs: 50,
+        noProgressTimeoutMs: 20,
+        sigtermGraceMs: 10,
+        sigkillGraceMs: 10,
+      },
+    });
+    const identity = receiptIdentity(plan);
+    writeExclusiveJson(join(plan.runtimeRoot, "plan.json"), plan);
+    writeExclusiveJson(join(plan.runtimeRoot, "dispatch.json"), { ...identity, dispatchId: plan.attemptId });
+    let closed = 0;
+    const started = Date.now();
+
+    await assert.rejects(() => new PiRpcRuntime({
+      runInPane: async () => undefined,
+      close: async () => { closed += 1; },
+    }).wait({
+      handle: fixture.handle,
+      attempt: fixture.attempt,
+      resultPath: fixture.attempt.resultPath,
+      expectedJobId: "job-1",
+      expectedAttemptId: fixture.attempt.id,
+      expectedLane: "worker",
+    }), /runtime_stall/);
+    assert.ok(Date.now() - started < 500);
+    assert.equal(closed, 1);
+    assert.equal(existsSync(join(plan.runtimeRoot, "terminate.json")), true);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("adapter fallback kills an unresponsive runner and detached SDK process group", async () => {
+  const fixture = rpcFixture();
+  let runner: ReturnType<typeof spawn> | null = null;
+  let sdk: ReturnType<typeof spawn> | null = null;
+  try {
+    const plan = fixture.plan();
+    Object.assign(plan.snapshot, {
+      runtimeTimeouts: {
+        totalTimeoutMs: 50,
+        noProgressTimeoutMs: 20,
+        sigtermGraceMs: 10,
+        sigkillGraceMs: 10,
+      },
+    });
+    const runnerReady = join(fixture.root, "runner-ready");
+    const sdkReady = join(fixture.root, "sdk-ready");
+    const keepAlive = "process.on('SIGTERM',()=>{});require('fs').writeFileSync(process.argv[1],'ready');setInterval(()=>{},1000)";
+    runner = spawn(process.execPath, [
+      "-e", keepAlive, runnerReady,
+      resolve("dist/src/pi-rpc-runner.js"), join(plan.runtimeRoot, "plan.json"),
+    ], { stdio: "ignore" });
+    sdk = spawn(process.execPath, [
+      "-e", keepAlive, sdkReady,
+      resolve("test/fixtures/pi-rpc-sdk-entry.js"), join(plan.runtimeRoot, "pi-agent"),
+    ], { detached: true, stdio: "ignore" });
+    const runnerExit = childExitWithin(runner, 1_000);
+    const sdkExit = childExitWithin(sdk, 1_000);
+    await waitForFile(runnerReady);
+    await waitForFile(sdkReady);
+    const identity = receiptIdentity(plan);
+    const progressBody = {
+      ...identity,
+      lastProgressAt: new Date().toISOString(),
+      lastProgressType: "dispatch_accepted",
+      eventCount: 0,
+      elapsedMs: 0,
+      resultPresent: false,
+      runnerPid: runner.pid!,
+      childPid: sdk.pid!,
+    };
+    writeExclusiveJson(join(plan.runtimeRoot, "plan.json"), plan);
+    writeExclusiveJson(join(plan.runtimeRoot, "dispatch.json"), { ...identity, dispatchId: plan.attemptId });
+    writeExclusiveJson(join(plan.runtimeRoot, "owner.json"), { ...identity, ok: true, runnerPid: runner.pid });
+    writeAtomicJson(join(plan.runtimeRoot, "ready.json"), { ...identity, ok: true, piPid: sdk.pid });
+    writeAtomicJson(join(plan.runtimeRoot, "runtime-progress.json"), { ...progressBody, digest: digest(progressBody) });
+    let closed = 0;
+
+    await assert.rejects(() => new PiRpcRuntime({
+      runInPane: async () => undefined,
+      close: async () => { closed += 1; },
+    }).wait({
+      handle: fixture.handle,
+      attempt: fixture.attempt,
+      resultPath: fixture.attempt.resultPath,
+      expectedJobId: "job-1",
+      expectedAttemptId: fixture.attempt.id,
+      expectedLane: "worker",
+    }), /runtime_stall/);
+
+    assert.ok(await runnerExit);
+    assert.ok(await sdkExit);
+    assert.equal(closed, 1);
+    assert.equal(readJson<{ source: string }>(join(plan.runtimeRoot, "terminated.json")).source, "controller-fallback");
+  } finally {
+    runner?.kill("SIGKILL");
+    sdk?.kill("SIGKILL");
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("adapter fallback never signals a PID whose live command is not Attempt-owned", async () => {
+  const fixture = rpcFixture();
+  let unrelated: ReturnType<typeof spawn> | null = null;
+  try {
+    const plan = fixture.plan();
+    Object.assign(plan.snapshot, {
+      runtimeTimeouts: { totalTimeoutMs: 50, noProgressTimeoutMs: 20, sigtermGraceMs: 10, sigkillGraceMs: 10 },
+    });
+    const readyPath = join(fixture.root, "unrelated-ready");
+    const keepAlive = "process.on('SIGTERM',()=>{});require('fs').writeFileSync(process.argv[1],'ready');setInterval(()=>{},1000)";
+    unrelated = spawn(process.execPath, ["-e", keepAlive, readyPath, "unrelated-command"], { stdio: "ignore" });
+    await waitForFile(readyPath);
+    const identity = receiptIdentity(plan);
+    const progressBody = {
+      ...identity,
+      lastProgressAt: new Date().toISOString(),
+      lastProgressType: "dispatch_accepted",
+      eventCount: 0,
+      elapsedMs: 0,
+      resultPresent: false,
+      runnerPid: unrelated.pid!,
+      childPid: null,
+    };
+    writeExclusiveJson(join(plan.runtimeRoot, "plan.json"), plan);
+    writeExclusiveJson(join(plan.runtimeRoot, "dispatch.json"), { ...identity, dispatchId: plan.attemptId });
+    writeExclusiveJson(join(plan.runtimeRoot, "owner.json"), { ...identity, ok: true, runnerPid: unrelated.pid });
+    writeAtomicJson(join(plan.runtimeRoot, "runtime-progress.json"), { ...progressBody, digest: digest(progressBody) });
+
+    await assert.rejects(() => new PiRpcRuntime({
+      runInPane: async () => undefined,
+      close: async () => undefined,
+    }).wait({
+      handle: fixture.handle,
+      attempt: fixture.attempt,
+      resultPath: fixture.attempt.resultPath,
+      expectedJobId: "job-1",
+      expectedAttemptId: fixture.attempt.id,
+      expectedLane: "worker",
+    }), /rpc_terminal_missing/);
+    assert.equal(processAlive(unrelated.pid!), true);
+  } finally {
+    unrelated?.kill("SIGKILL");
     rmSync(fixture.root, { recursive: true, force: true });
   }
 });
@@ -162,6 +316,7 @@ test("Pi RPC adapter propagates only validated structured diagnostics", async ()
       error: "Pi RPC assistant ended with error",
       ...terminalDiagnostic,
     });
+    writeAtomicJson(join(plan.runtimeRoot, "terminated.json"), { ...identity, ok: true });
 
     let failure: unknown;
     try {
@@ -241,6 +396,45 @@ test("a successful terminal receipt without a durable result is an acceptance fa
   }
 });
 
+test("terminal success without terminated receipt uses bounded fallback cleanup", async () => {
+  const fixture = rpcFixture();
+  try {
+    const plan = fixture.plan();
+    Object.assign(plan.snapshot, {
+      runtimeTimeouts: {
+        totalTimeoutMs: 500,
+        noProgressTimeoutMs: 100,
+        sigtermGraceMs: 10,
+        sigkillGraceMs: 10,
+      },
+    });
+    const identity = receiptIdentity(plan);
+    writeExclusiveJson(join(plan.runtimeRoot, "plan.json"), plan);
+    writeExclusiveJson(join(plan.runtimeRoot, "dispatch.json"), { ...identity, dispatchId: plan.attemptId });
+    writeAtomicJson(join(plan.runtimeRoot, "terminal.json"), { ...identity, ok: true, agentSettled: true });
+    writeFileSync(fixture.attempt.resultPath, `${JSON.stringify(workerResult(fixture.attempt.id))}\n`);
+    let closed = 0;
+
+    const observation = await new PiRpcRuntime({
+      runInPane: async () => undefined,
+      close: async () => { closed += 1; },
+    }).wait({
+      handle: fixture.handle,
+      attempt: fixture.attempt,
+      resultPath: fixture.attempt.resultPath,
+      expectedJobId: "job-1",
+      expectedAttemptId: fixture.attempt.id,
+      expectedLane: "worker",
+    });
+
+    assert.equal(observation.result?.attemptId, fixture.attempt.id);
+    assert.equal(closed, 1);
+    assert.equal(readJson<{ ok: boolean; source: string }>(join(plan.runtimeRoot, "terminated.json")).source, "controller-fallback");
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("Pi RPC adapter rejects an unqualified Pi protocol version", async () => {
   const fixture = rpcFixture();
   try {
@@ -251,6 +445,30 @@ test("Pi RPC adapter rejects an unqualified Pi protocol version", async () => {
       cwd: fixture.root,
       argv: fixture.snapshot.argv,
     }), /Pi RPC version 0\.85\.0 is not qualified/);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("Pi RPC refuses a pane launch after the Attempt total deadline", async () => {
+  const fixture = rpcFixture();
+  try {
+    fixture.snapshot.runtimeTimeouts = {
+      totalTimeoutMs: 10,
+      noProgressTimeoutMs: 5,
+      sigtermGraceMs: 5,
+      sigkillGraceMs: 5,
+    };
+    fixture.attempt.startedAt = new Date(Date.now() - 1_000).toISOString();
+    let launches = 0;
+
+    await assert.rejects(() => new PiRpcRuntime({ runInPane: async () => { launches += 1; } }).startAgent({
+      handle: fixture.handle,
+      attempt: fixture.attempt,
+      cwd: fixture.root,
+      argv: fixture.snapshot.argv,
+    }), /attempt_deadline/);
+    assert.equal(launches, 0);
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
   }
@@ -958,6 +1176,241 @@ test("fault fixtures reproduce runtime stalls and result-without-terminal observ
   }
 });
 
+test("provider silence ends at the no-progress deadline", async () => {
+  const fixture = rpcFixture();
+  let child: ReturnType<typeof spawn> | null = null;
+  try {
+    const plan = prepareWorkerFault(fixture);
+    Object.assign(plan.snapshot, {
+      runtimeTimeouts: {
+        totalTimeoutMs: 2_000,
+        noProgressTimeoutMs: 100,
+        sigtermGraceMs: 50,
+        sigkillGraceMs: 50,
+      },
+    });
+    writeAtomicJson(join(plan.runtimeRoot, "plan.json"), plan);
+    child = spawn(process.execPath, [
+      resolve("dist/src/pi-rpc-runner.js"),
+      "--sdk-entry", resolve("test/fixtures/pi-rpc-sdk-entry.js"),
+      "--plan", join(plan.runtimeRoot, "plan.json"),
+    ], {
+      cwd: fixture.root,
+      env: { ...process.env, FAKE_PI_PROVIDER_NEVER_RETURNS: "1" },
+      stdio: "ignore",
+    });
+
+    await waitForFile(join(plan.runtimeRoot, "accepted.json"));
+    const exit = await childExitWithin(child, 1_000);
+    assert.ok(exit, "runner did not enforce the no-progress deadline");
+    assert.equal(exit.code, 0);
+    assert.deepEqual(stableFailure(readJson<Record<string, unknown>>(join(plan.runtimeRoot, "terminal.json"))), {
+      domain: "observation",
+      code: "runtime_stall",
+      stage: "agent-run",
+      retryable: false,
+    });
+    assert.equal(readJson<{ ok: boolean }>(join(plan.runtimeRoot, "terminated.json")).ok, true);
+    assert.equal(existsSync(join(plan.runtimeRoot, "terminate.json")), true);
+    assert.equal(existsSync(join(plan.runtimeRoot, "terminating.json")), true);
+    const progress = readJson<Record<string, unknown>>(join(plan.runtimeRoot, "runtime-progress.json"));
+    const { digest: progressDigest, ...progressBody } = progress;
+    assert.equal(progressDigest, digest(progressBody));
+    assert.equal(progress.lastProgressType, "terminal_receipt");
+    assert.equal(progress.resultPresent, false);
+    assert.ok(Number(progress.eventCount) >= 3);
+    assert.equal(processAlive(Number(progress.runnerPid)), false);
+    assert.equal(processAlive(Number(progress.childPid)), false);
+  } finally {
+    child?.kill("SIGKILL");
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("tool progress refreshes no-progress while the total deadline still wins", async () => {
+  const fixture = rpcFixture();
+  let child: ReturnType<typeof spawn> | null = null;
+  try {
+    const plan = prepareWorkerFault(fixture);
+    Object.assign(plan.snapshot, {
+      runtimeTimeouts: {
+        totalTimeoutMs: 300,
+        noProgressTimeoutMs: 80,
+        sigtermGraceMs: 50,
+        sigkillGraceMs: 50,
+      },
+    });
+    writeAtomicJson(join(plan.runtimeRoot, "plan.json"), plan);
+    child = spawn(process.execPath, [
+      resolve("dist/src/pi-rpc-runner.js"),
+      "--sdk-entry", resolve("test/fixtures/pi-rpc-sdk-entry.js"),
+      "--plan", join(plan.runtimeRoot, "plan.json"),
+    ], {
+      cwd: fixture.root,
+      env: { ...process.env, FAKE_PI_CONTINUOUS_TOOL_OUTPUT: "1", FAKE_PI_PROGRESS_INTERVAL_MS: "20" },
+      stdio: "ignore",
+    });
+
+    await waitForFile(join(plan.runtimeRoot, "accepted.json"));
+    const exit = await childExitWithin(child, 1_000);
+    assert.ok(exit, "runner did not enforce the total deadline");
+    assert.deepEqual(stableFailure(readJson<Record<string, unknown>>(join(plan.runtimeRoot, "terminal.json"))), {
+      domain: "execution",
+      code: "attempt_deadline",
+      stage: "agent-run",
+      retryable: false,
+    });
+    const progress = readJson<Record<string, unknown>>(join(plan.runtimeRoot, "runtime-progress.json"));
+    assert.ok(Number(progress.eventCount) > 5);
+  } finally {
+    child?.kill("SIGKILL");
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("the total deadline also bounds an RPC handshake command", async () => {
+  const fixture = rpcFixture();
+  let child: ReturnType<typeof spawn> | null = null;
+  try {
+    const plan = prepareWorkerFault(fixture, false);
+    Object.assign(plan.snapshot, {
+      runtimeTimeouts: {
+        totalTimeoutMs: 5_000,
+        noProgressTimeoutMs: 100,
+        sigtermGraceMs: 50,
+        sigkillGraceMs: 50,
+      },
+      runtimeDeadlineAt: new Date(Date.now() + 150).toISOString(),
+    });
+    writeAtomicJson(join(plan.runtimeRoot, "plan.json"), plan);
+    child = spawn(process.execPath, [
+      resolve("dist/src/pi-rpc-runner.js"),
+      "--sdk-entry", resolve("test/fixtures/pi-rpc-sdk-entry.js"),
+      "--plan", join(plan.runtimeRoot, "plan.json"),
+    ], {
+      cwd: fixture.root,
+      env: { ...process.env, FAKE_PI_HANG_COMMAND: "get_state" },
+      stdio: "ignore",
+    });
+
+    assert.ok(await childExitWithin(child, 1_000));
+    assert.deepEqual(stableFailure(readJson<Record<string, unknown>>(join(plan.runtimeRoot, "terminal.json"))), {
+      domain: "execution",
+      code: "attempt_deadline",
+      stage: "handshake",
+      retryable: false,
+    });
+  } finally {
+    child?.kill("SIGKILL");
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("a durable result without terminal still times out and closes the owned pane", async () => {
+  const fixture = rpcFixture();
+  let child: ReturnType<typeof spawn> | null = null;
+  try {
+    const plan = prepareWorkerFault(fixture);
+    Object.assign(plan.snapshot, {
+      runtimeTimeouts: {
+        totalTimeoutMs: 2_000,
+        noProgressTimeoutMs: 100,
+        sigtermGraceMs: 50,
+        sigkillGraceMs: 50,
+      },
+    });
+    writeAtomicJson(join(plan.runtimeRoot, "plan.json"), plan);
+    child = spawn(process.execPath, [
+      resolve("dist/src/pi-rpc-runner.js"),
+      "--sdk-entry", resolve("test/fixtures/pi-rpc-sdk-entry.js"),
+      "--plan", join(plan.runtimeRoot, "plan.json"),
+    ], {
+      cwd: fixture.root,
+      env: {
+        ...process.env,
+        FAKE_PI_RESULT_BEFORE_STALL: "1",
+        FAKE_PI_RESULT_PATH: fixture.attempt.resultPath,
+        FAKE_PI_JOB_ID: "job-1",
+        FAKE_PI_ATTEMPT_ID: fixture.attempt.id,
+      },
+      stdio: "ignore",
+    });
+
+    await waitForFile(fixture.attempt.resultPath);
+    assert.ok(await childExitWithin(child, 1_000));
+    let closed = 0;
+    await assert.rejects(() => new PiRpcRuntime({
+      runInPane: async () => undefined,
+      close: async () => { closed += 1; },
+    }).wait({
+      handle: fixture.handle,
+      attempt: fixture.attempt,
+      resultPath: fixture.attempt.resultPath,
+      expectedJobId: "job-1",
+      expectedAttemptId: fixture.attempt.id,
+      expectedLane: "worker",
+    }), /runtime_stall/);
+    assert.equal(closed, 1);
+    assert.equal(readJson<{ resultPresent: boolean }>(join(plan.runtimeRoot, "runtime-progress.json")).resultPresent, true);
+  } finally {
+    child?.kill("SIGKILL");
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("an unresponsive SDK host is escalated through SIGTERM to SIGKILL", async () => {
+  const fixture = rpcFixture();
+  let child: ReturnType<typeof spawn> | null = null;
+  try {
+    const plan = prepareWorkerFault(fixture);
+    Object.assign(plan.snapshot, {
+      runtimeTimeouts: {
+        totalTimeoutMs: 2_000,
+        noProgressTimeoutMs: 100,
+        sigtermGraceMs: 50,
+        sigkillGraceMs: 50,
+      },
+    });
+    writeAtomicJson(join(plan.runtimeRoot, "plan.json"), plan);
+    child = spawn(process.execPath, [
+      resolve("dist/src/pi-rpc-runner.js"),
+      "--sdk-entry", resolve("test/fixtures/pi-rpc-sdk-entry.js"),
+      "--plan", join(plan.runtimeRoot, "plan.json"),
+    ], {
+      cwd: fixture.root,
+      env: {
+        ...process.env,
+        FAKE_PI_PROVIDER_NEVER_RETURNS: "1",
+        FAKE_PI_IGNORE_ABORT: "1",
+        FAKE_PI_IGNORE_SIGTERM: "1",
+      },
+      stdio: "ignore",
+    });
+
+    await waitForFile(join(plan.runtimeRoot, "accepted.json"));
+    assert.ok(await childExitWithin(child, 1_000));
+    const terminal = readJson<Record<string, unknown>>(join(plan.runtimeRoot, "terminal.json"));
+    assert.deepEqual(terminal.childExit, { code: null, signal: "SIGKILL" });
+    assert.equal(readJson<{ ok: boolean }>(join(plan.runtimeRoot, "terminated.json")).ok, true);
+  } finally {
+    child?.kill("SIGKILL");
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("runner removes an SDK grandchild after the direct host settles", () => {
+  const fixture = rpcFixture();
+  try {
+    const orphanPidPath = join(fixture.root, "orphan.pid");
+    const { execution } = runWorkerFault(fixture, { FAKE_PI_ORPHAN_PID_PATH: orphanPidPath });
+    assert.equal(execution.ok, true, execution.stderr);
+    const orphanPid = Number(readFileSync(orphanPidPath, "utf8"));
+    assert.equal(processAlive(orphanPid), false);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("pre-dispatch termination still writes a classified failure receipt", async () => {
   const fixture = rpcFixture();
   let child: ReturnType<typeof spawn> | null = null;
@@ -1403,7 +1856,7 @@ function rpcFixture(): {
     handle,
     result: null,
     reconciliationAttempts: 0,
-    startedAt: "2026-08-09T00:00:00.000Z",
+    startedAt: new Date().toISOString(),
     completedAt: null,
   };
   const plan = (overrides: Partial<Pick<ExecutionSnapshot, "executable" | "argv">> = {}): PiRpcPlan => {
@@ -1548,6 +2001,26 @@ async function waitForFile(path: string): Promise<void> {
   while (!existsSync(path)) {
     if (Date.now() >= deadline) throw new Error(`timed out waiting for ${path}`);
     await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, 20));
+  }
+}
+
+async function childExitWithin(child: ReturnType<typeof spawn>, timeoutMs: number): Promise<{ code: number | null; signal: string | null } | null> {
+  return new Promise((resolveExit) => {
+    const timer = setTimeout(() => resolveExit(null), timeoutMs);
+    child.on("exit", (code: number | null, signal: string | null) => {
+      clearTimeout(timer);
+      resolveExit({ code, signal });
+    });
+  });
+}
+
+function processAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
   }
 }
 

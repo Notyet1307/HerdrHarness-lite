@@ -84,6 +84,15 @@ export function buildAttemptContextEnvelope(input: {
         ? { compactionPolicy: { ...input.executionSnapshot.compactionPolicy } }
         : {}),
       credentialMode: input.executionSnapshot.credentialMode,
+      ...(input.executionSnapshot.runtimeTimeouts
+        ? { runtimeTimeouts: { ...input.executionSnapshot.runtimeTimeouts } }
+        : {}),
+      ...(input.executionSnapshot.runtimeDeadlineAt !== undefined
+        ? { runtimeDeadlineAt: input.executionSnapshot.runtimeDeadlineAt }
+        : {}),
+      ...(input.executionSnapshot.validationTimeoutMs !== undefined
+        ? { validationTimeoutMs: input.executionSnapshot.validationTimeoutMs }
+        : {}),
     },
     writeback: input.attempt.lane === "worker"
       ? { tool: "worker_submit", statuses: ["completed", "blocked", "failed"] }

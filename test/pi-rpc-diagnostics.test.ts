@@ -67,6 +67,7 @@ test("runtime failure taxonomy exposes the stable cross-layer baseline", () => {
     "rpc_event_oversize",
     "rpc_terminal_missing",
     "runtime_stall",
+    "attempt_deadline",
     "child_exit",
     "tool_contract",
     "result_missing",
@@ -117,6 +118,17 @@ test("runtime failure taxonomy exposes the stable cross-layer baseline", () => {
   });
   assert.equal(isSafePiRpcDiagnostic(terminalMissing), true);
   assert.equal(isSafePiRpcDiagnostic({ ...terminalMissing, failureCode: "child_exit_after_settled" }), false);
+
+  const deadline = makeSafeRuntimeDiagnostic({
+    domain: "execution",
+    code: "attempt_deadline",
+    stage: "agent-run",
+    failureDomain: "runtime",
+    failureCode: "attempt_deadline",
+    retryable: false,
+  });
+  assert.equal(isSafePiRpcDiagnostic(deadline), true);
+  assert.equal(isSafePiRpcDiagnostic({ ...deadline, code: "provider_timeout" }), false);
 });
 
 test("canonical Codex Responses API remains identifiable in safe diagnostics", () => {

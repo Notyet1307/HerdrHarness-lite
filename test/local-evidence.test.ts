@@ -49,6 +49,19 @@ test("advanced evidence separates dirty worktree progress and exposes only safe 
         willRetry: false,
       },
     }));
+    writeFileSync(join(runtime, "runtime-progress.json"), JSON.stringify({
+      version: 1,
+      attemptId,
+      lastProgressAt: "2026-08-11T00:04:00.000Z",
+      lastProgressType: "tool_execution_end",
+      eventCount: 9,
+      elapsedMs: 240_000,
+      resultPresent: false,
+      runnerPid: 123,
+      childPid: 124,
+      digest: "b".repeat(64),
+      providerResponse: "MUST_NOT_LEAK",
+    }));
 
     const outputs = new Map([
       ["status --short --branch", "## agent/test\nM  staged.ts\n M unstaged.ts\n?? note.md\n"],
@@ -118,6 +131,7 @@ test("advanced evidence separates dirty worktree progress and exposes only safe 
     assert.match(runtimeEvidence.summary, /"domain":"execution"/);
     assert.match(runtimeEvidence.summary, /canonical-oauth/);
     assert.match(runtimeEvidence.summary, /controlled-threshold/);
+    assert.match(runtimeEvidence.summary, /tool_execution_end/);
     assert.match(runtimeEvidence.summary, /"tokensBefore":80000/);
     assert.match(runtimeEvidence.summary, new RegExp(`"summaryDigest":"${"a".repeat(64)}"`));
     assert.equal(runtimeEvidence.summary.includes("MUST_NOT_LEAK"), false);

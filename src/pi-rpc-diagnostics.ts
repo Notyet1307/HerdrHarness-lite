@@ -51,6 +51,7 @@ export const PI_RPC_FAILURE_CODES = [
   "rpc_event_oversize",
   "rpc_terminal_missing",
   "runtime_stall",
+  "attempt_deadline",
   "runtime_terminated",
   "tool_contract",
   "result_missing",
@@ -87,6 +88,7 @@ export const FAILURE_CODES = [
   "rpc_terminal_missing",
   "rpc_transport",
   "runtime_stall",
+  "attempt_deadline",
   "runtime_terminated",
   "runtime_internal",
   "child_exit",
@@ -604,6 +606,12 @@ function stableRunnerFailure(
   if (failureDomain === "rpc_transport") return { domain: "observation", code: "rpc_transport", stage };
   if (failureDomain === "child_process") return { domain: "execution", code: "child_exit", stage };
   if (failureDomain === "credential") return { domain: "execution", code: "credential_integrity", stage };
+  if (failureDomain === "runtime") {
+    if (failureCode === "runtime_stall") return { domain: "observation", code: "runtime_stall", stage };
+    if (failureCode === "attempt_deadline") return { domain: "execution", code: "attempt_deadline", stage };
+    if (failureCode === "rpc_terminal_missing") return { domain: "observation", code: "rpc_terminal_missing", stage };
+    if (failureCode === "runtime_terminated") return { domain: "execution", code: "runtime_terminated", stage };
+  }
   return { domain: "execution", code: "runtime_internal", stage };
 }
 
@@ -655,6 +663,8 @@ function stableIdentityMatches(diagnostic: SafeRuntimeDiagnostic & FailureClassi
   if (diagnostic.failureDomain === "runtime") {
     return diagnostic.failureCode === "runtime_stall"
       ? same("observation", "runtime_stall")
+      : diagnostic.failureCode === "attempt_deadline"
+        ? same("execution", "attempt_deadline")
       : diagnostic.failureCode === "rpc_terminal_missing"
         ? same("observation", "rpc_terminal_missing")
         : diagnostic.failureCode === "runtime_terminated" && same("execution", "runtime_terminated");

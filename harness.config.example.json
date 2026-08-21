@@ -11,6 +11,21 @@
   "maxAnalystTurns": 3,
   "workerRuntime": "herdr-pi-cli",
   "reviewerRuntime": "pi-rpc",
+  "worker": {
+    "totalTimeoutMs": 5400000,
+    "noProgressTimeoutMs": 900000
+  },
+  "reviewer": {
+    "totalTimeoutMs": 2700000,
+    "noProgressTimeoutMs": 600000
+  },
+  "validation": {
+    "totalTimeoutMs": 1800000
+  },
+  "termination": {
+    "sigtermGraceMs": 10000,
+    "sigkillGraceMs": 5000
+  },
   "reviewerProviderProfiles": {
     "active": "openai-subscription",
     "profiles": {

@@ -305,7 +305,12 @@ test("runtime preflight fails before claim and does not reserve an issue", async
 test("Attempt binds one immutable execution snapshot and ignores later config drift", async () => {
   const store = new MemoryStore();
   const herdr = new FakeHerdr([{ lane: "worker", status: "completed", headSha: "b".repeat(40) }]);
-  const runtimeConfig: HarnessConfig = { ...config, workerArgv: [...validWorkerArgv] };
+  const runtimeConfig: HarnessConfig = {
+    ...config,
+    workerArgv: [...validWorkerArgv],
+    worker: { totalTimeoutMs: 12_000, noProgressTimeoutMs: 3_000 },
+    termination: { sigtermGraceMs: 500, sigkillGraceMs: 250 },
+  };
   const preflight = new FakeRuntimePreflight();
   const controller = new HarnessController({
     config: runtimeConfig,
@@ -330,6 +335,18 @@ test("Attempt binds one immutable execution snapshot and ignores later config dr
   assert.equal(attempt?.executionSnapshot?.runtimeVersion, "0.84.0");
   assert.equal(attempt?.executionSnapshot?.resources.length, 4);
   assert.equal(attempt?.executionSnapshot?.sessionMode, "ephemeral");
+  assert.deepEqual(attempt?.executionSnapshot?.runtimeTimeouts, {
+    totalTimeoutMs: 12_000,
+    noProgressTimeoutMs: 3_000,
+    sigtermGraceMs: 500,
+    sigkillGraceMs: 250,
+  });
+  assert.equal(
+    Date.parse(attempt?.executionSnapshot?.runtimeDeadlineAt ?? "") - Date.parse(attempt?.startedAt ?? ""),
+    12_000,
+  );
+  assert.deepEqual(attempt?.contextEnvelope?.runtime.runtimeTimeouts, attempt?.executionSnapshot?.runtimeTimeouts);
+  assert.equal(attempt?.contextEnvelope?.runtime.runtimeDeadlineAt, attempt?.executionSnapshot?.runtimeDeadlineAt);
   assert.deepEqual(attempt?.executionSnapshot?.argv.slice(-2), [
     "--append-system-prompt",
     attempt?.executionSnapshot?.context?.bundlePath,
@@ -354,6 +371,7 @@ test("Attempt binds one immutable execution snapshot and ignores later config dr
   assert.match(attempt?.planDigest ?? "", /^[0-9a-f]{64}$/);
 
   runtimeConfig.workerArgv = validWorkerArgv.map((value) => value === "high" ? "max" : value);
+  runtimeConfig.worker = { totalTimeoutMs: 99_000, noProgressTimeoutMs: 9_000 };
   runtimeConfig.preflight = { dockerRequired: true };
   await controller.tick();
   await controller.tick();

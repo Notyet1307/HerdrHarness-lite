@@ -45,6 +45,10 @@ export type HarnessConfig = {
   reviewerProviderProfiles?: ReviewerProviderProfiles;
   workerRuntime?: "herdr-pi-cli" | "pi-rpc";
   reviewerRuntime?: "herdr-pi-cli" | "pi-rpc";
+  worker?: { totalTimeoutMs?: number; noProgressTimeoutMs?: number };
+  reviewer?: { totalTimeoutMs?: number; noProgressTimeoutMs?: number };
+  validation?: { totalTimeoutMs?: number };
+  termination?: { sigtermGraceMs?: number; sigkillGraceMs?: number };
   preflight?: {
     /** Command used for bounded live Provider probes. Defaults to `pi`. */
     piBin?: string;
@@ -153,6 +157,10 @@ export type ReviewerValidationInput = {
   baseSha: string;
   expectedHeadSha: string;
   validationArgv: string[];
+  totalTimeoutMs?: number;
+  noProgressTimeoutMs?: number;
+  sigtermGraceMs?: number;
+  sigkillGraceMs?: number;
   dockerHost: string | null;
   resourceDigest: string;
   checkpointIdentity: ReviewerCheckpointIdentity;
@@ -288,7 +296,7 @@ export interface HerdrPort extends AttemptRuntimePort {
     cwd?: string;
     env?: Record<string, string>;
   }): Promise<AgentHandle>;
-  runInPane(input: { handle: AgentHandle; command: string; argv: string[] }): Promise<void>;
+  runInPane(input: { handle: AgentHandle; command: string; argv: string[]; timeoutMs?: number }): Promise<void>;
   close(handle: AgentHandle): Promise<void>;
 }
 

@@ -75,7 +75,10 @@ export class ControllerContext {
   async closeAttempt(attempt: Attempt, reason: "completed" | "recovery" | "cancelled"): Promise<void> {
     if (!attempt.handle) throw new Error("attempt has no pane identity");
     const runtime = this.runtimeFor(attempt);
-    if (runtime.terminate) await runtime.terminate({ handle: attempt.handle, attempt, reason });
+    if (runtime.terminate) {
+      await runtime.terminate({ handle: attempt.handle, attempt, reason });
+      if (runtime === this.deps.herdr) return;
+    }
     await this.deps.herdr.close(attempt.handle);
   }
 }

@@ -7,6 +7,7 @@ import type { ControllerContext } from "./context.js";
 import { message, validReviewerValidationArgv } from "./helpers.js";
 import { verifyReviewerPreflight } from "./attempt-integrity.js";
 import type { TickResult } from "./types.js";
+import { DEFAULT_VALIDATION_TIMEOUT_MS, snapshotRuntimeTimeouts } from "../runtime-timeouts.js";
 
 export async function ensureReviewerValidation(
   ctx: ControllerContext,
@@ -123,6 +124,8 @@ export function reviewerOwnValidationInput(job: Job, attempt: Attempt): Reviewer
     throw new ReviewerValidationIntegrityError("Reviewer validation lost its Attempt binding");
   }
   const checkpointIdentity = reviewerCheckpointIdentity(job, attempt);
+  const runtimeTimeouts = snapshotRuntimeTimeouts(attempt.executionSnapshot, "reviewer");
+  const totalTimeoutMs = attempt.executionSnapshot.validationTimeoutMs ?? DEFAULT_VALIDATION_TIMEOUT_MS;
   return {
     worktree: job.worktree,
     rootPath: dirname(attempt.resultPath),
@@ -133,6 +136,10 @@ export function reviewerOwnValidationInput(job: Job, attempt: Attempt): Reviewer
     baseSha: attempt.baseSha,
     expectedHeadSha: attempt.expectedHeadSha,
     validationArgv: [...attempt.reviewerValidationArgv],
+    totalTimeoutMs,
+    noProgressTimeoutMs: Math.min(runtimeTimeouts.noProgressTimeoutMs, totalTimeoutMs),
+    sigtermGraceMs: runtimeTimeouts.sigtermGraceMs,
+    sigkillGraceMs: runtimeTimeouts.sigkillGraceMs,
     dockerHost: attempt.executionSnapshot.dockerHost,
     resourceDigest: checkpointIdentity.resourceDigest,
     checkpointIdentity,

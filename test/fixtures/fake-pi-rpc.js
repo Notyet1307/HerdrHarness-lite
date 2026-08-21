@@ -1,11 +1,18 @@
 #!/usr/bin/env node
 import { createHash } from "node:crypto";
+import { spawn } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 let buffer = "";
 let autoCompactionEnabled = true;
 let splitStateResponse = true;
+let continuousOutput = null;
+
+if (process.env.FAKE_PI_IGNORE_SIGTERM === "1") {
+  process.on("SIGTERM", () => {});
+  setInterval(() => {}, 1_000);
+}
 
 if (process.env.FAKE_PI_EXPECT_PONYTAIL_ENV === "1" && (
   process.env.PONYTAIL_DEFAULT_MODE !== "full"
@@ -34,6 +41,7 @@ process.stdin.on("data", (chunk) => {
 
 function respond(command) {
   const base = { id: command.id, type: "response", command: command.type, success: true };
+  if (command.type === process.env.FAKE_PI_HANG_COMMAND) return;
   if (command.type === "get_state") {
     if (process.env.FAKE_PI_SECRET_ERROR) {
       process.stderr.write(process.env.FAKE_PI_SECRET_ERROR);
@@ -82,11 +90,14 @@ function respond(command) {
     return;
   }
   if (command.type === "set_auto_compaction") autoCompactionEnabled = command.enabled;
+  if (command.type === "abort" && process.env.FAKE_PI_IGNORE_ABORT === "1") return;
   if (command.type === "abort" && (
     process.env.FAKE_PI_WAIT_FOR_ABORT === "1"
     || process.env.FAKE_PI_PROVIDER_NEVER_RETURNS === "1"
     || process.env.FAKE_PI_RESULT_BEFORE_STALL === "1"
+    || process.env.FAKE_PI_CONTINUOUS_TOOL_OUTPUT === "1"
   )) {
+    if (continuousOutput) clearInterval(continuousOutput);
     emit({ type: "agent_end", messages: [], willRetry: false });
     emit({ type: "agent_settled" });
     emit(base);
@@ -141,6 +152,18 @@ function respond(command) {
     });
   }
   if (process.env.FAKE_PI_WAIT_FOR_ABORT === "1" || process.env.FAKE_PI_PROVIDER_NEVER_RETURNS === "1") return;
+  if (process.env.FAKE_PI_CONTINUOUS_TOOL_OUTPUT === "1") {
+    emit({ type: "tool_execution_start", toolCallId: "tool-1", toolName: "read", args: {} });
+    continuousOutput = setInterval(() => {
+      emit({ type: "tool_execution_update", toolCallId: "tool-1", toolName: "read", partialResult: "bounded progress" });
+    }, Number(process.env.FAKE_PI_PROGRESS_INTERVAL_MS ?? "20"));
+    return;
+  }
+  if (process.env.FAKE_PI_ORPHAN_PID_PATH) {
+    const orphan = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+    writeFileSync(process.env.FAKE_PI_ORPHAN_PID_PATH, String(orphan.pid));
+    orphan.unref();
+  }
   if (["success", "error"].includes(process.env.FAKE_PI_TOOL_BEFORE_FAILURE)) {
     emit({ type: "tool_execution_start", toolCallId: "tool-1", toolName: "read", args: {} });
     emit({

@@ -4,7 +4,7 @@ import { spawn } from "node:child_process";
 import { basename, dirname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { Buffer } from "node:buffer";
-import { digest } from "./model.js";
+import { digest, type RuntimeTimeouts } from "./model.js";
 import { executionResource, executionResourceDigest } from "./attempt-plan.js";
 import {
   readJson,
@@ -33,12 +33,13 @@ import {
   type PiRpcProviderApi,
   type SafeRuntimeDiagnostic,
 } from "./pi-rpc-diagnostics.js";
+import { snapshotRuntimeTimeouts, validTimeoutMs } from "./runtime-timeouts.js";
 
 const MAX_RPC_LINE_BYTES = 1024 * 1024;
 const MAX_EVENT_LOG_BYTES = 512 * 1024;
 const COMMAND_TIMEOUT_MS = 30_000;
-const EXIT_TIMEOUT_MS = 10_000;
 const POLL_MS = 50;
+const PROGRESS_WRITE_INTERVAL_MS = 1_000;
 const REVIEW_ORIGINAL_AGENT_DIR_ENV = "HERDR_HARNESS_REVIEW_CANONICAL_PI_AGENT_DIR";
 const KNOWN_EVENT_TYPES = new Set([
   "agent_start", "agent_end", "agent_settled",
@@ -56,6 +57,22 @@ type JsonObject = Record<string, unknown>;
 type Child = ReturnType<typeof spawn>;
 type ChildExit = { code: number | null; signal: string | null };
 type AssistantFailure = { error: string; diagnostic: SafeRuntimeDiagnostic };
+type DeadlineFailure = "runtime_stall" | "attempt_deadline";
+type ProgressType =
+  | "runner_started"
+  | "dispatch_accepted"
+  | "assistant_message_start"
+  | "assistant_message_update"
+  | "assistant_message_end"
+  | "tool_execution_start"
+  | "tool_execution_update"
+  | "tool_execution_end"
+  | "compaction_start"
+  | "compaction_end"
+  | "provider_retry_progress"
+  | "durable_result"
+  | "agent_settled"
+  | "terminal_receipt";
 
 export class StrictJsonlDecoder {
   private buffer = "";
@@ -147,14 +164,14 @@ class RpcClient {
     return this.stdoutEnded;
   }
 
-  async command(type: string, fields: JsonObject = {}): Promise<JsonObject> {
+  async command(type: string, fields: JsonObject = {}, timeoutMs = COMMAND_TIMEOUT_MS): Promise<JsonObject> {
     if (this.fatalError) throw this.fatalError;
     const id = `runner-${++this.sequence}`;
     const response = new Promise<JsonObject>((resolveResponse, reject) => {
       this.pending.set(id, { command: type, resolve: resolveResponse, reject });
     });
     this.child.stdin.write(`${JSON.stringify({ id, type, ...fields })}\n`);
-    return withTimeout(response, COMMAND_TIMEOUT_MS);
+    return withTimeout(response, timeoutMs);
   }
 
   private accept(record: JsonObject): void {
@@ -203,6 +220,15 @@ async function main(argv: string[]): Promise<void> {
     throw new Error("Pi RPC runner or SDK host differs from the execution snapshot");
   }
   const identity = receiptIdentity(plan);
+  const lane = plan.snapshot.context!.lane as "worker" | "reviewer";
+  const timeouts = snapshotRuntimeTimeouts(plan.snapshot, lane);
+  const runtimeStartedAt = Date.now();
+  const runtimeDeadlineAt = plan.snapshot.runtimeDeadlineAt
+    ? Date.parse(plan.snapshot.runtimeDeadlineAt)
+    : runtimeStartedAt + timeouts.totalTimeoutMs;
+  const attemptStartedAt = plan.snapshot.runtimeDeadlineAt
+    ? runtimeDeadlineAt - timeouts.totalTimeoutMs
+    : runtimeStartedAt;
   writeExclusiveJson(spoolPath(plan.runtimeRoot, "owner.json"), {
     ...identity,
     ok: true,
@@ -231,12 +257,79 @@ async function main(argv: string[]): Promise<void> {
   let transcriptBytes = 0;
   let controlledCompactionPhase: "idle" | "started" | "completed" = "idle";
   let controlledCompactionReceipt: JsonObject | null = null;
+  let assistantMessageActive = false;
+  let lastProgressAt = runtimeStartedAt;
+  let lastProgressType: ProgressType = "runner_started";
+  let lastProgressWriteAt = 0;
+  let resultPresent = existsSync(plan.resultPath);
+  let deadlineFailure: DeadlineFailure | null = null;
+  let noProgressDeadlineActive = false;
+
+  const persistProgress = (force = false): void => {
+    const now = Date.now();
+    if (!force && now - lastProgressWriteAt < PROGRESS_WRITE_INTERVAL_MS) return;
+    const body = {
+      ...identity,
+      lastProgressAt: new Date(lastProgressAt).toISOString(),
+      lastProgressType,
+      eventCount,
+      elapsedMs: Math.max(0, now - attemptStartedAt),
+      resultPresent,
+      runnerPid: process.pid,
+      childPid: child?.pid ?? null,
+    };
+    writeAtomicJson(spoolPath(plan.runtimeRoot, "runtime-progress.json"), { ...body, digest: digest(body) });
+    lastProgressWriteAt = now;
+  };
+  const markProgress = (type: ProgressType): void => {
+    lastProgressAt = Date.now();
+    lastProgressType = type;
+    persistProgress();
+  };
+  const observeDurableResult = (): void => {
+    if (resultPresent || !existsSync(plan.resultPath)) return;
+    resultPresent = true;
+    markProgress("durable_result");
+  };
+  const expiredDeadline = (): DeadlineFailure | null => {
+    const now = Date.now();
+    if (now >= runtimeDeadlineAt) return "attempt_deadline";
+    if (noProgressDeadlineActive && now - lastProgressAt >= timeouts.noProgressTimeoutMs) return "runtime_stall";
+    return null;
+  };
+  const ensureTerminateIntent = (reason: DeadlineFailure | "policy_violation"): void => {
+    const path = spoolPath(plan.runtimeRoot, "terminate.json");
+    if (existsSync(path)) {
+      assertTerminateIntent(plan);
+      return;
+    }
+    writeExclusiveJson(path, { ...identity, reason });
+  };
+  persistProgress(true);
 
   const persistEvent = (event: JsonObject): void => {
     const reportedType = typeof event.type === "string" ? event.type : "";
     const type = KNOWN_EVENT_TYPES.has(reportedType) ? reportedType : "unknown";
     eventCount += 1;
     lastEventType = type;
+    const eventMessage = object(event.message);
+    if (type === "message_start") assistantMessageActive = eventMessage.role === "assistant";
+    if (assistantMessageActive && type === "message_start") markProgress("assistant_message_start");
+    if (assistantMessageActive && type === "message_update") markProgress("assistant_message_update");
+    if ((assistantMessageActive || eventMessage.role === "assistant") && type === "message_end") {
+      markProgress("assistant_message_end");
+      assistantMessageActive = false;
+    }
+    if (type === "tool_execution_start") markProgress("tool_execution_start");
+    if (type === "tool_execution_update" || type === "bash_execution_update") markProgress("tool_execution_update");
+    if (type === "tool_execution_end") markProgress("tool_execution_end");
+    if (type === "compaction_start") markProgress("compaction_start");
+    if (type === "compaction_end") markProgress("compaction_end");
+    if ([
+      "auto_retry_start", "auto_retry_end", "summarization_retry_scheduled",
+      "summarization_retry_attempt_start", "summarization_retry_finished",
+    ].includes(type)) markProgress("provider_retry_progress");
+    if (type === "agent_settled") markProgress("agent_settled");
     if (type === "agent_end") agentEndObserved = true;
     if (type === "turn_start") turnCount += 1;
     if (["message_end", "tool_execution_end", "turn_end"].includes(type)) {
@@ -244,7 +337,7 @@ async function main(argv: string[]): Promise<void> {
     }
     if (["message_update", "tool_execution_update", "bash_execution_update"].includes(type)) return;
     const summary: JsonObject = { type, digest: observedPayloadDigest(event) };
-    const message = type === "message_end" ? object(event.message) : {};
+    const message = type === "message_end" ? eventMessage : {};
     if (message.role === "assistant") assistantMessageCount += 1;
     if (type === "tool_execution_end") {
       toolExecutionCount += 1;
@@ -318,6 +411,7 @@ async function main(argv: string[]): Promise<void> {
       ...plan.snapshot.argv,
     ], {
       cwd: plan.cwd,
+      detached: true,
       env: {
         ...process.env,
         PI_CODING_AGENT_DIR: isolatedAgentDir,
@@ -332,17 +426,36 @@ async function main(argv: string[]): Promise<void> {
       },
       stdio: ["pipe", "pipe", "pipe"],
     });
+    persistProgress(true);
     child.stderr.on("data", () => { /* Drain without persisting untrusted Provider diagnostics. */ });
     client = new RpcClient(child, persistEvent);
+    const command = async (type: string, fields: JsonObject = {}): Promise<JsonObject> => {
+      const remaining = runtimeDeadlineAt - Date.now();
+      if (remaining <= 0) {
+        deadlineFailure = "attempt_deadline";
+        ensureTerminateIntent(deadlineFailure);
+        throw piRpcRunnerError("runtime", deadlineFailure, false);
+      }
+      try {
+        return await client!.command(type, fields, Math.min(COMMAND_TIMEOUT_MS, remaining));
+      } catch (error) {
+        if (Date.now() >= runtimeDeadlineAt) {
+          deadlineFailure = "attempt_deadline";
+          ensureTerminateIntent(deadlineFailure);
+          throw piRpcRunnerError("runtime", deadlineFailure, false);
+        }
+        throw error;
+      }
+    };
 
     failureStage = "handshake";
-    const initialState = requireResponse(await client.command("get_state"), "get_state");
+    const initialState = requireResponse(await command("get_state"), "get_state");
     effectiveProviderApi = validateInitialState(initialState, plan);
-    const commands = requireResponse(await client.command("get_commands"), "get_commands");
+    const commands = requireResponse(await command("get_commands"), "get_commands");
     validateCommands(commands, plan);
-    requireResponse(await client.command("set_auto_retry", { enabled: false }), "set_auto_retry");
-    requireResponse(await client.command("set_auto_compaction", { enabled: false }), "set_auto_compaction");
-    const controlledState = requireResponse(await client.command("get_state"), "get_state");
+    requireResponse(await command("set_auto_retry", { enabled: false }), "set_auto_retry");
+    requireResponse(await command("set_auto_compaction", { enabled: false }), "set_auto_compaction");
+    const controlledState = requireResponse(await command("get_state"), "get_state");
     if (object(controlledState.data).autoCompactionEnabled !== false) throw new Error("Pi RPC auto-compaction did not disable");
     preparePiRpcAgentDir(plan.snapshot);
     writeAtomicJson(spoolPath(plan.runtimeRoot, "ready.json"), {
@@ -358,9 +471,26 @@ async function main(argv: string[]): Promise<void> {
     });
 
     failureStage = "await-dispatch";
-    const dispatch = await waitForDispatch(plan, client);
+    const dispatch = await waitForDispatch(plan, client, () => {
+      observeDurableResult();
+      persistProgress();
+      const expired = expiredDeadline();
+      if (expired) {
+        deadlineFailure = expired;
+        ensureTerminateIntent(expired);
+        persistProgress(true);
+      }
+      return expired;
+    });
     if (!dispatch) {
-      await stopChild(child, client);
+      if (!existsSync(spoolPath(plan.runtimeRoot, "terminating.json"))) {
+        writeExclusiveJson(spoolPath(plan.runtimeRoot, "terminating.json"), {
+          ...identity,
+          ok: true,
+          reason: "controller_request",
+        });
+      }
+      await stopChild(child, client, timeouts);
       preparePiRpcAgentDir(plan.snapshot);
       const diagnostic = makeSafeRuntimeDiagnostic({
         domain: "execution",
@@ -381,33 +511,49 @@ async function main(argv: string[]): Promise<void> {
     }
     failureStage = "dispatch";
     credentialHostArgs(plan);
-    requireResponse(await client.command("prompt", { message: dispatch.message }), "prompt");
+    requireResponse(await command("prompt", { message: dispatch.message }), "prompt");
     writeAtomicJson(spoolPath(plan.runtimeRoot, "accepted.json"), { ...identity, ok: true, dispatchId: dispatch.dispatchId });
+    noProgressDeadlineActive = true;
+    markProgress("dispatch_accepted");
+    persistProgress(true);
 
     failureStage = "agent-run";
-    let abortSent = false;
-    let abortStartedAt: number | null = null;
     let terminationRequested = false;
+    let shutdownGraceMs = timeouts.sigtermGraceMs;
     for (;;) {
-      if (settled) break;
+      deadlineFailure ??= expiredDeadline();
+      if (deadlineFailure) ensureTerminateIntent(deadlineFailure);
+      if (settled && !deadlineFailure) break;
       const exited = await Promise.race([client.exit.then((value) => ({ exited: value })), delay(POLL_MS).then(() => null)]);
       if (exited && !settled) {
         throw piRpcRunnerError("child_process", "child_exit_before_settled", true);
       }
       if (client.failure) throw client.failure;
-      terminationRequested = terminationRequested || existsSync(spoolPath(plan.runtimeRoot, "terminate.json"));
-      if ((policyViolation || terminationRequested) && !abortSent) {
-        abortSent = true;
-        abortStartedAt = Date.now();
-        requireResponse(await client.command("abort"), "abort");
-      }
-      if (abortStartedAt !== null && Date.now() - abortStartedAt >= EXIT_TIMEOUT_MS) {
-        policyViolation = policyViolation ?? "termination did not reach agent_settled before escalation";
+      observeDurableResult();
+      persistProgress();
+      deadlineFailure ??= expiredDeadline();
+      if (deadlineFailure) ensureTerminateIntent(deadlineFailure);
+      terminationRequested = terminationRequested || assertTerminateIntent(plan);
+      if (policyViolation) ensureTerminateIntent("policy_violation");
+      if (policyViolation || terminationRequested) {
+        if (!existsSync(spoolPath(plan.runtimeRoot, "terminating.json"))) {
+          writeExclusiveJson(spoolPath(plan.runtimeRoot, "terminating.json"), {
+            ...identity,
+            ok: true,
+            reason: deadlineFailure ?? (policyViolation ? "policy_violation" : "controller_request"),
+          });
+        }
+        try {
+          requireResponse(await client.command("abort", {}, timeouts.sigtermGraceMs), "abort");
+        } catch {
+          // The bounded signal escalation below owns cleanup after an unresponsive abort.
+        }
+        shutdownGraceMs = settled ? timeouts.sigkillGraceMs : 0;
         break;
       }
     }
     failureStage = "child-shutdown";
-    childExit = await stopChild(child, client);
+    childExit = await stopChild(child, client, timeouts, shutdownGraceMs);
     failureStage = "rpc-output";
     if (client.failure) throw client.failure;
     failureStage = "credential-postflight";
@@ -415,10 +561,19 @@ async function main(argv: string[]): Promise<void> {
     preparePiRpcAgentDir(plan.snapshot);
     preparePinnedTaskData(plan);
     const assistantTerminalFailure = assistantFailure as AssistantFailure | null;
-    const terminalError = policyViolation ?? assistantTerminalFailure?.error ?? null;
+    const terminalError = deadlineFailure ?? policyViolation ?? assistantTerminalFailure?.error ?? null;
     const ok = terminalError === null && !terminationRequested && settled;
     const terminalDiagnostic = !ok && !assistantTerminalFailure
-      ? policyViolation === "controlled compaction failed"
+      ? deadlineFailure
+        ? makeSafeRuntimeDiagnostic({
+            domain: deadlineFailure === "runtime_stall" ? "observation" : "execution",
+            code: deadlineFailure,
+            stage: "agent-run",
+            failureDomain: "runtime",
+            failureCode: deadlineFailure,
+            retryable: false,
+          })
+        : policyViolation === "controlled compaction failed"
         ? makeSafeRuntimeDiagnostic({
             domain: "execution",
             code: "compaction_failure",
@@ -449,6 +604,9 @@ async function main(argv: string[]): Promise<void> {
     if (ok && (childExit.code !== 0 || childExit.signal !== null)) {
       throw piRpcRunnerError("child_process", "child_exit_after_settled", false);
     }
+    observeDurableResult();
+    markProgress("terminal_receipt");
+    persistProgress(true);
     writeAtomicJson(spoolPath(plan.runtimeRoot, "terminal.json"), {
       ...identity,
       ok,
@@ -460,14 +618,23 @@ async function main(argv: string[]): Promise<void> {
     writeAtomicJson(spoolPath(plan.runtimeRoot, "terminated.json"), { ...identity, ok: true, reason: "settled and child exited" });
   } catch (error) {
     const primaryFailure = classifyPiRpcRunnerFailure(error, failureStage);
+    if (assertTerminateIntent(plan)
+      && !existsSync(spoolPath(plan.runtimeRoot, "terminating.json"))) {
+      writeExclusiveJson(spoolPath(plan.runtimeRoot, "terminating.json"), {
+        ...identity,
+        ok: true,
+        reason: deadlineFailure ?? "runner_failure",
+      });
+    }
     let cleanupFailure: ReturnType<typeof classifyPiRpcRunnerFailure> | null = null;
     if (child && client) {
       try {
-        childExit ??= await stopChild(child, client);
+        childExit ??= await stopChild(child, client, timeouts);
       } catch (stopError) {
         cleanupFailure = classifyPiRpcRunnerFailure(stopError, "child-shutdown");
       }
     } else if (child) {
+      signalChildTree(child, "SIGKILL");
       cleanupFailure = classifyPiRpcRunnerFailure(
         piRpcRunnerError("child_process", "child_shutdown_unconfirmed", false),
         "child-shutdown",
@@ -496,6 +663,9 @@ async function main(argv: string[]): Promise<void> {
           childExit,
         })
       : null;
+    observeDurableResult();
+    markProgress("terminal_receipt");
+    persistProgress(true);
     writeAtomicJson(spoolPath(plan.runtimeRoot, "terminal.json"), {
       ...identity,
       ok: false,
@@ -545,9 +715,15 @@ function observedPayloadDigest(event: JsonObject): string {
   return typeof projected === "string" && /^[0-9a-f]{64}$/u.test(projected) ? projected : digest(event);
 }
 
-async function waitForDispatch(plan: PiRpcPlan, client: RpcClient): Promise<{ dispatchId: string; message: string } | null> {
+async function waitForDispatch(
+  plan: PiRpcPlan,
+  client: RpcClient,
+  deadline: () => DeadlineFailure | null,
+): Promise<{ dispatchId: string; message: string } | null> {
   for (;;) {
-    if (existsSync(spoolPath(plan.runtimeRoot, "terminate.json"))) return null;
+    if (assertTerminateIntent(plan)) return null;
+    const expired = deadline();
+    if (expired) throw piRpcRunnerError("runtime", expired, false);
     if (existsSync(spoolPath(plan.runtimeRoot, "dispatch.json"))) {
       const value = readJson<JsonObject>(spoolPath(plan.runtimeRoot, "dispatch.json"));
       if (
@@ -623,6 +799,9 @@ function validatePlan(plan: PiRpcPlan): void {
     || plan.snapshot.adapter !== "pi-rpc"
     || !isQualifiedPiRpcVersion(plan.snapshot.runtimeVersion)
     || plan.snapshot.retryMode !== "disabled"
+    || (plan.snapshot.runtimeTimeouts !== undefined && !validRuntimeTimeouts(plan.snapshot.runtimeTimeouts))
+    || (plan.snapshot.runtimeDeadlineAt !== undefined && !Number.isFinite(Date.parse(plan.snapshot.runtimeDeadlineAt)))
+    || (plan.snapshot.validationTimeoutMs !== undefined && !validTimeoutMs(plan.snapshot.validationTimeoutMs))
     || !validCompaction
     || (lane !== "worker" && lane !== "reviewer")
     || !validCredentialMode
@@ -634,6 +813,15 @@ function validatePlan(plan: PiRpcPlan): void {
     || !plan.snapshot.argv.includes("rpc")
   ) throw new Error("invalid Pi RPC runtime plan");
   credentialHostArgs(plan);
+}
+
+function validRuntimeTimeouts(value: RuntimeTimeouts): boolean {
+  return Object.keys(value).sort().join(",") === "noProgressTimeoutMs,sigkillGraceMs,sigtermGraceMs,totalTimeoutMs"
+    && validTimeoutMs(value.totalTimeoutMs)
+    && validTimeoutMs(value.noProgressTimeoutMs)
+    && value.noProgressTimeoutMs <= value.totalTimeoutMs
+    && validTimeoutMs(value.sigtermGraceMs)
+    && validTimeoutMs(value.sigkillGraceMs);
 }
 
 function acceptControlledCompactionEvent(
@@ -818,21 +1006,67 @@ function requireResponse(response: JsonObject, command: string): JsonObject {
   return response;
 }
 
-async function stopChild(child: Child, client: RpcClient): Promise<ChildExit> {
+async function stopChild(
+  child: Child,
+  client: RpcClient,
+  timeouts: RuntimeTimeouts,
+  gracefulWaitMs = timeouts.sigtermGraceMs,
+): Promise<ChildExit> {
   child.stdin.end();
-  if (!await exitsWithin(client.exit, EXIT_TIMEOUT_MS)) {
-    child.kill("SIGTERM");
-    if (!await exitsWithin(client.exit, EXIT_TIMEOUT_MS / 2)) {
-      child.kill("SIGKILL");
-      if (!await exitsWithin(client.exit, EXIT_TIMEOUT_MS / 2)) {
+  if (!await exitsWithin(client.exit, gracefulWaitMs)) {
+    signalChildTree(child, "SIGTERM");
+    if (!await exitsWithin(client.exit, timeouts.sigkillGraceMs)) {
+      signalChildTree(child, "SIGKILL");
+      if (!await exitsWithin(client.exit, timeouts.sigkillGraceMs)) {
         throw piRpcRunnerError("child_process", "child_shutdown_unconfirmed", false);
       }
     }
   }
-  if (!await exitsWithin(client.outputEnded, EXIT_TIMEOUT_MS / 2)) {
+  await stopRemainingProcessGroup(child, timeouts);
+  if (!await exitsWithin(client.outputEnded, timeouts.sigkillGraceMs)) {
     throw piRpcRunnerError("rpc_transport", "rpc_stdout_end_timeout", false);
   }
   return client.exit;
+}
+
+async function stopRemainingProcessGroup(child: Child, timeouts: RuntimeTimeouts): Promise<void> {
+  if (!child.pid || !processGroupAlive(child.pid)) return;
+  signalChildTree(child, "SIGTERM");
+  if (await processGroupExitsWithin(child.pid, timeouts.sigkillGraceMs)) return;
+  signalChildTree(child, "SIGKILL");
+  if (!await processGroupExitsWithin(child.pid, timeouts.sigkillGraceMs)) {
+    throw piRpcRunnerError("child_process", "child_shutdown_unconfirmed", false);
+  }
+}
+
+function processGroupAlive(pid: number): boolean {
+  try {
+    process.kill(-pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function processGroupExitsWithin(pid: number, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (processGroupAlive(pid)) {
+    if (Date.now() >= deadline) return false;
+    await delay(Math.min(POLL_MS, Math.max(1, deadline - Date.now())));
+  }
+  return true;
+}
+
+function signalChildTree(child: Child, signal: "SIGTERM" | "SIGKILL"): void {
+  if (child.pid) {
+    try {
+      process.kill(-child.pid, signal);
+      return;
+    } catch {
+      // Fall back to the direct child when the process group has already disappeared.
+    }
+  }
+  child.kill(signal);
 }
 
 async function exitsWithin(exit: Promise<unknown>, timeoutMs: number): Promise<boolean> {
@@ -847,6 +1081,22 @@ async function exitsWithin(exit: Promise<unknown>, timeoutMs: number): Promise<b
 
 function receiptIdentity(plan: PiRpcPlan): JsonObject {
   return { version: 1, attemptId: plan.attemptId, generation: plan.generation, planDigest: plan.planDigest };
+}
+
+function assertTerminateIntent(plan: PiRpcPlan): boolean {
+  const value = readJsonIfExists<JsonObject>(spoolPath(plan.runtimeRoot, "terminate.json"));
+  if (!value) return false;
+  if (
+    value.version !== 1
+    || value.attemptId !== plan.attemptId
+    || value.generation !== plan.generation
+    || value.planDigest !== plan.planDigest
+    || typeof value.reason !== "string"
+    || ![
+      "completed", "recovery", "cancelled", "runtime_stall", "attempt_deadline", "policy_violation",
+    ].includes(value.reason)
+  ) throw new Error("Pi RPC terminate intent has a different identity");
+  return true;
 }
 
 function object(value: unknown): JsonObject {
