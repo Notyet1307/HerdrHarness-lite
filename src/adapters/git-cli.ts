@@ -4,7 +4,7 @@ import { accessSync, chmodSync, closeSync, constants, cpSync, existsSync, fsyncS
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { digest, type ContextEntry, type ExecutionContext, type ExecutionResource, type ReviewerCheckpoint, type ReviewerCheckpointBinding, type ReviewerCheckpointRecord, type ReviewerValidationCheckpoint, type ReviewerValidationReceipt, type ReviewerValidationReceiptBinding, type ReviewerValidationStageResult } from "../model.js";
 import { executionResourceDigest } from "../attempt-plan.js";
-import type { BaseSyncVerification, GitPort, ReviewerCheckpointSource, ReviewerValidationInput, ReviewerVerification, WorkerVerification } from "../ports.js";
+import type { AttemptSideEffectInspection, BaseSyncVerification, GitPort, ReviewerCheckpointSource, ReviewerValidationInput, ReviewerVerification, WorkerVerification } from "../ports.js";
 import { pathIsWithin, pathsOverlap } from "../path-safety.js";
 import { assertReviewerCheckpoint, REVIEWER_CHECKPOINT_FILES, reviewerCheckpointIsCompatible } from "../reviewer-checkpoints.js";
 import {
@@ -176,6 +176,19 @@ export class GitCli implements GitPort {
       };
     }
     return { ok: true, headSha: head };
+  }
+
+  async inspectAttemptSideEffects(input: {
+    worktree: { path: string; branch: string; workspaceId: string };
+    expectedHeadSha: string;
+    allowedResultPaths: string[];
+  }): Promise<AttemptSideEffectInspection> {
+    const head = this.git(input.worktree.path, ["rev-parse", "HEAD"]).trim();
+    const status = this.git(input.worktree.path, ["status", "--porcelain=v1", "--untracked-files=all"]);
+    return {
+      worktreeChanged: unexpectedStatus(status, input.worktree.path, input.allowedResultPaths).length > 0,
+      commitCreated: head !== input.expectedHeadSha,
+    };
   }
 
   async prepareWorkerResult(input: {

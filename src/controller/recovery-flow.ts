@@ -1,7 +1,8 @@
 import { approvedRecoveryHandoff } from "../handoff.js";
-import { evolveJob, isRetryAction, MAX_CI_REWORKS, type AnalystAdvice, type AutomaticRecovery, type CiFailure, type HarnessState, type Incident, type Job } from "../model.js";
-import { allowedActionsFor, automaticRecoveryFor, buildEvidencePack, isAutomaticRecoveryApproval, isDecisionResolutionEligible } from "../policy.js";
+import { evolveJob, isRetryAction, MAX_CI_REWORKS, type AnalystAdvice, type CiFailure, type HarnessState, type Incident, type Job } from "../model.js";
+import { allowedActionsFor, automaticRecoveryBackoffPending, automaticRecoveryFor, buildEvidencePack, isAutomaticRecoveryApproval, isDecisionResolutionEligible } from "../policy.js";
 import type { ControllerContext } from "./context.js";
+import { authorizeAutomaticRecovery, verifyProviderRecoveryBoundary } from "./automatic-recovery.js";
 import { finishObservedAttempt } from "./attempt-settlement.js";
 import { verifyReviewerPreflight } from "./attempt-integrity.js";
 import { ciChecksDigest, dedupeEvidence, isFailedCheck, message, result, settleAttempt, summarizeCiFailure } from "./helpers.js";
@@ -14,6 +15,13 @@ export async function diagnoseOrWait(ctx: ControllerContext, state: HarnessState
   if (recovered) return recovered;
   if (!job.incident) throw new Error("blocked job has no incident");
   if (job.analysis) {
+    const now = ctx.deps.clock.now();
+    const automatic = automaticRecoveryFor(job, job.analysis, now);
+    if (automatic) return authorizeAutomaticRecovery(ctx, state, job, job.analysis, automatic, now);
+    const candidate = job.incident.automaticRecovery;
+    if (candidate?.rule === "provider_pre_side_effect_transient" && automaticRecoveryBackoffPending(job, job.analysis, now)) {
+      return result(true, "automatic_recovery_backoff", job.id, `automatic Provider recovery is waiting until ${candidate.notBefore}`);
+    }
     return result(true, "waiting_for_approval", job.id, `analysis ${job.analysis.id} is ready; human approval is required`);
   }
   if (!job.analyst) {
@@ -36,32 +44,8 @@ export async function diagnoseOrWait(ctx: ControllerContext, state: HarnessState
     };
   }
   const now = ctx.deps.clock.now();
-  const automatic = automaticRecoveryFor(job, advice);
-  if (automatic) {
-    const approval: AutomaticRecovery = {
-      id: ctx.deps.ids.next("approval"),
-      jobRevision: job.revision,
-      incidentId: job.incident.id,
-      analysisId: advice.id,
-      action: automatic.action,
-      basis: "policy_rule",
-      policyRule: automatic.rule,
-      fingerprint: automatic.fingerprint,
-      attemptId: automatic.attemptId,
-      actor: "harness:auto-recovery",
-      reason: automatic.rule,
-      createdAt: now,
-      consumedAt: null,
-    };
-    const next = evolveJob(job, now, {
-      state: "recovery_approved",
-      analysis: advice,
-      approval,
-      automaticRecoveries: [...(job.automaticRecoveries ?? []), approval],
-    });
-    await ctx.saveJob(state, job, next);
-    return result(true, "auto_recovery_authorized", job.id, `${automatic.rule} authorized one fresh ${automatic.action}`);
-  }
+  const automatic = automaticRecoveryFor(job, advice, now);
+  if (automatic) return authorizeAutomaticRecovery(ctx, state, job, advice, automatic, now);
   const next = evolveJob(job, now, { analysis: advice });
   await ctx.saveJob(state, job, next);
   return result(true, "analysis_recorded", job.id, `Analyst advice ${advice.id} recorded with action=${advice.action}`);
@@ -320,6 +304,9 @@ export async function applyRecovery(ctx: ControllerContext, state: HarnessState,
       return result(false, "recovery_applied", job.id, `CI recovery safety check is retryable: ${message(error)}`);
     }
   }
+
+  const providerBoundary = await verifyProviderRecoveryBoundary(ctx, state, job);
+  if (providerBoundary) return providerBoundary;
 
   if (approval.action === "retry_fresh_reviewer") {
     if (

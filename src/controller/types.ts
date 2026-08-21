@@ -26,6 +26,7 @@ export type TickAction =
   | "attempt_reconciling"
   | "attempt_completed"
   | "analysis_recorded"
+  | "automatic_recovery_backoff"
   | "auto_recovery_authorized"
   | "waiting_for_approval"
   | "recovery_applied"

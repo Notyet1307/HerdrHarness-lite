@@ -222,6 +222,8 @@ function readSelectedJson(path: string): unknown {
       "autoRetryDisableAccepted", "autoCompactionEnabled", "domain", "code", "stage", "failureStage", "failureDomain",
       "failureCode", "retryable", "providerApi", "phase", "turnCount", "assistantMessageCount",
       "toolExecutionCount", "toolErrorCount", "transcriptSizeBucket", "diagnosticFingerprint", "childExit",
+      "assistantContentObserved", "toolCallObserved", "toolExecutionStarted", "durableResultPresent",
+      "worktreeChanged", "commitCreated",
       "agentSettled", "reason", "updatedAt", "parentPid", "lastProgressAt", "lastProgressType", "eventCount",
       "elapsedMs", "resultPresent", "runnerPid", "childPid", "digest", "exitCode", "signal", "timeout",
     ];

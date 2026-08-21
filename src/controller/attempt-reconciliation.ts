@@ -15,7 +15,12 @@ export async function reconcileAttemptOrBlock(
 ): Promise<TickResult> {
   const retries = attempt.reconciliationAttempts ?? 0;
   if (retries >= MAX_ATTEMPT_RECONCILIATIONS) {
-    const automaticRecovery = automaticRecoveryCandidateForAttempt(job, attempt);
+    const automaticRecovery = automaticRecoveryCandidateForAttempt(
+      job,
+      attempt,
+      runtimeDiagnostic,
+      ctx.deps.clock.now(),
+    );
     return ctx.block(state, job, {
       class: "infrastructure_exhausted",
       lane: attempt.lane,

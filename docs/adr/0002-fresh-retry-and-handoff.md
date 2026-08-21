@@ -15,7 +15,7 @@
 4. review changes、approved recovery 与 CI rework 统一使用 `TypedHandoff`。
 5. Handoff 必须绑定来源 job revision、task/result/evidence/Incident/Analysis/Approval，以及目标 lane、base、expected HEAD 与 expected remote HEAD。
 6. Handoff 是 untrusted task data，不能扩大工具、runtime 或 repository policy authority。
-7. 窄范围自动恢复由 policy 形成可审计 Approval；其余恢复需要 Analyst advice 与精确 human gate。
+7. 窄范围自动恢复由 policy 形成可审计 Approval；dispatch 后只允许明确 transient Provider failure 在完整 pre-side-effect receipt、固定短退避、fresh Attempt 和 job/lane/HEAD 一次上限内恢复。Analyst 只有建议权，不能创建 candidate、Approval 或执行恢复；其余恢复需要精确 human gate。
 8. Reviewer 的 preflight、Standards、Spec、Controller validation 和 final aggregation 可写 Harness-owned、Attempt-private、原子不可覆盖的结构化 checkpoint；它们不是最终 Reviewer result。
 9. checkpoint 绑定 source Attempt/job revision、task/base/exact HEAD、runtime/provider/model/resource/context digests、stage、createdAt、结构化 result 与 result digest。
 10. same-HEAD Reviewer retry 仍关闭旧 pane并创建 fresh Attempt；新 Attempt 只导入全部身份匹配且未被另一 Attempt 消费的 checkpoint，不恢复旧 session 或 transcript。

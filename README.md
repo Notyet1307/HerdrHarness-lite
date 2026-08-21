@@ -129,7 +129,7 @@ One project may block, crash, back off, or trip its restart circuit without canc
 - `attempt-settlement.ts`: Worker/Reviewer result closure;
 - `runtime-preflight.ts` and `attempt-integrity.ts`: external runtime and Git gates;
 - `delivery.ts`: PR, CI, base refresh, merge;
-- `recovery-flow.ts`: Analyst evidence, approval, and fresh retry;
+- `recovery-flow.ts`, `automatic-recovery.ts`: Analyst evidence plus policy fresh-retry authorization and side-effect verification;
 - `config-validation.ts`: path and role contracts.
 
 The public `HarnessController` constructor and `tick()` contract remain unchanged.

@@ -603,6 +603,16 @@ export function projectPiRpcEvent(event: PiRpcEvent): PiRpcEvent {
       ...metadata,
     };
   }
+  if (type === "message_start") {
+    const source = record(event.message);
+    return {
+      type,
+      message: { role: source.role },
+      assistantContentObserved: assistantContent(source),
+      toolCallObserved: assistantToolCall(source),
+      ...metadata,
+    };
+  }
   if (type === "message_end") {
     const source = record(event.message);
     const message: PiRpcEvent = {};
@@ -611,7 +621,13 @@ export function projectPiRpcEvent(event: PiRpcEvent): PiRpcEvent {
     if (typeof source.errorMessage === "string") {
       message.errorMessage = boundedUtf8(source.errorMessage, MAX_PROJECTED_ERROR_BYTES);
     }
-    return { type, message, ...metadata };
+    return {
+      type,
+      message,
+      assistantContentObserved: assistantContent(source),
+      toolCallObserved: assistantToolCall(source),
+      ...metadata,
+    };
   }
   if (type === "message_update") {
     const source = record(event.assistantMessageEvent);
@@ -619,6 +635,9 @@ export function projectPiRpcEvent(event: PiRpcEvent): PiRpcEvent {
     return {
       type,
       message: { role: message.role, usage: message.usage },
+      assistantContentObserved: true,
+      toolCallObserved: assistantToolCall(message)
+        || (typeof source.type === "string" && /tool.?call|tool.?use/i.test(source.type)),
       assistantMessageEvent: {
         ...(typeof source.type === "string" ? { type: source.type } : {}),
         ...metadata,
@@ -640,6 +659,21 @@ export function projectPiRpcEvent(event: PiRpcEvent): PiRpcEvent {
     return { ...projected, ...metadata };
   }
   return { type, ...metadata };
+}
+
+function assistantContent(message: PiRpcEvent): boolean {
+  const content = Array.isArray(message.content) ? message.content.map(record) : [];
+  return content.some((entry) => (
+    entry.type !== "toolCall"
+    && entry.type !== "tool_call"
+    && entry.type !== "tool_use"
+    && Object.entries(entry).some(([key, value]) => key !== "type" && typeof value === "string" && value.length > 0)
+  ));
+}
+
+function assistantToolCall(message: PiRpcEvent): boolean {
+  const content = Array.isArray(message.content) ? message.content.map(record) : [];
+  return content.some((entry) => entry.type === "toolCall" || entry.type === "tool_call" || entry.type === "tool_use");
 }
 
 function eventPayloadMetadata(event: PiRpcEvent): { payloadBytes: number; payloadDigest: string } {

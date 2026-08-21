@@ -5,8 +5,8 @@ import { HarnessController } from "../src/controller.js";
 import { LocalEvidence } from "../src/adapters/local-evidence.js";
 import { assertJobInvariant } from "../src/model.js";
 import { reviewerCheckpointIdentity } from "../src/reviewer-checkpoints.js";
-import { classifyProviderFailure, PiRpcRuntimeFailure } from "../src/pi-rpc-diagnostics.js";
-import { automaticRecoveryFor, operatorActionsFor, projectOperatorState } from "../src/policy.js";
+import { classifyProviderContinuationLost, classifyProviderFailure, PiRpcRuntimeFailure, withRuntimeSideEffectBoundary } from "../src/pi-rpc-diagnostics.js";
+import { automaticRecoveryCandidateForAttempt, automaticRecoveryFor, operatorActionsFor, projectOperatorState } from "../src/policy.js";
 import { approveRecovery, cancelHeldJob, reassessIncident, resolveDecision } from "../src/recovery.js";
 import type { HarnessConfig } from "../src/ports.js";
 import {
@@ -83,6 +83,150 @@ test("structured runtime diagnostics survive blocking and reach Analyst evidence
   assert.ok(runtimeEvidence);
   assert.match(runtimeEvidence.summary, /provider_overloaded/);
   assert.equal(runtimeEvidence.summary.includes("access_token_SECRET"), false);
+});
+
+test("pre-side-effect transient Provider failure retries one fresh Attempt per job lane and HEAD", async () => {
+  const store = new MemoryStore();
+  const clock = new FakeClock();
+  const ids = new SequenceIds();
+  const git = new FakeGit();
+  const herdr = new FakeHerdr([]);
+  const preflight = new FakeRuntimePreflight();
+  preflight.version = "0.84.2";
+  const advice = {
+    kind: "advice" as const,
+    action: "retry_fresh_worker" as const,
+    summary: "The Provider rate limit occurred before any tool or durable result.",
+    resolutionBrief: "Retry once in a fresh Worker Attempt after the bounded backoff.",
+    evidenceRefs: ["task"],
+    unknowns: [],
+  };
+  const controller = new HarnessController({
+    config: {
+      ...config,
+      workerRuntime: "pi-rpc",
+      workerArgv: [...validWorkerArgv, "--provider", "test", "--model", "model"],
+    },
+    store,
+    github: new FakeGitHub([issue({ number: 97, title: "Retry one transient Provider failure" })]),
+    git,
+    herdr,
+    piRpc: herdr,
+    analyst: new FakeAnalyst([advice, advice]),
+    evidence: new FakeEvidence(),
+    clock,
+    ids,
+    preflight,
+  });
+  for (let index = 0; index < 12 && store.state.activeJob?.activeAttempt?.phase !== "running"; index += 1) {
+    await controller.tick();
+  }
+  const firstAttempt = store.state.activeJob!.activeAttempt!;
+  for (const message of [
+    "HTTP 429 rate limit",
+    "ECONNRESET during fetch",
+    "Provider timeout",
+    "HTTP 503 service unavailable",
+    "WebSocket connection closed before first tool",
+  ]) {
+    assert.equal(automaticRecoveryCandidateForAttempt(
+      store.state.activeJob!,
+      firstAttempt,
+      preSideEffectProviderDiagnostic(message),
+      "2026-08-03T00:01:00.000Z",
+    )?.rule, "provider_pre_side_effect_transient");
+  }
+  assert.equal(automaticRecoveryCandidateForAttempt(
+    store.state.activeJob!,
+    firstAttempt,
+    preSideEffectProviderDiagnostic("HTTP 401 invalid API key"),
+    "2026-08-03T00:01:00.000Z",
+  ), undefined);
+  const continuation = withRuntimeSideEffectBoundary(classifyProviderContinuationLost({
+    providerApi: "openai-responses",
+    phase: "initial_generation",
+    turnCount: 1,
+    assistantMessageCount: 1,
+    toolExecutionCount: 0,
+    toolErrorCount: 0,
+    transcriptBytes: 128,
+  }, { code: 0, signal: null }), {
+    assistantContentObserved: true,
+    toolCallObserved: false,
+    toolExecutionStarted: false,
+    durableResultPresent: false,
+    worktreeChanged: false,
+    commitCreated: false,
+  });
+  assert.equal(automaticRecoveryCandidateForAttempt(
+    store.state.activeJob!,
+    firstAttempt,
+    continuation,
+    "2026-08-03T00:01:00.000Z",
+  )?.rule, "provider_pre_side_effect_transient");
+  for (const boundary of [
+    { toolExecutionStarted: true },
+    { durableResultPresent: true },
+    { worktreeChanged: true },
+    { commitCreated: true },
+  ]) {
+    assert.equal(automaticRecoveryCandidateForAttempt(
+      store.state.activeJob!,
+      firstAttempt,
+      preSideEffectProviderDiagnostic("HTTP 429 rate limit", boundary),
+      "2026-08-03T00:01:00.000Z",
+    ), undefined);
+  }
+  const firstDiagnostic = preSideEffectProviderDiagnostic("HTTP 429 rate limit");
+  herdr.waitFailure = new PiRpcRuntimeFailure("safe transient Provider failure", firstDiagnostic);
+  assert.equal((await controller.tick()).action, "attempt_reconciling");
+  herdr.waitFailure = new PiRpcRuntimeFailure("safe transient Provider failure", firstDiagnostic);
+  assert.equal((await controller.tick()).action, "blocked");
+  const firstCandidate = store.state.activeJob!.incident!.automaticRecovery!;
+  assert.equal(firstCandidate.rule, "provider_pre_side_effect_transient");
+
+  const authorizationActions: string[] = [];
+  for (let index = 0; index < 10 && store.state.activeJob?.state !== "recovery_approved"; index += 1) {
+    authorizationActions.push((await controller.tick()).action);
+  }
+  const approved = store.state.activeJob!;
+  assert.equal(approved.state, "recovery_approved");
+  assert.equal(approved.approval?.basis, "policy_rule");
+  assert.equal(approved.automaticRecoveries?.length, 1);
+  assert.ok(authorizationActions.includes("auto_recovery_authorized"));
+  assert.ok(Date.parse(approved.automaticRecoveries![0]!.createdAt) >= Date.parse(approved.automaticRecoveries![0]!.notBefore!));
+
+  assert.equal((await controller.tick()).action, "recovery_applied");
+  assert.equal(git.attemptSideEffectInspections.at(-1), firstAttempt.baseSha);
+  assert.equal(herdr.closed.length, 1);
+  assert.equal(store.state.activeJob!.attempts.at(-1)?.id, firstAttempt.id);
+  assert.equal(store.state.activeJob!.attempts.at(-1)?.phase, "settled");
+
+  assert.equal((await controller.tick()).action, "attempt_prepared");
+  const freshAttempt = store.state.activeJob!.activeAttempt!;
+  assert.ok(freshAttempt.id !== firstAttempt.id);
+  assert.ok(freshAttempt.planDigest !== firstAttempt.planDigest);
+  assert.ok(freshAttempt.promptDigest !== firstAttempt.promptDigest);
+
+  for (let index = 0; index < 4 && store.state.activeJob?.activeAttempt?.phase !== "running"; index += 1) {
+    await controller.tick();
+  }
+  assert.equal(store.state.activeJob?.activeAttempt?.phase, "running");
+  herdr.waitFailure = new PiRpcRuntimeFailure("safe transient Provider failure", firstDiagnostic);
+  assert.equal((await controller.tick()).action, "attempt_reconciling");
+  herdr.waitFailure = new PiRpcRuntimeFailure("safe transient Provider failure", firstDiagnostic);
+  assert.equal((await controller.tick()).action, "blocked");
+  const repeatedCandidate = store.state.activeJob!.incident!.automaticRecovery!;
+  assert.equal(repeatedCandidate.rule, "provider_pre_side_effect_transient");
+  if (firstCandidate.rule !== "provider_pre_side_effect_transient" || repeatedCandidate.rule !== "provider_pre_side_effect_transient") {
+    throw new Error("expected Provider automatic recovery candidates");
+  }
+  assert.ok(repeatedCandidate.fingerprint !== firstCandidate.fingerprint);
+  assert.equal(repeatedCandidate.scopeFingerprint, firstCandidate.scopeFingerprint);
+  assert.equal((await controller.tick()).action, "analysis_recorded");
+  assert.equal(store.state.activeJob!.state, "blocked");
+  assert.equal(store.state.activeJob!.approval, null);
+  assert.equal(store.state.activeJob!.automaticRecoveries?.length, 1);
 });
 
 test("an exact held pre-PR job can be cancelled, archived, and selected again", async () => {
@@ -336,7 +480,7 @@ test("an approved retry rechecks and accepts a late exact Worker result before s
   });
 });
 
-test("Reviewer infrastructure failure automatically retries once despite unknown review outcomes", async () => {
+test("Reviewer failure without a pre-side-effect receipt requires exact human approval", async () => {
   const store = new MemoryStore();
   const clock = new FakeClock();
   const ids = new SequenceIds();
@@ -383,15 +527,23 @@ test("Reviewer infrastructure failure automatically retries once despite unknown
   assert.deepEqual(store.state.activeJob?.incident?.allowedActions, ["retry_fresh_reviewer", "hold"]);
   assert.match(store.state.activeJob?.incident?.summary ?? "", /provider sessions are full/);
 
-  const authorization = await controller.tick();
-  assert.equal(authorization.action, "auto_recovery_authorized");
+  assert.equal((await controller.tick()).action, "analysis_recorded");
+  const held = store.state.activeJob!;
+  assert.equal(held.incident?.automaticRecovery, undefined);
+  assert.equal(held.automaticRecoveries?.length ?? 0, 0);
+  await approveRecovery(store, {
+    expectedRevision: held.revision,
+    incidentId: held.incident!.id,
+    analysisId: held.analysis!.id,
+    actor: "maintainer@example.test",
+    reason: "The unchanged Reviewer HEAD is approved for one fresh independent review.",
+  }, { clock, ids });
   const approved = store.state.activeJob!;
   assert.equal(approved.state, "recovery_approved");
   assert.equal(approved.analysis?.action, "retry_fresh_reviewer");
-  assert.equal(approved.approval?.basis, "policy_rule");
+  assert.equal(approved.approval?.basis, "analyst_advice");
   assert.equal(approved.approval?.action, "retry_fresh_reviewer");
-  assert.equal(approved.automaticRecoveries?.length, 1);
-  assert.equal(approved.automaticRecoveries?.[0]?.policyRule, "reviewer_same_head_infrastructure");
+  assert.equal(approved.automaticRecoveries?.length ?? 0, 0);
   assert.deepEqual(operatorActionsFor(approved), []);
   assert.throws(
     () => assertJobInvariant({
@@ -407,14 +559,6 @@ test("Reviewer infrastructure failure automatically retries once despite unknown
     }),
     /recovery action/,
   );
-  assert.throws(
-    () => assertJobInvariant({
-      ...approved,
-      automaticRecoveries: [{ ...approved.automaticRecoveries![0]!, action: "retry_fresh_worker" }],
-    }),
-    /automatic recovery history/,
-  );
-
   const recovery = await controller.tick();
   assert.match(recovery.message, /fresh Reviewer/);
   assert.equal(store.state.activeJob?.state, "reviewer_ready");
@@ -487,7 +631,15 @@ test("fresh Reviewer aggregation reuses completed Standards and runs only the mi
   herdr.settleWithoutResult = { agentStatus: "idle", diagnostic: "provider continuation ended" };
   assert.equal((await controller.tick()).action, "attempt_reconciling");
   assert.equal((await controller.tick()).action, "blocked");
-  assert.equal((await controller.tick()).action, "auto_recovery_authorized");
+  assert.equal((await controller.tick()).action, "analysis_recorded");
+  const held = store.state.activeJob!;
+  await approveRecovery(store, {
+    expectedRevision: held.revision,
+    incidentId: held.incident!.id,
+    analysisId: held.analysis!.id,
+    actor: "maintainer@example.test",
+    reason: "Resume only identity-bound Reviewer checkpoints on the unchanged HEAD.",
+  }, { clock, ids });
   assert.equal((await controller.tick()).action, "recovery_applied");
 
   const restarted = new HarnessController(dependencies);
@@ -1400,7 +1552,15 @@ async function recoverReviewerStages(
   herdr.settleWithoutResult = { agentStatus: "idle", diagnostic: "Reviewer crashed after a durable stage" };
   assert.equal((await controller.tick()).action, "attempt_reconciling");
   assert.equal((await controller.tick()).action, "blocked");
-  assert.equal((await controller.tick()).action, "auto_recovery_authorized");
+  assert.equal((await controller.tick()).action, "analysis_recorded");
+  const held = store.state.activeJob!;
+  await approveRecovery(dependencies.store, {
+    expectedRevision: held.revision,
+    incidentId: held.incident!.id,
+    analysisId: held.analysis!.id,
+    actor: "maintainer@example.test",
+    reason: "Resume only identity-bound Reviewer checkpoints on the unchanged HEAD.",
+  }, { clock: dependencies.clock, ids: dependencies.ids });
   assert.equal((await controller.tick()).action, "recovery_applied");
   const restarted = new HarnessController(dependencies);
   assert.equal((await restarted.tick()).action, "attempt_prepared");
@@ -1412,4 +1572,34 @@ async function recoverReviewerStages(
   assert.equal((await restarted.tick()).action, "attempt_dispatched");
   const missing = /^Missing Reviewer stages: ?(.*)$/m.exec(herdr.prompts.at(-1)?.text ?? "")?.[1] ?? "missing";
   return { inputs, missing, validationExecutions: git.reviewerValidationExecutions };
+}
+
+function preSideEffectProviderDiagnostic(
+  message: string,
+  overrides: Partial<{
+    assistantContentObserved: boolean;
+    toolCallObserved: boolean;
+    toolExecutionStarted: boolean;
+    durableResultPresent: boolean;
+    worktreeChanged: boolean;
+    commitCreated: boolean;
+  }> = {},
+) {
+  return withRuntimeSideEffectBoundary(classifyProviderFailure("error", message, {
+    providerApi: "openai-responses",
+    phase: "initial_generation",
+    turnCount: 1,
+    assistantMessageCount: 1,
+    toolExecutionCount: 0,
+    toolErrorCount: 0,
+    transcriptBytes: 128,
+  }), {
+    assistantContentObserved: false,
+    toolCallObserved: false,
+    toolExecutionStarted: false,
+    durableResultPresent: false,
+    worktreeChanged: false,
+    commitCreated: false,
+    ...overrides,
+  });
 }

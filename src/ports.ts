@@ -142,6 +142,11 @@ export type WorkerVerification =
   | { ok: true; headSha: string }
   | { ok: false; class: "integrity_violation" | "stale_task"; reason: string };
 
+export type AttemptSideEffectInspection = {
+  worktreeChanged: boolean;
+  commitCreated: boolean;
+};
+
 export type ReviewerVerification =
   | { ok: true }
   | { ok: false; class: "integrity_violation"; kind: "head_mismatch" | "worktree_dirty"; reason: string };
@@ -184,6 +189,11 @@ export interface GitPort {
     expectedRemoteHeadSha: string | null;
     latestBaseSha: string;
   }): Promise<BaseSyncVerification>;
+  inspectAttemptSideEffects(input: {
+    worktree: WorktreeHandle;
+    expectedHeadSha: string;
+    allowedResultPaths: string[];
+  }): Promise<AttemptSideEffectInspection>;
   verifyWorker(input: {
     worktree: WorktreeHandle;
     branch: string;

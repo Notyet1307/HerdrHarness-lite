@@ -225,6 +225,9 @@ export class FakeGit implements GitPort {
   baseSyncFailure: { class: "agent_decision" | "integrity_violation"; reason: string } | null = null;
   baseSyncs: Array<{ expectedHeadSha: string; expectedRemoteHeadSha: string | null; latestBaseSha: string }> = [];
   workerFailure: { class: "integrity_violation" | "stale_task"; reason: string } | null = null;
+  attemptSideEffects = { worktreeChanged: false, commitCreated: false };
+  attemptSideEffectFailure: Error | null = null;
+  attemptSideEffectInspections: string[] = [];
   reviewerFailure: string | null = null;
   reviewerValidationArgv: string[][] = [];
   reviewerDockerHosts: Array<string | null> = [];
@@ -269,6 +272,12 @@ export class FakeGit implements GitPort {
       expectedRemoteHeadSha: input.expectedRemoteHeadSha,
     });
     return this.workerFailure ? { ok: false, ...this.workerFailure } : { ok: true, headSha: input.reportedHeadSha };
+  }
+
+  async inspectAttemptSideEffects(input: { expectedHeadSha: string }): Promise<{ worktreeChanged: boolean; commitCreated: boolean }> {
+    if (this.attemptSideEffectFailure) throw this.attemptSideEffectFailure;
+    this.attemptSideEffectInspections.push(input.expectedHeadSha);
+    return { ...this.attemptSideEffects };
   }
 
   async prepareWorkerResult(input: { rootPath: string }): Promise<{ descriptorPath: string }> {

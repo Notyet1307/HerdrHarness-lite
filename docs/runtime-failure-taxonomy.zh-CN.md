@@ -7,7 +7,7 @@
 - 一个 Attempt 只有一个 durable `dispatch.json`，Controller 在 dispatch 前先持久化 `running`；结果不确定时只重观察同一 Attempt，不重发 prompt。
 - workflow retry 只创建 fresh Worker/Reviewer Attempt。`retryable` 是诊断属性，不是执行授权。
 - 交付仍要求身份绑定的 durable result、exact HEAD、clean worktree，以及 Git/GitHub fixed point。Runtime terminal、Herdr/Pi settled、validation pass 都不能单独证明完成。
-- Analyst 只能建议。自动 fresh retry 仍只来自 `worker_pre_dispatch_infrastructure` 或 `reviewer_same_head_infrastructure` 两条既有、一次性、指纹绑定的 policy rule。
+- Analyst 只能建议。自动 fresh retry 只来自既有 pre-dispatch rule，或 `provider_pre_side_effect_transient`：后者要求完整无副作用 receipt、固定短退避、fresh Attempt，并按 job/lane/HEAD 限一次。
 - 新写入的 runner/controller safe failure receipt 至少包含稳定的 `domain`、`code`、`stage`、`retryable`。兼容字段 `failureDomain`、`failureCode`、`failureStage` 保留细粒度 runtime 信息和旧 ledger 读能力。Reviewer validation 的分类目前只存在于 tool-local `failure` 对象，尚未进入 durable Reviewer result。
 
 ## 2. 稳定字段
@@ -28,10 +28,10 @@
 | code | domain | 产生层 | 当前 Incident / Recovery 路径 | 可能“任务已完成但观测失败” | 自动 fresh retry | 可安全记录 |
 | --- | --- | --- | --- | --- | --- | --- |
 | `provider_auth` | execution | SDK host / Provider failure classifier | terminal failure → bounded same-Attempt observation → 通常 `infrastructure_exhausted` | 否 | code 本身不授权；Reviewer 仍可能命中既有 same-HEAD policy | HTTP 状态、Provider API 枚举、阶段、计数、指纹 |
-| `provider_rate_limit` | execution | Provider failure classifier | 同上 | 否 | 同上；`retryable=true` 仍不等于授权 | 同上 |
-| `provider_network` | execution | Provider failure classifier | 同上 | 不确定 | 同上 | 同上，不记录原始错误 |
-| `provider_timeout` | execution | Provider failure classifier | 同上 | 不确定 | 同上 | 同上 |
-| `provider_continuation_lost` | observation | runner 在 tool completion 后观察到 child 退出且无 `agent_settled` | bounded observation → `infrastructure_exhausted` | 工具副作用可能已发生，但没有交付事实 | `retryable=false`；不自动重放 | Provider API 枚举、tool/turn 计数、child exit、事件 digest |
+| `provider_rate_limit` | execution | Provider failure classifier | 同上 | 否 | 仅完整 pre-side-effect receipt 可命中一次性 Provider policy | 同上 |
+| `provider_network` | execution | Provider failure classifier | 同上 | 不确定 | 同上；WebSocket 在首个工具前关闭归入此类 | 同上，不记录原始错误 |
+| `provider_timeout` | execution | Provider failure classifier | 同上 | 不确定 | 仅完整 pre-side-effect receipt 可命中一次性 Provider policy | 同上 |
+| `provider_continuation_lost` | observation | runner 观察到 partial assistant 或 tool completion 后 child 退出且无 `agent_settled` | bounded observation → `infrastructure_exhausted` | 工具副作用可能已发生，但没有交付事实 | 只有 `toolExecutionStarted=false` 和其他副作用字段全 false 时可命中一次性 Provider policy | Provider API 枚举、tool/turn 计数、child exit、事件 digest |
 | `rpc_protocol` | observation | strict JSONL / response identity validator | terminal failure → bounded observation → `infrastructure_exhausted` | 是 | 仅既有 narrow policy | 细粒度 `failureCode`、stage、last event type、指纹 |
 | `rpc_event_oversize` | observation | strict JSONL 的 1 MiB 单行上限 | 同上 | 是 | 同上 | 只记录分类、字节数/digest；不记录 payload |
 | `rpc_terminal_missing` | observation | runner 的 child-shutdown cleanup | child-shutdown 或 terminal observation 无法在显式 deadline 内确认时 fail closed | 是，尤其 durable result 已先写入时 | 否；先收敛原 Attempt 事实 | receipt identity、owner/child 状态、result 是否存在、事件 digest |
@@ -58,6 +58,8 @@
 | Provider 接受请求后永不返回 | `test/fixtures/fake-pi-rpc.js` + `FAKE_PI_PROVIDER_NEVER_RETURNS=1` | no-progress 后写 `runtime_stall`、terminal/terminated，无 prompt replay |
 | 持续工具输出直至 total | `FAKE_PI_CONTINUOUS_TOOL_OUTPUT=1` | tool update 刷新 no-progress，total 到期写 `attempt_deadline` |
 | `tool_execution_end` 后无 `agent_settled` | `FAKE_PI_TOOL_BEFORE_FAILURE=success` + `FAKE_PI_CONTINUATION_LOST=1` | `provider_continuation_lost`，不保存 tool result |
+| 首个工具前 partial assistant 后失联 | `FAKE_PI_ASSISTANT_BEFORE_CONTINUATION_LOST=1` + `FAKE_PI_CONTINUATION_LOST=1` | `provider_continuation_lost` + 完整无工具副作用边界 |
+| read/edit/bash 已开始后 Provider 429 | `FAKE_PI_TOOL_START_ONLY=<tool>` + assistant 429 | `toolExecutionStarted=true`，拒绝自动 fresh retry |
 | durable result 已写但 terminal 缺失 | `FAKE_PI_RESULT_BEFORE_STALL=1` | result 创建刷新一次进展；随后 `runtime_stall`，failure receipt 优先且仍不能验收 |
 | terminal failure 后 durable result 已存在 | `FAKE_PI_TERMINAL_FAILURE_AFTER_RESULT=1` | failure receipt 优先，adapter 拒绝交付 |
 | 单条 event 超过 1 MiB | `FAKE_PI_OVERSIZE_EVENT=1` | `rpc_event_oversize`，spool 不保存大 payload |
@@ -69,7 +71,7 @@
 
 ## 5. 记录边界
 
-允许持久化：Attempt/generation/plan identity，稳定分类，允许枚举的 Provider API，4xx/5xx 状态码，bounded counters，transcript/event 字节桶，event/summary digest，child exit，compaction 数值 receipt，以及固定 validation receipt 的 identity、argv/digest、时间、exit/signal/timeout、环境/resource/source digest 和 stdout/stderr 有界投影。原始 validation 输出不落盘；Review Axis 原文只在权限收紧的 Attempt 私有 evidence 文件中保存。模型只收到有界投影，ledger 只保存 validation receipt 的 path/digest/status binding，terminal receipt 不保存原文。
+允许持久化：Attempt/generation/plan identity，稳定分类，允许枚举的 Provider API，4xx/5xx 状态码，bounded counters，transcript/event 字节桶，event/summary/status/worktree digest，六个 side-effect boundary 布尔值，child exit，compaction 数值 receipt，以及固定 validation receipt 的 identity、argv/digest、时间、exit/signal/timeout、环境/resource/source digest 和 stdout/stderr 有界投影。原始 validation 输出不落盘；Review Axis 原文只在权限收紧的 Attempt 私有 evidence 文件中保存。模型只收到有界投影，ledger 只保存 validation receipt 的 path/digest/status binding，terminal receipt 不保存原文。
 
 禁止持久化：access token、OAuth 内容、API key、Provider 原始响应或 stderr、完整私密 transcript、tool 原始 payload、compaction summary 内容和原始 stack。`runtime-events.jsonl` 只保留 event type、digest 和少量 allowlisted 标志，并有 512 KiB 总上限。
 

@@ -15,6 +15,8 @@ import {
   PiRpcRuntimeFailure,
 } from "../src/pi-rpc-diagnostics.js";
 import {
+  captureRuntimeSideEffectBaseline,
+  observeRuntimeSideEffects,
   readJson,
   rpcGeneration,
   type PiRpcPlan,
@@ -27,6 +29,7 @@ test("Pi RPC adapter persists one launch and one dispatch across Controller rest
   const fixture = rpcFixture();
   try {
     let launches = 0;
+    let closes = 0;
     const host = {
       async runInPane(input: { argv: string[] }): Promise<void> {
         launches += 1;
@@ -44,6 +47,7 @@ test("Pi RPC adapter persists one launch and one dispatch across Controller rest
           isolatedAgentDir: join(plan.runtimeRoot, "pi-agent"),
         });
       },
+      async close(): Promise<void> { closes += 1; },
     };
     const runtime = new PiRpcRuntime(host);
     await runtime.startAgent({ handle: fixture.handle, attempt: fixture.attempt, cwd: fixture.root, argv: fixture.snapshot.argv });
@@ -90,6 +94,7 @@ test("Pi RPC adapter persists one launch and one dispatch across Controller rest
     });
     assert.equal(observation.result?.attemptId, fixture.attempt.id);
     await runtime.terminate({ handle: fixture.handle, attempt: fixture.attempt, reason: "completed" });
+    assert.equal(closes, 1);
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
   }
@@ -1069,6 +1074,12 @@ test("durable runner rejects a settled assistant failure without persisting Prov
       assert.equal(terminal.assistantMessageCount, 1);
       assert.equal(terminal.toolExecutionCount, scenario.tool ? 1 : 0);
       assert.equal(terminal.toolErrorCount, scenario.tool === "error" ? 1 : 0);
+      assert.equal(terminal.assistantContentObserved, false);
+      assert.equal(terminal.toolCallObserved, scenario.tool !== undefined);
+      assert.equal(terminal.toolExecutionStarted, scenario.tool !== undefined);
+      assert.equal(terminal.durableResultPresent, false);
+      assert.equal(terminal.worktreeChanged, false);
+      assert.equal(terminal.commitCreated, false);
       assert.equal(terminal.transcriptSizeBucket, "lt64k");
       assert.match(String(terminal.diagnosticFingerprint), /^[0-9a-f]{64}$/);
       assert.deepEqual(terminal.childExit, { code: 0, signal: null });
@@ -1080,6 +1091,78 @@ test("durable runner rejects a settled assistant failure without persisting Prov
     } finally {
       rmSync(fixture.root, { recursive: true, force: true });
     }
+  }
+});
+
+test("read edit and bash starts all cross the automatic Provider retry boundary", () => {
+  const fixture = rpcFixture();
+  try {
+    const { execution, plan } = runWorkerFault(fixture, {
+      FAKE_PI_TOOL_START_ONLY: "read,edit,bash",
+      FAKE_PI_ASSISTANT_STOP_REASON: "error",
+      FAKE_PI_ASSISTANT_ERROR: "HTTP 429 rate limit",
+    });
+    assert.equal(execution.ok, true, execution.stderr);
+    const terminal = readJson<Record<string, unknown>>(join(plan.runtimeRoot, "terminal.json"));
+    assert.equal(terminal.failureCode, "provider_rate_limited");
+    assert.equal(terminal.toolCallObserved, true);
+    assert.equal(terminal.toolExecutionStarted, true);
+    assert.equal(terminal.durableResultPresent, false);
+    assert.equal(terminal.worktreeChanged, false);
+    assert.equal(terminal.commitCreated, false);
+    const events = readFileSync(join(plan.runtimeRoot, "runtime-events.jsonl"), "utf8");
+    assert.equal(events.match(/"type":"tool_execution_start"/g)?.length, 3);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("tool end or bash update without a start event still crosses the retry boundary", () => {
+  for (const event of ["end", "bash-update"]) {
+    const fixture = rpcFixture();
+    try {
+      const { execution, plan } = runWorkerFault(fixture, {
+        FAKE_PI_TOOL_EVENT_ONLY: event,
+        ...(event === "bash-update" ? { FAKE_PI_WORKTREE_CHANGE: "1" } : {}),
+        FAKE_PI_ASSISTANT_STOP_REASON: "error",
+        FAKE_PI_ASSISTANT_ERROR: "HTTP 429 rate limit",
+      });
+      assert.equal(execution.ok, true, execution.stderr);
+      const terminal = readJson<Record<string, unknown>>(join(plan.runtimeRoot, "terminal.json"));
+      assert.equal(terminal.failureCode, "provider_rate_limited");
+      assert.equal(terminal.toolCallObserved, true);
+      assert.equal(terminal.toolExecutionStarted, true);
+      assert.equal(terminal.worktreeChanged, event === "bash-update");
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("runtime side-effect snapshot detects commits without storing their contents", () => {
+  const root = mkdtempSync(join(tmpdir(), "harness-side-effect-git-"));
+  try {
+    const runner = new SyncCommandRunner();
+    assert.equal(runner.run("git", ["init", root]).ok, true);
+    assert.equal(runner.run("git", ["-C", root, "config", "user.email", "test@example.test"]).ok, true);
+    assert.equal(runner.run("git", ["-C", root, "config", "user.name", "Harness Test"]).ok, true);
+    writeFileSync(join(root, "file.txt"), "before\n");
+    assert.equal(runner.run("git", ["-C", root, "add", "file.txt"]).ok, true);
+    assert.equal(runner.run("git", ["-C", root, "commit", "-m", "initial"]).ok, true);
+    const baseline = captureRuntimeSideEffectBaseline(root, []);
+    writeFileSync(join(root, "file.txt"), "after\n");
+    assert.deepEqual(observeRuntimeSideEffects(root, [], baseline), {
+      worktreeChanged: true,
+      commitCreated: false,
+    });
+    assert.equal(runner.run("git", ["-C", root, "add", "file.txt"]).ok, true);
+    assert.equal(runner.run("git", ["-C", root, "commit", "-m", "side effect"]).ok, true);
+    assert.deepEqual(observeRuntimeSideEffects(root, [], baseline), {
+      worktreeChanged: false,
+      commitCreated: true,
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });
 
@@ -1100,6 +1183,27 @@ test("tool completion followed by child exit is classified as a lost Provider co
       stage: "agent-run",
       retryable: false,
     });
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("assistant continuation loss before the first tool records a retry-safe boundary", () => {
+  const fixture = rpcFixture();
+  try {
+    const { execution, plan } = runWorkerFault(fixture, {
+      FAKE_PI_ASSISTANT_BEFORE_CONTINUATION_LOST: "1",
+      FAKE_PI_CONTINUATION_LOST: "1",
+    });
+    assert.equal(execution.ok, false);
+    const terminal = readJson<Record<string, unknown>>(join(plan.runtimeRoot, "terminal.json"));
+    assert.equal(terminal.failureCode, "provider_continuation_lost");
+    assert.equal(terminal.assistantContentObserved, true);
+    assert.equal(terminal.toolCallObserved, false);
+    assert.equal(terminal.toolExecutionStarted, false);
+    assert.equal(terminal.durableResultPresent, false);
+    assert.equal(terminal.worktreeChanged, false);
+    assert.equal(terminal.commitCreated, false);
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
   }
@@ -1629,7 +1733,17 @@ test("durable runner handles child exit races and records sanitized failures", a
       assert.equal(execution.ok, ok, mode);
       const terminal = readJson<Record<string, unknown>>(join(plan.runtimeRoot, "terminal.json"));
       if (ok) {
-        assert.deepEqual(terminal, { ...receiptIdentity(plan), ok: true, agentSettled: true });
+        assert.deepEqual(terminal, {
+          ...receiptIdentity(plan),
+          ok: true,
+          assistantContentObserved: false,
+          toolCallObserved: false,
+          toolExecutionStarted: false,
+          durableResultPresent: true,
+          worktreeChanged: false,
+          commitCreated: false,
+          agentSettled: true,
+        });
       } else {
         assert.equal(terminal.ok, false);
         assert.equal(terminal.error, "Pi RPC runner failed");
