@@ -1,10 +1,11 @@
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { attemptPlanDigest, buildExecutionSnapshot } from "../attempt-plan.js";
 import { buildAttemptContextEnvelope } from "../attempt-context.js";
 import { QUALIFIED_CONTROLLED_COMPACTION_PI_VERSION, WORKER_CONTROLLED_COMPACTION_POLICY } from "../compatibility.js";
 import { bindPendingHandoff } from "../handoff.js";
 import { digest, evolveJob, type Attempt, type ExecutionSnapshot, type HarnessState, type Job } from "../model.js";
 import { renderAttemptPrompt } from "../prompts.js";
+import { reviewerCheckpointIdentity } from "../reviewer-checkpoints.js";
 import type { ControllerContext } from "./context.js";
 import { message, result, safeToken, trimSlash } from "./helpers.js";
 import { BUNDLED_REVIEW_AXIS_AGENT, PI_RPC_RUNNER, PI_RPC_SDK_ENTRY } from "./resources.js";
@@ -116,6 +117,49 @@ export async function prepareAttempt(ctx: ControllerContext, state: HarnessState
     return result(false, "preflight_failed", job.id, message(error));
   }
   attempt = { ...attempt, executionSnapshot };
+  if (lane === "reviewer" && handoff?.kind === "approved_recovery" && handoff.source.attemptId) {
+    try {
+      const sourceAttempt = job.attempts.find((candidate) => candidate.id === handoff.source.attemptId);
+      if (!sourceAttempt || sourceAttempt.lane !== "reviewer" || sourceAttempt.phase !== "settled") {
+        throw new Error("Reviewer recovery checkpoint source Attempt is missing or unsettled");
+      }
+      const sourceRootPath = resolve(
+        ctx.deps.config.stateDir,
+        "reviewer-attempts",
+        safeToken(job.id),
+        safeToken(sourceAttempt.id),
+      );
+      if (dirname(sourceAttempt.resultPath) !== sourceRootPath) {
+        throw new Error("Reviewer recovery checkpoint source escaped Harness private state");
+      }
+      const source = {
+        rootPath: sourceRootPath,
+        identity: reviewerCheckpointIdentity(job, sourceAttempt),
+      };
+      const consumerIdentity = reviewerCheckpointIdentity(job, attempt, job.revision);
+      const excludedDigests = job.attempts.flatMap((candidate) => (
+        candidate.reviewerCheckpointInputs ?? []
+      )).map((binding) => binding.digest);
+      const bindings = await ctx.deps.git.findReusableReviewerCheckpoints({ source, consumerIdentity, excludedDigests });
+      const records = await ctx.deps.git.verifyReviewerCheckpoints({ bindings, sources: [source], consumerIdentity });
+      const validation = records.find((record) => record.checkpoint.stage === "validation");
+      attempt = {
+        ...attempt,
+        ...(bindings.length > 0 ? { reviewerCheckpointInputs: bindings } : {}),
+        ...(validation?.checkpoint.stage === "validation"
+          ? {
+              reviewerValidationReceipt: {
+                path: validation.binding.path,
+                digest: validation.binding.digest,
+                status: validation.checkpoint.result.status,
+              },
+            }
+          : {}),
+      };
+    } catch (error) {
+      return result(false, "preflight_failed", job.id, message(error));
+    }
+  }
   const contextEnvelope = buildAttemptContextEnvelope({ job, attempt, executionSnapshot, handoff });
   attempt = { ...attempt, contextEnvelope, contextEnvelopeDigest: digest(contextEnvelope) };
   const prompt = renderAttemptPrompt(attempt);

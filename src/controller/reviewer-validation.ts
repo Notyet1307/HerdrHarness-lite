@@ -1,7 +1,8 @@
 import { dirname } from "node:path";
-import { digest, type Attempt, type HarnessState, type Job } from "../model.js";
+import { type Attempt, type HarnessState, type Job } from "../model.js";
 import type { ReviewerValidationInput } from "../ports.js";
-import { ReviewerValidationIntegrityError } from "../reviewer-validation.js";
+import { ReviewerValidationIntegrityError, reviewerValidationResult } from "../reviewer-validation.js";
+import { reviewerCheckpointIdentity } from "../reviewer-checkpoints.js";
 import type { ControllerContext } from "./context.js";
 import { message, validReviewerValidationArgv } from "./helpers.js";
 import { verifyReviewerPreflight } from "./attempt-integrity.js";
@@ -39,14 +40,15 @@ export async function ensureReviewerValidation(
         }
       : await ctx.deps.git.runReviewerValidation(input);
     const boundAttempt = { ...attempt, reviewerValidationReceipt: output.binding };
-    if (output.receipt.status === "infrastructure-error") {
+    const receiptResult = reviewerValidationResult(output.receipt);
+    if (receiptResult.status === "infrastructure-error") {
       const boundJob = { ...job, activeAttempt: boundAttempt };
       return {
         ok: false,
         result: await ctx.block(state, boundJob, {
           class: "validation_infrastructure",
           lane: "reviewer",
-          summary: output.receipt.error ?? "Reviewer validation infrastructure failed",
+          summary: receiptResult.error ?? "Reviewer validation infrastructure failed",
           attemptResult: null,
         }),
       };
@@ -94,7 +96,7 @@ export async function verifyBoundReviewerValidation(
       ...reviewerValidationInput(job, attempt),
       binding: attempt.reviewerValidationReceipt,
     });
-    if (receipt.status === "infrastructure-error") throw new ReviewerValidationIntegrityError("infrastructure-error receipt cannot authorize Reviewer start");
+    if (reviewerValidationResult(receipt).status === "infrastructure-error") throw new ReviewerValidationIntegrityError("infrastructure-error receipt cannot authorize Reviewer start");
     return null;
   } catch (error) {
     return ctx.block(state, job, {
@@ -107,9 +109,20 @@ export async function verifyBoundReviewerValidation(
 }
 
 export function reviewerValidationInput(job: Job, attempt: Attempt): ReviewerValidationInput {
+  const reused = attempt.reviewerCheckpointInputs?.find((binding) => binding.stage === "validation");
+  if (!reused) return reviewerOwnValidationInput(job, attempt);
+  const sourceAttempt = job.attempts.find((candidate) => candidate.id === reused.sourceAttemptId);
+  if (!sourceAttempt || sourceAttempt.lane !== "reviewer" || sourceAttempt.phase !== "settled") {
+    throw new ReviewerValidationIntegrityError("Reviewer validation checkpoint source Attempt is missing");
+  }
+  return reviewerOwnValidationInput(job, sourceAttempt);
+}
+
+export function reviewerOwnValidationInput(job: Job, attempt: Attempt): ReviewerValidationInput {
   if (!job.worktree || !attempt.executionSnapshot || !attempt.expectedHeadSha || !attempt.reviewerValidationArgv) {
     throw new ReviewerValidationIntegrityError("Reviewer validation lost its Attempt binding");
   }
+  const checkpointIdentity = reviewerCheckpointIdentity(job, attempt);
   return {
     worktree: job.worktree,
     rootPath: dirname(attempt.resultPath),
@@ -121,6 +134,7 @@ export function reviewerValidationInput(job: Job, attempt: Attempt): ReviewerVal
     expectedHeadSha: attempt.expectedHeadSha,
     validationArgv: [...attempt.reviewerValidationArgv],
     dockerHost: attempt.executionSnapshot.dockerHost,
-    resourceDigest: digest(attempt.executionSnapshot.resources),
+    resourceDigest: checkpointIdentity.resourceDigest,
+    checkpointIdentity,
   };
 }

@@ -16,6 +16,11 @@
 5. Handoff 必须绑定来源 job revision、task/result/evidence/Incident/Analysis/Approval，以及目标 lane、base、expected HEAD 与 expected remote HEAD。
 6. Handoff 是 untrusted task data，不能扩大工具、runtime 或 repository policy authority。
 7. 窄范围自动恢复由 policy 形成可审计 Approval；其余恢复需要 Analyst advice 与精确 human gate。
+8. Reviewer 的 preflight、Standards、Spec、Controller validation 和 final aggregation 可写 Harness-owned、Attempt-private、原子不可覆盖的结构化 checkpoint；它们不是最终 Reviewer result。
+9. checkpoint 绑定 source Attempt/job revision、task/base/exact HEAD、runtime/provider/model/resource/context digests、stage、createdAt、结构化 result 与 result digest。
+10. same-HEAD Reviewer retry 仍关闭旧 pane并创建 fresh Attempt；新 Attempt 只导入全部身份匹配且未被另一 Attempt 消费的 checkpoint，不恢复旧 session 或 transcript。
+11. 无效、漂移、可写、格式错误或已消费 checkpoint 不授权完成、工具或恢复；对应阶段重跑或 fail closed。
+12. `review_submit` 仍是唯一最终 Reviewer 结论；即使存在 `reviewer-final.json`，fresh Attempt 也必须完成该调用及既有 Git/result gates。
 
 ## 结果
 
@@ -23,3 +28,4 @@
 - 每次重试都有新的角色上下文和 durable identity。
 - `pendingBrief` 只作为旧 ledger 的 fail-closed guard；新状态只写结构化 handoff。
 - Analyst 建议、人工授权、runtime 观察和实际执行保持分离。
+- 已完成 Reviewer 确定性阶段不必因后续 Provider continuation 失败而全部重跑，同时每个 checkpoint 的消费仍有 durable Attempt 记录和一次性上限。

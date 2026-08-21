@@ -25,7 +25,8 @@ import { runRuntimePreflight, verifyExecutionSnapshot } from "./runtime-prefligh
 import { verifyReviewerIntegrity, verifyReviewerPreflight } from "./attempt-integrity.js";
 import { reconcileAttemptOrBlock } from "./attempt-reconciliation.js";
 import { finishObservedAttempt } from "./attempt-settlement.js";
-import { ensureReviewerValidation, reviewerValidationInput, verifyBoundReviewerValidation } from "./reviewer-validation.js";
+import { ensureReviewerValidation, reviewerOwnValidationInput, reviewerValidationInput, verifyBoundReviewerValidation } from "./reviewer-validation.js";
+import { reviewerCheckpointSources, verifyBoundReviewerCheckpoints } from "./reviewer-checkpoints.js";
 import type { TickResult } from "./types.js";
 
 export async function driveAttempt(ctx: ControllerContext, state: HarnessState, job: Job, lane: Attempt["lane"]): Promise<TickResult> {
@@ -65,6 +66,10 @@ export async function driveAttempt(ctx: ControllerContext, state: HarnessState, 
   } else if (attempt.phase !== "running") {
     const integrityBlock = await verifyExecutionSnapshot(ctx, state, job, attempt);
     if (integrityBlock) return integrityBlock;
+  }
+  if (lane === "reviewer") {
+    const checkpointBlock = await verifyBoundReviewerCheckpoints(ctx, state, job, attempt);
+    if (checkpointBlock) return checkpointBlock;
   }
   if (lane === "reviewer" && (attempt.phase !== "prepared" || attempt.reviewerValidationReceipt !== undefined)) {
     const validationBlock = await verifyBoundReviewerValidation(ctx, state, job, attempt);
@@ -131,9 +136,13 @@ export async function driveAttempt(ctx: ControllerContext, state: HarnessState, 
         if (reviewAxisAgents.length !== 1) throw new Error("Reviewer execution snapshot must bind exactly one child agent");
         const reviewerPrompt = renderAttemptPrompt(preparedAttempt);
         const validationInput = reviewerValidationInput(job, preparedAttempt);
+        const reviewerInput = reviewerOwnValidationInput(job, preparedAttempt);
         const workspace = await ctx.deps.git.prepareReviewer({
-          ...validationInput,
+          ...reviewerInput,
+          validationSource: validationInput,
           validationReceipt: preparedAttempt.reviewerValidationReceipt,
+          checkpointInputs: preparedAttempt.reviewerCheckpointInputs ?? [],
+          checkpointSources: reviewerCheckpointSources(ctx, job, preparedAttempt),
           reviewAxisAgent: reviewAxisAgents[0]!,
           piExecutable: preparedAttempt.executionSnapshot!.executable,
           piRuntimeVersion: preparedAttempt.executionSnapshot!.runtimeVersion,

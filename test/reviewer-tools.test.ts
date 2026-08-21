@@ -4,7 +4,7 @@ import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
 import { chmodSync, existsSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { REVIEWER_CONTEXT_BUDGET_BYTES, REVIEWER_CONTEXT_BUDGET_RESERVE_BYTES } from "../src/reviewer-context-budget.js";
 
@@ -32,7 +32,7 @@ const reviewTasks = [
 ];
 
 function reviewWorkflowScript(tasks = reviewTasks): string {
-  const entries = tasks.map((task, index) => ({ key: index === 0 ? "standards" : "spec", ...task }));
+  const entries = tasks.map((task) => ({ key: task.task.startsWith("Axis: Standards") ? "standards" : "spec", ...task }));
   return `return await runs.all(${JSON.stringify(entries)});`;
 }
 
@@ -65,7 +65,7 @@ test("Reviewer tools read one bound validation receipt and write one identity-bo
     chmodSync(privateEvidenceDir, 0o700);
     writeFileSync(join(source, "product.txt"), "source\n");
     const runtime = prepareReviewRuntime(root, source);
-    const descriptor = withValidationReceipt(root, {
+    const descriptor = withCheckpointValidationReceipt(root, {
       version: 1,
       jobId: "job-1",
       attemptId: "reviewer-1",
@@ -149,6 +149,8 @@ test("Reviewer tools read one bound validation receipt and write one identity-bo
       status: preflightResult.validationReceipt.status,
       exitCode: preflightResult.validationReceipt.exitCode,
     }, { status: "passed", exitCode: 0 });
+    assert.equal(JSON.parse(readFileSync(join(root, "reviewer-preflight.json"), "utf8")).stage, "reviewer-preflight");
+    assert.equal(lstatSync(join(root, "reviewer-preflight.json")).mode & 0o222, 0);
     const largeRead = `read-head\n${"r".repeat(1024 * 1024)}\nread-tail`;
     const readProjection = await toolResultHook({
       toolCallId: "large-read",
@@ -245,21 +247,30 @@ test("Reviewer tools read one bound validation receipt and write one identity-bo
     assert.equal(projectedWorkflow.isError, undefined);
     assert.ok(Buffer.byteLength(projectedWorkflow.content[0]?.text ?? "") < 25 * 1024);
     assert.equal(JSON.stringify(projectedWorkflow.details).includes("finalOutput"), false);
-    const projectedAxes = projectedWorkflow.details as Record<"Standards" | "Spec", {
+    const projectedDetails = projectedWorkflow.details as Record<string, unknown>;
+    const projectedAxes = {
+      Standards: projectedDetails.Standards,
+      Spec: projectedDetails.Spec,
+    } as Record<"Standards" | "Spec", {
       status: string;
       summary: string;
       findings: unknown[];
       evidenceRefs: unknown[];
       outputByteCount: number;
-      digest: string;
+      outputDigest: string;
       truncated: boolean;
     }>;
+    const reviewerFinal = projectedDetails.reviewerFinal as {
+      status: "pass";
+      summary: string;
+      findings: [];
+    };
     for (const [axis, projection] of Object.entries(projectedAxes)) {
       assert.equal(projection.status, "pass");
       assert.equal(projection.findings.length, 0);
       assert.equal(projection.evidenceRefs.length, 0);
       assert.ok(projection.outputByteCount > 1024 * 1024);
-      assert.match(projection.digest, /^[0-9a-f]{64}$/);
+      assert.match(projection.outputDigest, /^[0-9a-f]{64}$/);
       assert.equal(projection.truncated, true);
       assert.match(projection.summary, new RegExp(`^${axis.toLowerCase()}-head`));
       assert.match(projection.summary, new RegExp(`${axis.toLowerCase()}-tail$`));
@@ -268,12 +279,14 @@ test("Reviewer tools read one bound validation receipt and write one identity-bo
       assert.ok(evidenceName);
       const evidence = readFileSync(join(privateEvidenceDir, evidenceName));
       assert.equal(evidence.length, projection.outputByteCount);
-      assert.equal(sha256(evidence), projection.digest);
+      assert.equal(sha256(evidence), projection.outputDigest);
     }
+    assert.equal(JSON.parse(readFileSync(join(root, "standards-axis.json"), "utf8")).stage, "standards-axis");
+    assert.equal(JSON.parse(readFileSync(join(root, "spec-axis.json"), "utf8")).stage, "spec-axis");
 
     assert.equal(readFileSync(join(source, "product.txt"), "utf8"), "source\n");
 
-    await submit.execute("submit", { status: "pass", summary: "accepted", findings: [] });
+    await submit.execute("submit", reviewerFinal);
     const result = JSON.parse(readFileSync(resultPath, "utf8")) as Record<string, unknown>;
     assert.deepEqual(result, {
       version: 1,
@@ -281,10 +294,13 @@ test("Reviewer tools read one bound validation receipt and write one identity-bo
       attemptId: "reviewer-1",
       lane: "reviewer",
       status: "pass",
-      summary: "accepted",
+      summary: reviewerFinal.summary,
       reviewedHeadSha: "b".repeat(40),
       findings: [],
     });
+    const finalCheckpoint = JSON.parse(readFileSync(join(root, "reviewer-final.json"), "utf8"));
+    assert.equal(finalCheckpoint.stage, "reviewer-final");
+    assert.deepEqual(finalCheckpoint.result, reviewerFinal);
     assert.equal(readdirSync(root).some((name) => name.endsWith(".tmp")), false);
     await assert.rejects(() => submit.execute("submit-again", {
       status: "changes",
@@ -300,6 +316,151 @@ test("Reviewer tools read one bound validation receipt and write one identity-bo
     restoreEnv("PI_SUBAGENT_PI_BINARY", previousSubagentPiBinary);
     restoreEnv("PI_SUBAGENTS_PI_CODING_AGENT_PACKAGE_ROOT", previousPiPackageRoot);
     restoreEnv("FAKE_PI_REVIEW_AXIS_OUTPUT_BYTES", previousAxisOutputBytes);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("fresh aggregation imports Standards and permits only the missing Spec axis", async () => {
+  const root = mkdtempSync(join(tmpdir(), "herdr-review-aggregation-"));
+  const sourceRoot = join(root, "source-attempt");
+  const currentRoot = join(root, "current-attempt");
+  const source = join(currentRoot, "source");
+  const descriptorPath = join(currentRoot, "descriptor.json");
+  const resultPath = join(currentRoot, "result.json");
+  const previousDescriptor = process.env.HERDR_HARNESS_REVIEW_DESCRIPTOR;
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  const previousOriginalAgentDir = process.env.HERDR_HARNESS_REVIEW_ORIGINAL_PI_AGENT_DIR;
+  const previousCanonicalAgentDir = process.env.HERDR_HARNESS_REVIEW_CANONICAL_PI_AGENT_DIR;
+  const previousSubagentPiBinary = process.env.PI_SUBAGENT_PI_BINARY;
+  const previousPiPackageRoot = process.env.PI_SUBAGENTS_PI_CODING_AGENT_PACKAGE_ROOT;
+  try {
+    for (const path of [sourceRoot, source, join(currentRoot, "evidence")]) mkdirSync(path, { recursive: true, mode: 0o700 });
+    chmodSync(sourceRoot, 0o700);
+    chmodSync(currentRoot, 0o700);
+    chmodSync(join(currentRoot, "evidence"), 0o700);
+    writeFileSync(join(source, "product.txt"), "source\n");
+    const runtime = prepareReviewRuntime(currentRoot, source);
+    const sourceDescriptor = withCheckpointValidationReceipt(sourceRoot, {
+      version: 1,
+      jobId: "job-1",
+      attemptId: "reviewer-1",
+      reviewedHeadSha: "b".repeat(40),
+      resultPath: join(sourceRoot, "result.json"),
+    }, "passed");
+    const sourceIdentity = sourceDescriptor.checkpointIdentity as Record<string, unknown>;
+    const validationRecord = {
+      binding: {
+        stage: "validation",
+        path: sourceDescriptor.validationReceiptPath,
+        digest: sourceDescriptor.validationReceiptDigest,
+        sourceAttemptId: "reviewer-1",
+      },
+      checkpoint: JSON.parse(readFileSync(String(sourceDescriptor.validationReceiptPath), "utf8")),
+    };
+    const preflightRecord = writeCheckpointRecord(sourceRoot, sourceIdentity, "reviewer-preflight", {
+      status: "passed",
+      validationReceiptDigest: sourceDescriptor.validationReceiptDigest,
+      validationStatus: "passed",
+    });
+    const standardsRecord = writeCheckpointRecord(sourceRoot, sourceIdentity, "standards-axis", {
+      status: "pass",
+      summary: "Standards satisfied",
+      findings: [],
+      evidenceRefs: ["src/model.ts:1"],
+      outputByteCount: 128,
+      outputDigest: "9".repeat(64),
+      truncated: false,
+    });
+    const currentDescriptor = withCheckpointValidationReceipt(currentRoot, {
+      version: 1,
+      jobId: "job-1",
+      attemptId: "reviewer-2",
+      reviewedHeadSha: "b".repeat(40),
+      piAgentDir: join(currentRoot, "original-agent"),
+      ...runtime,
+      resultPath,
+      privateEvidenceDir: join(currentRoot, "evidence"),
+      initialContextBytes: 10_000,
+      contextBudgetBytes: REVIEWER_CONTEXT_BUDGET_BYTES,
+      contextBudgetReserveBytes: REVIEWER_CONTEXT_BUDGET_RESERVE_BYTES,
+    }, "passed");
+    (currentDescriptor.checkpointIdentity as Record<string, unknown>).jobRevision = 12;
+    currentDescriptor.validationReceiptPath = sourceDescriptor.validationReceiptPath;
+    currentDescriptor.validationReceiptDigest = sourceDescriptor.validationReceiptDigest;
+    currentDescriptor.checkpointInputs = [validationRecord, preflightRecord, standardsRecord];
+    writeFileSync(descriptorPath, JSON.stringify(currentDescriptor));
+    process.env.HERDR_HARNESS_REVIEW_DESCRIPTOR = descriptorPath;
+    const originalAgentDir = join(currentRoot, "original-agent");
+    mkdirSync(originalAgentDir, { recursive: true });
+    process.env.PI_CODING_AGENT_DIR = join(currentRoot, "top-level-private-agent");
+    mkdirSync(process.env.PI_CODING_AGENT_DIR);
+    process.env.HERDR_HARNESS_REVIEW_CANONICAL_PI_AGENT_DIR = originalAgentDir;
+    const configExtension = await import(pathToFileURL(resolve("pi/extensions/reviewer-subagent-config.js")).href) as { default(): void };
+    configExtension.default();
+
+    const tools = new Map<string, Tool>();
+    let toolCallHook: ToolCallHook | undefined;
+    let toolResultHook: ToolResultHook | undefined;
+    const extension = await import(pathToFileURL(resolve("pi/extensions/reviewer-tools.js")).href) as {
+      default(pi: {
+        registerTool(tool: Tool & { name: string }): void;
+        on(event: "tool_call" | "tool_result", hook: ToolCallHook | ToolResultHook): void;
+      }): void;
+    };
+    extension.default({
+      registerTool(tool) { tools.set(tool.name, tool); },
+      on(event, hook) {
+        if (event === "tool_call") toolCallHook = hook as ToolCallHook;
+        else toolResultHook = hook as ToolResultHook;
+      },
+    });
+    const preflight = JSON.parse((await tools.get("review_preflight")!.execute("preflight", {})).content[0]!.text) as {
+      ok: boolean;
+      missingAxes: string[];
+      reusedStages: string[];
+      reusedAxes: Record<string, unknown>;
+    };
+    assert.equal(preflight.ok, true);
+    assert.deepEqual(preflight.missingAxes, ["Spec"]);
+    assert.ok(preflight.reusedStages.includes("standards-axis"));
+    assert.ok(preflight.reusedAxes.Standards);
+    assert.ok(toolCallHook);
+    assert.ok(toolResultHook);
+    const standardsCall = { ...reviewCall, workflowScript: reviewWorkflowScript([reviewTasks[0]!]) };
+    assert.equal((await toolCallHook({ toolCallId: "standards", toolName: "subagent", input: standardsCall }))?.block, true);
+    const specCall = { ...reviewCall, workflowScript: reviewWorkflowScript([reviewTasks[1]!]) };
+    assert.equal(await toolCallHook({ toolCallId: "spec", toolName: "subagent", input: specCall }), undefined);
+    const specTask = workflowEntries(specCall.workflowScript)[0]!.task;
+    const projection = await toolResultHook({
+      toolCallId: "spec",
+      toolName: "subagent",
+      input: specCall,
+      content: [{ type: "text", text: "done" }],
+      isError: false,
+      details: {
+        mode: "workflow",
+        results: [{
+          agent: "herdr-harness-review-axis",
+          task: specTask,
+          exitCode: 0,
+          finalOutput: JSON.stringify({ status: "pass", summary: "Spec satisfied", findings: [], evidenceRefs: [] }),
+        }],
+      },
+    });
+    assert.equal(projection?.isError, undefined);
+    assert.equal(existsSync(join(currentRoot, "standards-axis.json")), false);
+    assert.equal(JSON.parse(readFileSync(join(currentRoot, "spec-axis.json"), "utf8")).stage, "spec-axis");
+    const reviewerFinal = (projection?.details as Record<string, unknown>).reviewerFinal as Record<string, unknown>;
+    await tools.get("review_submit")!.execute("submit", reviewerFinal);
+    assert.equal(JSON.parse(readFileSync(resultPath, "utf8")).status, "pass");
+  } finally {
+    if (previousDescriptor === undefined) delete process.env.HERDR_HARNESS_REVIEW_DESCRIPTOR;
+    else process.env.HERDR_HARNESS_REVIEW_DESCRIPTOR = previousDescriptor;
+    restoreEnv("PI_CODING_AGENT_DIR", previousAgentDir);
+    restoreEnv("HERDR_HARNESS_REVIEW_ORIGINAL_PI_AGENT_DIR", previousOriginalAgentDir);
+    restoreEnv("HERDR_HARNESS_REVIEW_CANONICAL_PI_AGENT_DIR", previousCanonicalAgentDir);
+    restoreEnv("PI_SUBAGENT_PI_BINARY", previousSubagentPiBinary);
+    restoreEnv("PI_SUBAGENTS_PI_CODING_AGENT_PACKAGE_ROOT", previousPiPackageRoot);
     rmSync(root, { recursive: true, force: true });
   }
 });
@@ -441,6 +602,7 @@ test("Reviewer environment preflight blocks review axes but still permits a dura
       },
     });
     assert.equal(changesProjection?.isError, undefined);
+    const changesFinal = (changesProjection?.details as Record<string, unknown>).reviewerFinal as Record<string, unknown>;
     await assert.rejects(() => deterministicTools.get("review_submit")!.execute("missing-finding", {
       status: "changes",
       summary: "omitted finding",
@@ -453,14 +615,8 @@ test("Reviewer environment preflight blocks review axes but still permits a dura
     }), /preserve every Review Axis and validation finding identity/);
     const validationFinding = deterministicPreflight.validationFindings?.[0];
     assert.ok(validationFinding);
-    await deterministicTools.get("review_submit")!.execute("bound-changes", {
-      status: "changes",
-      summary: "axis and deterministic validation findings",
-      findings: [
-        { severity: "major", summary: axisFinding.summary, evidence: axisFinding.evidenceRefs.join("\n") },
-        validationFinding,
-      ],
-    });
+    assert.deepEqual((changesFinal.findings as unknown[]).length, 2);
+    await deterministicTools.get("review_submit")!.execute("bound-changes", changesFinal);
     assert.equal(JSON.parse(readFileSync(deterministicResultPath, "utf8")).status, "changes");
 
     const malformedDescriptor = withValidationReceipt(root, {
@@ -578,6 +734,103 @@ function workflowEntries(script: unknown): Array<{ key: string; agent: string; t
   assert.equal(script.startsWith(prefix), true);
   assert.equal(script.endsWith(suffix), true);
   return JSON.parse(script.slice(prefix.length, -suffix.length)) as Array<{ key: string; agent: string; task: string }>;
+}
+
+function withCheckpointValidationReceipt(
+  root: string,
+  descriptor: Record<string, unknown>,
+  status: "passed" | "failed-checks",
+): Record<string, unknown> {
+  const emptyDigest = sha256("");
+  const validationArgv = ["npm", "run", "verify"];
+  const output = () => ({
+    text: "",
+    truncated: false,
+    redacted: false,
+    byteCount: 0,
+    sha256: emptyDigest,
+  });
+  const checkpointIdentity = {
+    jobId: descriptor.jobId,
+    sourceAttemptId: descriptor.attemptId,
+    jobRevision: 7,
+    taskDigest: "1".repeat(64),
+    baseSha: "a".repeat(40),
+    reviewedHeadSha: descriptor.reviewedHeadSha,
+    runtimeDigest: "2".repeat(64),
+    providerDigest: "3".repeat(64),
+    modelDigest: "4".repeat(64),
+    resourceDigest: "5".repeat(64),
+    repositoryContextBundleDigest: "6".repeat(64),
+  };
+  const result = {
+    status,
+    validationArgv,
+    validationArgvDigest: sha256(JSON.stringify(validationArgv)),
+    startedAt: "2026-08-21T00:00:00.000Z",
+    completedAt: "2026-08-21T00:00:01.000Z",
+    durationMs: 1_000,
+    exitCode: status === "passed" ? 0 : 7,
+    signal: null,
+    timeout: false,
+    error: null,
+    stdout: output(),
+    stderr: output(),
+    dockerHost: null,
+    relevantEnvironmentDigest: "7".repeat(64),
+    sourceSnapshotDigest: "8".repeat(64),
+  };
+  const receipt = {
+    version: 2,
+    ...checkpointIdentity,
+    stage: "validation",
+    createdAt: result.completedAt,
+    result,
+    resultDigest: stableDigest(result),
+  };
+  const body = JSON.stringify(receipt);
+  const validationReceiptPath = join(root, "validation-receipt.json");
+  writeFileSync(validationReceiptPath, body, { mode: 0o400 });
+  chmodSync(validationReceiptPath, 0o400);
+  const attemptRoot = dirname(String(descriptor.resultPath));
+  return {
+    ...descriptor,
+    checkpointIdentity,
+    checkpointInputs: [],
+    checkpointPaths: {
+      reviewerPreflight: join(attemptRoot, "reviewer-preflight.json"),
+      standardsAxis: join(attemptRoot, "standards-axis.json"),
+      specAxis: join(attemptRoot, "spec-axis.json"),
+      reviewerFinal: join(attemptRoot, "reviewer-final.json"),
+    },
+    validationReceiptPath,
+    validationReceiptDigest: sha256(body),
+    validationStatus: status,
+  };
+}
+
+function writeCheckpointRecord(
+  root: string,
+  identity: Record<string, unknown>,
+  stage: "reviewer-preflight" | "standards-axis" | "spec-axis" | "reviewer-final",
+  result: Record<string, unknown>,
+): Record<string, unknown> {
+  const checkpoint = {
+    version: 1,
+    ...identity,
+    stage,
+    createdAt: "2026-08-21T00:00:02.000Z",
+    result,
+    resultDigest: stableDigest(result),
+  };
+  const path = join(root, `${stage}.json`);
+  const body = `${JSON.stringify(checkpoint, null, 2)}\n`;
+  writeFileSync(path, body, { mode: 0o400 });
+  chmodSync(path, 0o400);
+  return {
+    binding: { stage, path, digest: sha256(body), sourceAttemptId: identity.sourceAttemptId },
+    checkpoint,
+  };
 }
 
 function withValidationReceipt(
@@ -700,6 +953,16 @@ function prepareReviewRuntime(root: string, reviewPath: string): {
 function restoreEnv(name: string, value: string | undefined): void {
   if (value === undefined) delete process.env[name];
   else process.env[name] = value;
+}
+
+function stableDigest(value: unknown): string {
+  const stringify = (input: unknown): string => {
+    if (input === null || typeof input !== "object") return JSON.stringify(input);
+    if (Array.isArray(input)) return `[${input.map(stringify).join(",")}]`;
+    const object = input as Record<string, unknown>;
+    return `{${Object.keys(object).sort().map((key) => `${JSON.stringify(key)}:${stringify(object[key])}`).join(",")}}`;
+  };
+  return sha256(stringify(value));
 }
 
 function sha256(value: string | Uint8Array): string {

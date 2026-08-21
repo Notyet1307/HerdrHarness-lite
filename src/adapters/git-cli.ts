@@ -2,13 +2,16 @@ import { createHash, randomUUID } from "node:crypto";
 import { Buffer } from "node:buffer";
 import { accessSync, chmodSync, closeSync, constants, cpSync, existsSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { digest, type ContextEntry, type ExecutionContext, type ExecutionResource, type ReviewerValidationReceipt, type ReviewerValidationReceiptBinding } from "../model.js";
+import { digest, type ContextEntry, type ExecutionContext, type ExecutionResource, type ReviewerCheckpoint, type ReviewerCheckpointBinding, type ReviewerCheckpointRecord, type ReviewerValidationCheckpoint, type ReviewerValidationReceipt, type ReviewerValidationReceiptBinding, type ReviewerValidationStageResult } from "../model.js";
 import { executionResourceDigest } from "../attempt-plan.js";
-import type { BaseSyncVerification, GitPort, ReviewerValidationInput, ReviewerVerification, WorkerVerification } from "../ports.js";
+import type { BaseSyncVerification, GitPort, ReviewerCheckpointSource, ReviewerValidationInput, ReviewerVerification, WorkerVerification } from "../ports.js";
 import { pathIsWithin, pathsOverlap } from "../path-safety.js";
+import { assertReviewerCheckpoint, REVIEWER_CHECKPOINT_FILES, reviewerCheckpointIsCompatible } from "../reviewer-checkpoints.js";
 import {
   assertReviewerValidationReceipt,
+  isReviewerValidationCheckpoint,
   REVIEWER_VALIDATION_TIMEOUT_MS,
+  reviewerValidationResult,
   ReviewerValidationInfrastructureError,
   ReviewerValidationIntegrityError,
 } from "../reviewer-validation.js";
@@ -310,6 +313,73 @@ export class GitCli implements GitPort {
     }
   }
 
+  async findReusableReviewerCheckpoints(input: {
+    source: ReviewerCheckpointSource;
+    consumerIdentity: import("../model.js").ReviewerCheckpointIdentity;
+    excludedDigests: string[];
+  }): Promise<ReviewerCheckpointBinding[]> {
+    const excluded = new Set(input.excludedDigests);
+    const bindings: ReviewerCheckpointBinding[] = [];
+    const checkpoints = new Map<ReviewerCheckpoint["stage"], ReviewerCheckpoint>();
+    for (const [stage, name] of Object.entries(REVIEWER_CHECKPOINT_FILES) as Array<[ReviewerCheckpoint["stage"], string]>) {
+      const path = join(resolve(input.source.rootPath), name);
+      if (!existsSync(path)) continue;
+      try {
+        const raw = privateImmutableFile(path);
+        const checkpoint = JSON.parse(raw) as unknown;
+        assertReviewerCheckpoint(checkpoint, input.source.identity, stage);
+        const binding = { stage, path, digest: textDigest(raw), sourceAttemptId: checkpoint.sourceAttemptId };
+        if (!excluded.has(binding.digest)
+          && reviewerCheckpointIsCompatible(checkpoint, input.consumerIdentity)
+          && reusableCheckpoint(checkpoint)) {
+          bindings.push(binding);
+          checkpoints.set(stage, checkpoint);
+        }
+      } catch {
+        // Invalid, writable, malformed, or drifted checkpoints grant no reuse.
+      }
+    }
+    const validation = bindings.find((binding) => binding.stage === "validation");
+    const preflight = checkpoints.get("reviewer-preflight");
+    const withoutInvalidPreflight = preflight?.stage === "reviewer-preflight"
+      && (!validation || preflight.result.validationReceiptDigest !== validation.digest)
+      ? bindings.filter((binding) => binding.stage !== "reviewer-preflight")
+      : bindings;
+    const stages = new Set(withoutInvalidPreflight.map((binding) => binding.stage));
+    return stages.has("reviewer-final")
+      && (!stages.has("validation") || !stages.has("standards-axis") || !stages.has("spec-axis"))
+      ? withoutInvalidPreflight.filter((binding) => binding.stage !== "reviewer-final")
+      : withoutInvalidPreflight;
+  }
+
+  async verifyReviewerCheckpoints(input: {
+    bindings: ReviewerCheckpointBinding[];
+    sources: ReviewerCheckpointSource[];
+    consumerIdentity: import("../model.js").ReviewerCheckpointIdentity;
+  }): Promise<ReviewerCheckpointRecord[]> {
+    if (input.bindings.length > 5
+      || new Set(input.bindings.map((binding) => binding.stage)).size !== input.bindings.length
+      || new Set(input.bindings.map((binding) => binding.digest)).size !== input.bindings.length) {
+      throw new ReviewerValidationIntegrityError("Reviewer checkpoint bindings are duplicated or excessive");
+    }
+    return input.bindings.map((binding) => {
+      const source = input.sources.find((candidate) => candidate.identity.sourceAttemptId === binding.sourceAttemptId);
+      if (!source) throw new ReviewerValidationIntegrityError("Reviewer checkpoint source Attempt is missing");
+      const path = join(resolve(source.rootPath), REVIEWER_CHECKPOINT_FILES[binding.stage]);
+      if (resolve(binding.path) !== path) throw new ReviewerValidationIntegrityError("Reviewer checkpoint path drifted");
+      const raw = privateImmutableFile(path);
+      if (textDigest(raw) !== binding.digest) throw new ReviewerValidationIntegrityError("Reviewer checkpoint digest drifted");
+      const checkpoint = JSON.parse(raw) as unknown;
+      assertReviewerCheckpoint(checkpoint, source.identity, binding.stage);
+      if (checkpoint.sourceAttemptId !== binding.sourceAttemptId
+        || !reviewerCheckpointIsCompatible(checkpoint, input.consumerIdentity)
+        || !reusableCheckpoint(checkpoint)) {
+        throw new ReviewerValidationIntegrityError("Reviewer checkpoint is not reusable for this Attempt");
+      }
+      return { binding: { ...binding }, checkpoint };
+    });
+  }
+
   async runReviewerValidation(input: ReviewerValidationInput): Promise<{
     receipt: ReviewerValidationReceipt;
     binding: ReviewerValidationReceiptBinding;
@@ -337,14 +407,8 @@ export class GitCli implements GitPort {
     });
     const completedAt = new Date().toISOString();
     const deterministic = output.signal === null && output.timeout === false && output.error === null;
-    const receipt: ReviewerValidationReceipt = {
-      version: 1,
+    const result: ReviewerValidationStageResult = {
       status: deterministic ? output.exitCode === 0 ? "passed" : "failed-checks" : "infrastructure-error",
-      jobId: input.jobId,
-      attemptId: input.attemptId,
-      taskDigest: input.taskDigest,
-      baseSha: input.baseSha,
-      reviewedHeadSha: input.expectedHeadSha,
       validationArgv: [...input.validationArgv],
       validationArgvDigest: digest(input.validationArgv),
       startedAt,
@@ -358,8 +422,15 @@ export class GitCli implements GitPort {
       stderr: output.stderr,
       dockerHost: input.dockerHost,
       relevantEnvironmentDigest: output.relevantEnvironmentDigest,
-      resourceDigest: input.resourceDigest,
       sourceSnapshotDigest,
+    };
+    const receipt: ReviewerValidationCheckpoint = {
+      version: 2,
+      ...input.checkpointIdentity,
+      stage: "validation",
+      createdAt: completedAt,
+      result,
+      resultDigest: digest(result),
     };
     assertReviewerValidationReceipt(receipt, validationIdentity(input));
     publishImmutable(paths.receiptPath, `${JSON.stringify(receipt, null, 2)}\n`);
@@ -377,11 +448,14 @@ export class GitCli implements GitPort {
     if (textDigest(raw) !== input.binding.digest) throw new ReviewerValidationIntegrityError("Reviewer validation receipt digest drifted");
     const receipt = JSON.parse(raw) as unknown;
     assertReviewerValidationReceipt(receipt, validationIdentity(input));
-    if (receipt.status !== input.binding.status) throw new ReviewerValidationIntegrityError("Reviewer validation receipt status drifted");
+    const normalized = reviewerValidationResult(receipt);
+    if (normalized.status !== input.binding.status) throw new ReviewerValidationIntegrityError("Reviewer validation receipt status drifted");
     const plan = JSON.parse(privateImmutableFile(paths.planPath)) as unknown;
-    const expectedPlan = validationPlan(input, paths, receipt.sourceSnapshotDigest);
+    const expectedPlan = isReviewerValidationCheckpoint(receipt)
+      ? validationPlan(input, paths, normalized.sourceSnapshotDigest)
+      : legacyValidationPlan(input, paths, normalized.sourceSnapshotDigest);
     if (JSON.stringify(plan) !== JSON.stringify(expectedPlan)) throw new ReviewerValidationIntegrityError("Reviewer validation plan drifted");
-    if (sourceSnapshotDigest(paths.reviewPath) !== receipt.sourceSnapshotDigest) {
+    if (sourceSnapshotDigest(paths.reviewPath) !== normalized.sourceSnapshotDigest) {
       throw new ReviewerValidationIntegrityError("Reviewer source snapshot digest drifted");
     }
     return receipt;
@@ -399,7 +473,11 @@ export class GitCli implements GitPort {
     validationArgv: string[];
     dockerHost: string | null;
     resourceDigest: string;
+    checkpointIdentity: import("../model.js").ReviewerCheckpointIdentity;
+    validationSource: ReviewerValidationInput;
     validationReceipt: ReviewerValidationReceiptBinding;
+    checkpointInputs: ReviewerCheckpointBinding[];
+    checkpointSources: ReviewerCheckpointSource[];
     reviewAxisAgent: ExecutionResource;
     piExecutable: string;
     piRuntimeVersion: string;
@@ -411,7 +489,19 @@ export class GitCli implements GitPort {
     contextBudgetReserveBytes: number;
   }): Promise<{ reviewPath: string; descriptorPath: string; evidencePath: string }> {
     const paths = reviewerPaths(input);
-    await this.verifyReviewerValidation({ ...input, binding: input.validationReceipt });
+    const checkpointRecords = await this.verifyReviewerCheckpoints({
+      bindings: input.checkpointInputs,
+      sources: input.checkpointSources,
+      consumerIdentity: input.checkpointIdentity,
+    });
+    const validationReceipt = await this.verifyReviewerValidation({ ...input.validationSource, binding: input.validationReceipt });
+    const expectedSourceDigest = reviewerValidationResult(validationReceipt).sourceSnapshotDigest;
+    const currentSourceDigest = existsSync(paths.reviewPath)
+      ? sourceSnapshotDigest(paths.reviewPath)
+      : this.prepareReviewerValidationWorkspace(input, paths);
+    if (currentSourceDigest !== expectedSourceDigest) {
+      throw new ReviewerValidationIntegrityError("Reused Reviewer validation receipt is bound to a different source snapshot");
+    }
     if (input.reviewAxisAgent.kind !== "agent" || executionResourceDigest(input.reviewAxisAgent.path) !== input.reviewAxisAgent.digest) {
       throw new Error("Reviewer child agent differs from the bound execution resource");
     }
@@ -448,6 +538,14 @@ export class GitCli implements GitPort {
       validationReceiptPath: input.validationReceipt.path,
       validationReceiptDigest: input.validationReceipt.digest,
       validationStatus: input.validationReceipt.status,
+      checkpointIdentity: input.checkpointIdentity,
+      checkpointInputs: checkpointRecords,
+      checkpointPaths: {
+        reviewerPreflight: join(paths.rootPath, REVIEWER_CHECKPOINT_FILES["reviewer-preflight"]),
+        standardsAxis: join(paths.rootPath, REVIEWER_CHECKPOINT_FILES["standards-axis"]),
+        specAxis: join(paths.rootPath, REVIEWER_CHECKPOINT_FILES["spec-axis"]),
+        reviewerFinal: join(paths.rootPath, REVIEWER_CHECKPOINT_FILES["reviewer-final"]),
+      },
       reviewPath: paths.reviewPath,
       runtimePath: paths.runtimePath,
       reviewAxisAgentPath,
@@ -623,6 +721,14 @@ function reviewerPaths(input: Pick<ReviewerValidationInput, "worktree" | "rootPa
 }
 
 function validationIdentity(input: ReviewerValidationInput) {
+  if (
+    input.checkpointIdentity.jobId !== input.jobId
+    || input.checkpointIdentity.sourceAttemptId !== input.attemptId
+    || input.checkpointIdentity.taskDigest !== input.taskDigest
+    || input.checkpointIdentity.baseSha !== input.baseSha
+    || input.checkpointIdentity.reviewedHeadSha !== input.expectedHeadSha
+    || input.checkpointIdentity.resourceDigest !== input.resourceDigest
+  ) throw new ReviewerValidationIntegrityError("Reviewer validation checkpoint identity drifted from its Attempt");
   return {
     jobId: input.jobId,
     attemptId: input.attemptId,
@@ -632,13 +738,29 @@ function validationIdentity(input: ReviewerValidationInput) {
     validationArgv: input.validationArgv,
     dockerHost: input.dockerHost,
     resourceDigest: input.resourceDigest,
+    checkpointIdentity: input.checkpointIdentity,
   };
 }
 
 function validationPlan(input: ReviewerValidationInput, paths: ReviewerPaths, sourceSnapshotDigest: string) {
   return {
-    version: 1,
+    version: 2,
     ...validationIdentity(input),
+    validationArgvDigest: digest(input.validationArgv),
+    reviewPath: paths.reviewPath,
+    validationPath: paths.validationPath,
+    scratchPath: paths.scratchPath,
+    privateEvidenceDir: paths.privateEvidenceDir,
+    receiptPath: paths.receiptPath,
+    sourceSnapshotDigest,
+  };
+}
+
+function legacyValidationPlan(input: ReviewerValidationInput, paths: ReviewerPaths, sourceSnapshotDigest: string) {
+  const { checkpointIdentity: _checkpointIdentity, ...identity } = validationIdentity(input);
+  return {
+    version: 1,
+    ...identity,
     validationArgvDigest: digest(input.validationArgv),
     reviewPath: paths.reviewPath,
     validationPath: paths.validationPath,
@@ -651,19 +773,26 @@ function validationPlan(input: ReviewerValidationInput, paths: ReviewerPaths, so
 
 function receiptBinding(path: string): ReviewerValidationReceiptBinding {
   const raw = privateImmutableFile(path);
-  const parsed = JSON.parse(raw) as { status?: unknown };
-  if (parsed.status !== "passed" && parsed.status !== "failed-checks" && parsed.status !== "infrastructure-error") {
+  const parsed = JSON.parse(raw) as ReviewerValidationReceipt;
+  const status = reviewerValidationResult(parsed).status;
+  if (status !== "passed" && status !== "failed-checks" && status !== "infrastructure-error") {
     throw new ReviewerValidationIntegrityError("Reviewer validation receipt has an invalid status");
   }
-  return { path, digest: textDigest(raw), status: parsed.status };
+  return { path, digest: textDigest(raw), status };
 }
 
 function privateImmutableFile(path: string): string {
   const stat = lstatSync(path);
   if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || (stat.mode & 0o222)) {
-    throw new ReviewerValidationIntegrityError(`Reviewer validation artifact is not immutable: ${path}`);
+    throw new ReviewerValidationIntegrityError(`Reviewer artifact is not immutable: ${path}`);
   }
   return readFileSync(path, "utf8");
+}
+
+function reusableCheckpoint(checkpoint: ReviewerCheckpoint): boolean {
+  if (checkpoint.stage === "validation") return checkpoint.result.status !== "infrastructure-error";
+  if (checkpoint.stage === "reviewer-final") return checkpoint.result.status === "pass" || checkpoint.result.status === "changes";
+  return true;
 }
 
 function publishImmutable(path: string, body: string): void {

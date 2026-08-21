@@ -48,6 +48,10 @@ test("Pi review adapter uses fresh foreground Attempt-private project reviewers"
   assert.match(skill, /`Skill`, `Read`, `Glob`, `PowerShell`/);
   assert.match(skill, /returns at most 12 KiB per\s+axis/);
   assert.match(skill, /stdout and stderr content is replaced by a fixed redaction marker/);
+  assert.match(skill, /`missingAxes` and `reusedAxes`/);
+  assert.match(skill, /For each missing axis, use one Pi `subagent` workflow call with one\s+task/);
+  assert.match(skill, /atomically creates the\s+Attempt-private axis checkpoint/);
+  assert.match(skill, /only the fresh\s+Attempt's successful `review_submit` is authoritative/);
   for (const forbidden of ["docs/agents/issue-tracker.md", "gh issue", "fetch the issue"]) {
     assert.equal(skill.toLowerCase().includes(forbidden), false);
   }

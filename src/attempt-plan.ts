@@ -58,6 +58,7 @@ export function attemptPlanDigest(attempt: Attempt): string {
     expectedRemoteHeadSha: attempt.expectedRemoteHeadSha ?? null,
     resultPath: attempt.resultPath,
     reviewerValidationArgv: attempt.reviewerValidationArgv,
+    reviewerCheckpointInputs: attempt.reviewerCheckpointInputs,
     contextEnvelope: attempt.contextEnvelope,
     contextEnvelopeDigest: attempt.contextEnvelopeDigest,
     promptDigest: attempt.promptDigest,

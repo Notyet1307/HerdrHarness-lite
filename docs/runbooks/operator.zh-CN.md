@@ -138,6 +138,8 @@ node dist/src/cli.js decide \
 6. 授权后由 Controller 关闭旧 pane、生成 TypedHandoff 并创建 fresh Attempt。
 7. 读回新 revision 和 Attempt identity；不得向旧 Agent 手工发送续跑 prompt。
 
+same-HEAD Reviewer fresh retry 可能携带 `reviewerCheckpointInputs`。只读核对 source Attempt、stage、path/digest 和新 Attempt plan；不要手工创建、编辑、复制或改权限来“修复” `reviewer-preflight.json`、`standards-axis.json`、`spec-axis.json`、`validation-receipt.json` 或 `reviewer-final.json`。无效 checkpoint 应由 Controller 拒绝并重跑缺失阶段或 fail closed。即使 `reviewer-final.json` 存在，也必须等待 fresh Reviewer 的 durable `review_submit` result、exact HEAD 与 clean-tree gate。
+
 Short provider probe、Herdr `done`、Reviewer child completed 或 validation pass 均不足以宣告恢复。至少等新的 durable role result 和对应 Git gate。
 
 ## 9. 升级与回滚
