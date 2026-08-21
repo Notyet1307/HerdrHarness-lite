@@ -19,6 +19,7 @@ export type TickAction =
   | "claimed"
   | "worktree_created"
   | "attempt_prepared"
+  | "reviewer_validation_ready"
   | "attempt_pane_ready"
   | "attempt_agent_ready"
   | "attempt_dispatched"

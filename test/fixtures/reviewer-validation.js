@@ -18,6 +18,7 @@ const output = (stream, bytes, head, tail, fill) => {
 
 writeFileSync("validation-only.txt", "ok");
 writeFileSync("validation-env.json", JSON.stringify(process.env));
+await new Promise((resolve) => setTimeout(resolve, number("--sleep-ms")));
 output(process.stdout, number("--stdout-bytes"), "stdout-head", "stdout-tail", "v");
 output(process.stderr, number("--stderr-bytes"), "stderr-head", "stderr-tail", "e");
 process.exitCode = number("--exit-code");

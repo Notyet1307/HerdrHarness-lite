@@ -323,7 +323,9 @@ export async function applyRecovery(ctx: ControllerContext, state: HarnessState,
 
   if (approval.action === "retry_fresh_reviewer") {
     if (
-      (incident.class !== "infrastructure_exhausted" && incident.class !== "reviewer_preflight_dirty") ||
+      (incident.class !== "infrastructure_exhausted"
+        && incident.class !== "reviewer_preflight_dirty"
+        && incident.class !== "validation_infrastructure") ||
       incident.lane !== "reviewer" ||
       job.activeAttempt?.lane !== "reviewer" ||
       incident.attemptId !== job.activeAttempt.id

@@ -44,7 +44,7 @@
 | `policy_violation` | execution | runner 对 unknown/control/auto-retry/multiple-start 事件的 gate | terminal failure → bounded observation → `infrastructure_exhausted` | 可能有 result，但 failure receipt 优先 | 仅既有 narrow policy | 固定 policy code、事件 type/digest，不记录 payload |
 | `compaction_failure` | execution | controlled Worker compaction + runner | content-free failed event → terminal failure → `infrastructure_exhausted` | 否 | Worker running 不自动 | 次数、阈值、context/window、`outcome=failed`、`willRetry=false` |
 | `validation_infrastructure` | acceptance | Reviewer preflight / fixed validation launcher | 分类只在 tool-local receipt；Reviewer 若提交 blocked/failed result，Controller 再按 result 进入 `review_uncertain`，Incident 不直接携带此 code | 否 | 否 | command identity、exit/signal、bounded error/tail、Docker version/host identity |
-| `validation_failed` | deterministic | 固定 Reviewer validation command | 分类只在 tool-local receipt；`pass` 被拒绝，Reviewer 可提交 changes 进入正常 rework，或 blocked/failed 进入 `review_uncertain` | 否 | 否 | command identity、exit code、各 8 KiB stdout/stderr 头尾、原始 byte count 与 SHA-256 |
+| `validation_failed` | deterministic | 固定 Reviewer validation command | Controller receipt 记录 `failed-checks`；`pass` 被拒绝，Reviewer 必须提交绑定 validation finding 的 changes | 否 | 否 | command identity、exit code、stdout/stderr redaction marker、原始 byte count 与 SHA-256 |
 
 现有 Provider 还会细分 rejected、unavailable、unknown；RPC 还会保留 invalid JSON、command mismatch、transport closed 等 `failureCode`。稳定 `code` 用于跨层聚合，细粒度兼容字段用于定位，二者都不能被压缩成单一 `infrastructure_exhausted` message。
 
@@ -59,7 +59,7 @@
 | durable result 已写但 terminal 缺失 | `FAKE_PI_RESULT_BEFORE_STALL=1` | result 存在、terminal 不存在且 adapter 会继续等待；受控 terminate 后仍不能验收 |
 | terminal failure 后 durable result 已存在 | `FAKE_PI_TERMINAL_FAILURE_AFTER_RESULT=1` | failure receipt 优先，adapter 拒绝交付 |
 | 单条 event 超过 1 MiB | `FAKE_PI_OVERSIZE_EVENT=1` | `rpc_event_oversize`，spool 不保存大 payload |
-| Reviewer validation 输出很大 | `test/fixtures/reviewer-validation.js --stdout-bytes/--stderr-bytes` | 5 MiB/stream 与超过旧 20 MiB buffer 的 fixture 都只返回各 8 KiB 头尾；Attempt 私有原文的 byte count 与 SHA-256 可复核 |
+| Reviewer validation 输出很大 | `test/fixtures/reviewer-validation.js --stdout-bytes/--stderr-bytes` | 5 MiB/stream 与超过旧 20 MiB buffer 的 fixture 都只保存固定 redaction marker、原始 byte count 与 SHA-256；原始 validation 输出不落盘 |
 | Review Axis 输出很大 | `test/fixtures/pi-subagents/index.js` + `FAKE_PI_REVIEW_AXIS_OUTPUT_BYTES` | 1 MiB/axis fixture 只向父 Reviewer 返回各 12 KiB 内结构化投影；原文不进入 durable result |
 | 未知 RPC event | `FAKE_PI_UNKNOWN_EVENT=1` | content-free `policy_violation` |
 | OAuth lock contention | `test/fixtures/fake-pi-sdk.ts` + `FAKE_PI_SDK_OAUTH_LOCK_CONTENTION=1` | SDK host 只输出安全 stage，不输出 OAuth/token/error 原文 |
@@ -67,7 +67,7 @@
 
 ## 5. 记录边界
 
-允许持久化：Attempt/generation/plan identity，稳定分类，允许枚举的 Provider API，4xx/5xx 状态码，bounded counters，transcript/event 字节桶，event/summary digest，child exit，compaction 数值 receipt，以及固定 validation 的 exit/signal。Reviewer validation/axis 原文只在权限收紧的 Attempt 私有 evidence 文件中保存；模型只收到有界投影，ledger 与 terminal receipt 不保存原文。
+允许持久化：Attempt/generation/plan identity，稳定分类，允许枚举的 Provider API，4xx/5xx 状态码，bounded counters，transcript/event 字节桶，event/summary digest，child exit，compaction 数值 receipt，以及固定 validation receipt 的 identity、argv/digest、时间、exit/signal/timeout、环境/resource/source digest 和 stdout/stderr 有界投影。原始 validation 输出不落盘；Review Axis 原文只在权限收紧的 Attempt 私有 evidence 文件中保存。模型只收到有界投影，ledger 只保存 validation receipt 的 path/digest/status binding，terminal receipt 不保存原文。
 
 禁止持久化：access token、OAuth 内容、API key、Provider 原始响应或 stderr、完整私密 transcript、tool 原始 payload、compaction summary 内容和原始 stack。`runtime-events.jsonl` 只保留 event type、digest 和少量 allowlisted 标志，并有 512 KiB 总上限。
 

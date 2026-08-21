@@ -9,6 +9,8 @@ declare const process: {
   stdout: { write(value: string): void };
   stderr: { write(value: string): void };
   on(event: "SIGINT" | "SIGTERM", callback: () => void): void;
+  once(event: "SIGINT" | "SIGTERM", callback: () => void): void;
+  off(event: "SIGINT" | "SIGTERM", callback: () => void): void;
   exitCode?: number;
 };
 
@@ -53,20 +55,20 @@ declare module "node:child_process" {
     options?: {
       cwd?: string;
       env?: Record<string, string | undefined>;
-      stdio?: "ignore" | ["pipe", "pipe", "pipe"];
+      stdio?: "ignore" | ["pipe" | "ignore", "pipe", "pipe"];
     },
   ): {
     pid?: number;
     stdin: { write(value: string): boolean; end(): void };
     stdout: {
       setEncoding(encoding: "utf8"): void;
-      on(event: "data" | "end", callback: (...args: any[]) => void): void;
+      on(event: "data" | "end" | "error", callback: (...args: any[]) => void): void;
     };
     stderr: {
       setEncoding(encoding: "utf8"): void;
-      on(event: "data", callback: (...args: any[]) => void): void;
+      on(event: "data" | "error", callback: (...args: any[]) => void): void;
     };
-    on(event: "exit" | "error", callback: (...args: any[]) => void): void;
+    on(event: "exit" | "close" | "error", callback: (...args: any[]) => void): void;
     unref(): void;
     kill(signal?: "SIGTERM" | "SIGKILL"): boolean;
   };

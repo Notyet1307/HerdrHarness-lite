@@ -24,6 +24,7 @@ export function allowedActionsFor(blockClass: BlockClass, lane: Incident["lane"]
     case "ci_failure":
       return ["retry_fresh_worker", "hold"];
     case "reviewer_preflight_dirty":
+    case "validation_infrastructure":
       return lane === "reviewer" ? ["retry_fresh_reviewer", "hold"] : ["hold"];
     case "infrastructure_exhausted":
       return lane === "reviewer" ? ["retry_fresh_reviewer", "hold"] : ["retry_fresh_worker", "hold"];
@@ -206,6 +207,12 @@ export function reassessmentClassFor(job: Job): BlockClass | null {
     && job.activeAttempt.id === incident.attemptId
     && job.activeAttempt.phase === "settled";
   const heldInfrastructure = incident.class === "infrastructure_exhausted" && job.activeAttempt?.result === null;
+  const heldValidationInfrastructure = incident.class === "validation_infrastructure"
+    && incident.lane === "reviewer"
+    && job.activeAttempt?.lane === "reviewer"
+    && job.activeAttempt.handle === null
+    && job.activeAttempt.result === null
+    && job.activeAttempt.expectedHeadSha === job.headSha;
   const heldReviewerBlock = incident.class === "review_uncertain"
     && incident.lane === "reviewer"
     && job.activeAttempt?.lane === "reviewer"
@@ -259,7 +266,7 @@ export function reassessmentClassFor(job: Job): BlockClass | null {
     || (!legacyWorkerHeadMismatch && !legacyReviewerPreflight && !legacyCiExhausted && !incident.allowedActions.includes(effectiveRetryAction))
     || (!legacyWorkerHeadMismatch && !legacyReviewerPreflight && !legacyCiExhausted && !allowedActionsFor(incident.class, incident.lane).includes(effectiveRetryAction))
     || (!exactAttempt && !heldCiIncident)
-    || (!heldInfrastructure && !heldReviewerBlock && !heldReviewerPreflight && !legacyWorkerHeadMismatch && !legacyReviewerPreflight && !analystExecutionFailed && !heldCiFailure && !legacyCiExhausted)
+    || (!heldInfrastructure && !heldValidationInfrastructure && !heldReviewerBlock && !heldReviewerPreflight && !legacyWorkerHeadMismatch && !legacyReviewerPreflight && !analystExecutionFailed && !heldCiFailure && !legacyCiExhausted)
   ) return null;
 
   return legacyWorkerHeadMismatch

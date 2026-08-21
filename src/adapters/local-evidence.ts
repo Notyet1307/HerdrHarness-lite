@@ -177,6 +177,7 @@ function attemptSummary(attempt: Attempt): unknown {
     baseSha: attempt.baseSha,
     expectedHeadSha: attempt.expectedHeadSha,
     result: attempt.result,
+    reviewerValidationReceipt: attempt.reviewerValidationReceipt ?? null,
     reconciliationAttempts: attempt.reconciliationAttempts ?? 0,
     startedAt: attempt.startedAt,
     completedAt: attempt.completedAt,

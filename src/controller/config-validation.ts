@@ -87,7 +87,7 @@ export function validateHarnessConfig(config: HarnessConfig): void {
     "reviewerArgv",
     reviewerRole.argv,
     ["code-review"],
-    ["read", "grep", "find", "ls", "subagent", "review_preflight", "review_validate", "review_submit"],
+    ["read", "grep", "find", "ls", "subagent", "review_preflight", "review_submit"],
     ["max"],
   );
 }

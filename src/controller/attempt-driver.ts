@@ -1,4 +1,4 @@
-import { dirname, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { executionPlanMatches } from "../attempt-plan.js";
 import { digest, evolveJob, type Attempt, type HarnessState, type Job } from "../model.js";
 import { renderAttemptPrompt } from "../prompts.js";
@@ -8,8 +8,9 @@ import {
   REVIEWER_CONTEXT_BUDGET_RESERVE_BYTES,
   ReviewerContextBudgetExceededError,
 } from "../reviewer-context-budget.js";
+import { ReviewerValidationIntegrityError } from "../reviewer-validation.js";
 import type { ControllerContext } from "./context.js";
-import { message, result, safeToken, validReviewerValidationArgv } from "./helpers.js";
+import { message, result, safeToken } from "./helpers.js";
 import {
   PI_AGENT_DIR_ENV,
   BUNDLED_CODE_REVIEW_SKILL,
@@ -24,6 +25,7 @@ import { runRuntimePreflight, verifyExecutionSnapshot } from "./runtime-prefligh
 import { verifyReviewerIntegrity, verifyReviewerPreflight } from "./attempt-integrity.js";
 import { reconcileAttemptOrBlock } from "./attempt-reconciliation.js";
 import { finishObservedAttempt } from "./attempt-settlement.js";
+import { ensureReviewerValidation, reviewerValidationInput, verifyBoundReviewerValidation } from "./reviewer-validation.js";
 import type { TickResult } from "./types.js";
 
 export async function driveAttempt(ctx: ControllerContext, state: HarnessState, job: Job, lane: Attempt["lane"]): Promise<TickResult> {
@@ -64,19 +66,43 @@ export async function driveAttempt(ctx: ControllerContext, state: HarnessState, 
     const integrityBlock = await verifyExecutionSnapshot(ctx, state, job, attempt);
     if (integrityBlock) return integrityBlock;
   }
+  if (lane === "reviewer" && (attempt.phase !== "prepared" || attempt.reviewerValidationReceipt !== undefined)) {
+    const validationBlock = await verifyBoundReviewerValidation(ctx, state, job, attempt);
+    if (validationBlock) return validationBlock;
+  }
+
+  if (attempt.phase === "prepared" && lane === "reviewer" && !attempt.reviewerValidationReceipt) {
+    const validation = await ensureReviewerValidation(ctx, state, job, attempt);
+    if (!validation.ok) return validation.result;
+    const postValidationIntegrity = await verifyExecutionSnapshot(
+      ctx,
+      state,
+      { ...job, activeAttempt: validation.attempt },
+      validation.attempt,
+    );
+    if (postValidationIntegrity) return postValidationIntegrity;
+    const next = evolveJob(job, ctx.deps.clock.now(), {
+      activeAttempt: validation.attempt,
+      lastError: null,
+    });
+    await ctx.saveJob(state, job, next);
+    return result(true, "reviewer_validation_ready", job.id, `reviewer attempt ${attempt.id} has a durable exact-HEAD validation receipt`);
+  }
 
   if (attempt.phase === "prepared") {
+    const preparedAttempt = attempt;
     if (lane === "reviewer") {
-      const integrityBlock = await verifyReviewerPreflight(ctx,
+      const worktreeBlock = await verifyReviewerPreflight(
+        ctx,
         state,
         job,
-        attempt,
-        attempt.expectedHeadSha,
+        preparedAttempt,
+        preparedAttempt.expectedHeadSha,
         null,
       );
-      if (integrityBlock) return integrityBlock;
+      if (worktreeBlock) return worktreeBlock;
     }
-    const preflight = await runRuntimePreflight(ctx, [lane], job.id, attempt.executionSnapshot);
+    const preflight = await runRuntimePreflight(ctx, [lane], job.id, preparedAttempt.executionSnapshot);
     if (preflight.ok === false) return preflight.result;
     let handle;
     try {
@@ -84,48 +110,34 @@ export async function driveAttempt(ctx: ControllerContext, state: HarnessState, 
       let env: Record<string, string> = lane === "worker"
         ? {
             PYTHONDONTWRITEBYTECODE: "1",
-            [PI_AGENT_DIR_ENV]: attempt.executionSnapshot!.context!.agentDir,
+            [PI_AGENT_DIR_ENV]: preparedAttempt.executionSnapshot!.context!.agentDir,
             DOCKER_HOST: preflight.dockerHost ?? "",
-            ...ponytailEnvironment(attempt.executionSnapshot!),
+            ...ponytailEnvironment(preparedAttempt.executionSnapshot!),
           }
         : {};
       if (lane === "worker") {
         const channel = await ctx.deps.git.prepareWorkerResult({
           worktree: job.worktree,
-          rootPath: resolve(ctx.deps.config.stateDir, "worker-attempts", safeToken(job.id), safeToken(attempt.id)),
-          resultPath: attempt.resultPath,
+          rootPath: resolve(ctx.deps.config.stateDir, "worker-attempts", safeToken(job.id), safeToken(preparedAttempt.id)),
+          resultPath: preparedAttempt.resultPath,
           jobId: job.id,
-          attemptId: attempt.id,
+          attemptId: preparedAttempt.id,
         });
         env[WORKER_DESCRIPTOR_ENV] = channel.descriptorPath;
       }
       if (lane === "reviewer") {
-        if (!attempt.expectedHeadSha) throw new Error("Reviewer attempt has no expected HEAD");
-        if (!validReviewerValidationArgv(attempt.reviewerValidationArgv)) {
-          return ctx.block(state, job, {
-            class: "integrity_violation",
-            lane,
-            summary: "Reviewer attempt has no durably bound validation command",
-            attemptResult: null,
-          });
-        }
-        const reviewAxisAgents = attempt.executionSnapshot!.resources.filter((resource) => resource.kind === "agent");
+        if (!preparedAttempt.expectedHeadSha || !preparedAttempt.reviewerValidationReceipt) throw new Error("Reviewer attempt has no validation-bound expected HEAD");
+        const reviewAxisAgents = preparedAttempt.executionSnapshot!.resources.filter((resource) => resource.kind === "agent");
         if (reviewAxisAgents.length !== 1) throw new Error("Reviewer execution snapshot must bind exactly one child agent");
-        const reviewerPrompt = renderAttemptPrompt(attempt);
+        const reviewerPrompt = renderAttemptPrompt(preparedAttempt);
+        const validationInput = reviewerValidationInput(job, preparedAttempt);
         const workspace = await ctx.deps.git.prepareReviewer({
-          worktree: job.worktree,
-          rootPath: dirname(attempt.resultPath),
-          resultPath: attempt.resultPath,
-          jobId: job.id,
-          attemptId: attempt.id,
-          baseSha: attempt.baseSha,
-          expectedHeadSha: attempt.expectedHeadSha,
-          validationArgv: attempt.reviewerValidationArgv,
-          dockerHost: preflight.dockerHost,
+          ...validationInput,
+          validationReceipt: preparedAttempt.reviewerValidationReceipt,
           reviewAxisAgent: reviewAxisAgents[0]!,
-          piExecutable: attempt.executionSnapshot!.executable,
-          piRuntimeVersion: attempt.executionSnapshot!.runtimeVersion,
-          piAgentDir: attempt.executionSnapshot!.context!.agentDir,
+          piExecutable: preparedAttempt.executionSnapshot!.executable,
+          piRuntimeVersion: preparedAttempt.executionSnapshot!.runtimeVersion,
+          piAgentDir: preparedAttempt.executionSnapshot!.context!.agentDir,
           prompt: reviewerPrompt,
           trustedContextPath: attempt.executionSnapshot!.context!.bundlePath,
           reviewerSkillPath: join(BUNDLED_CODE_REVIEW_SKILL, "SKILL.md"),
@@ -136,32 +148,39 @@ export async function driveAttempt(ctx: ControllerContext, state: HarnessState, 
         env = {
           [REVIEW_DESCRIPTOR_ENV]: workspace.descriptorPath,
           [REVIEW_SUBAGENT_CEILING_ENV]: REVIEW_SUBAGENT_CEILING,
-          [PI_AGENT_DIR_ENV]: attempt.executionSnapshot!.context!.agentDir,
-          [REVIEW_CANONICAL_AGENT_DIR_ENV]: attempt.executionSnapshot!.context!.agentDir,
-          DOCKER_HOST: preflight.dockerHost ?? "",
+          [PI_AGENT_DIR_ENV]: preparedAttempt.executionSnapshot!.context!.agentDir,
+          [REVIEW_CANONICAL_AGENT_DIR_ENV]: preparedAttempt.executionSnapshot!.context!.agentDir,
         };
       }
       handle = await ctx.deps.herdr.createAttemptPane({
         worktree: job.worktree,
-        attempt,
+        attempt: preparedAttempt,
         cwd,
         env,
       });
     } catch (error) {
+      if (error instanceof ReviewerValidationIntegrityError) {
+        return ctx.block(state, { ...job, activeAttempt: preparedAttempt }, {
+          class: "integrity_violation",
+          lane: "reviewer",
+          summary: error.message,
+          attemptResult: null,
+        });
+      }
       if (error instanceof ReviewerContextBudgetExceededError) {
-        return ctx.block(state, job, {
+        return ctx.block(state, { ...job, activeAttempt: preparedAttempt }, {
           class: "review_uncertain",
           lane: "reviewer",
           summary: error.message,
           attemptResult: null,
         });
       }
-      return reconcileAttemptOrBlock(ctx, state, job, attempt, `Herdr ${lane} pane creation failed: ${message(error)}`);
+      return reconcileAttemptOrBlock(ctx, state, job, preparedAttempt, `Herdr ${lane} pane creation failed: ${message(error)}`);
     }
-    const ready: Attempt = { ...attempt, phase: "pane_ready", handle, reconciliationAttempts: 0 };
+    const ready: Attempt = { ...preparedAttempt, phase: "pane_ready", handle, reconciliationAttempts: 0 };
     const next = evolveJob(job, ctx.deps.clock.now(), { activeAttempt: ready, lastError: null });
     await ctx.saveJob(state, job, next);
-    return result(true, "attempt_pane_ready", job.id, `${lane} attempt ${attempt.id} has a durable owned pane`);
+    return result(true, "attempt_pane_ready", job.id, `${lane} attempt ${preparedAttempt.id} has a durable owned pane`);
   }
 
   if (attempt.phase === "pane_ready" && attempt.handle) {

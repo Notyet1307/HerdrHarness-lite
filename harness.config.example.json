@@ -79,7 +79,7 @@
     "--model",
     "gpt-5.6-sol",
     "--tools",
-    "read,grep,find,ls,subagent,review_preflight,review_validate,review_submit",
+    "read,grep,find,ls,subagent,review_preflight,review_submit",
     "--thinking",
     "max"
   ],

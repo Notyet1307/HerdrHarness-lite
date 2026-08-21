@@ -128,6 +128,8 @@ node dist/src/cli.js decide \
 
 处理 blocked Job：
 
+`validation_infrastructure` 表示 Controller 在 Reviewer Provider 启动前遇到 spawn、路径、权限、超时或环境故障；正常非零退出是 `failed-checks` 审查证据，不属于该 Incident。此类恢复仍需 Analyst advice 与精确 human approval，并创建 fresh Reviewer Attempt。
+
 1. 记录当前 HEAD、Job revision、Attempt、Incident、Analysis 和 operator actions。
 2. 区分 runtime liveness、durable result、Git fixed point、GitHub checks 与 ledger truth。
 3. 保留 dirty worktree、result、receipt、Controller log 和 bounded evidence；不要先清理现场。

@@ -142,7 +142,7 @@ test("config rejects incomplete Pi role contracts", () => {
     {
       ...config,
       reviewerArgv: validReviewerArgv.map((value) => (
-        value === "read,grep,find,ls,subagent,review_preflight,review_validate,review_submit" ? `${value},write` : value
+        value === "read,grep,find,ls,subagent,review_preflight,review_submit" ? `${value},write` : value
       )),
     },
   ]) {
@@ -502,7 +502,7 @@ test("Pi RPC canary preflights and routes only Worker through its isolated runti
     ids: new SequenceIds(),
     preflight,
   });
-  for (let index = 0; index < 13; index += 1) await controller.tick();
+  for (let index = 0; index < 14; index += 1) await controller.tick();
 
   assert.equal(workerRpc.started.length, 1);
   assert.equal(herdr.prepared.find((entry) => entry.lane === "worker")?.env.PI_CODING_AGENT_DIR, "/pi-agent");
@@ -616,7 +616,7 @@ test("Pi RPC routes Reviewer through the durable runtime with one bound custom m
       ids: new SequenceIds(),
       preflight,
     });
-    for (let index = 0; index < 13; index += 1) await controller.tick();
+    for (let index = 0; index < 14; index += 1) await controller.tick();
 
     assert.deepEqual(herdr.prompts.map((prompt) => prompt.skill), ["implement"]);
     assert.deepEqual(reviewerRpc.prompts.map((prompt) => prompt.skill), ["code-review"]);
@@ -687,7 +687,7 @@ test("Pi RPC routes Reviewer through canonical subscription OAuth selected by an
     assert.equal(store.state.activeJob?.activeAttempt?.lane, "reviewer");
     assert.equal(store.state.activeJob?.activeAttempt?.phase, "prepared");
     runtimeConfig.reviewerProviderProfiles!.active = "custom";
-    for (let index = 9; index < 13; index += 1) await controller.tick();
+    for (let index = 9; index < 14; index += 1) await controller.tick();
 
     const reviewer = store.state.activeJob?.attempts.find((attempt) => attempt.lane === "reviewer");
     assert.equal(reviewer?.executionSnapshot?.adapter, "pi-rpc");
@@ -752,7 +752,7 @@ test("Docker and lane Provider preflights bind the local socket before Worker an
     preflight,
   });
 
-  for (let index = 0; index < 10; index += 1) await controller.tick();
+  for (let index = 0; index < 11; index += 1) await controller.tick();
 
   assert.deepEqual(preflight.providerCalls.map((call) => call.lane), ["worker", "reviewer", "worker", "reviewer"]);
   assert.equal(preflight.providerCalls.every((call) => call.piBin === "/opt/pi"), true);
@@ -802,6 +802,143 @@ test("Reviewer attempt binds validation argv before later config changes", async
   mutableConfig.reviewerValidationArgv[0] = "changed-after-preparation";
   await controller.tick();
   assert.deepEqual(git.reviewerValidationArgv, [["npm", "run", "verify"]]);
+});
+
+test("simulated 20-minute validation finishes before Reviewer Provider or pane startup", async () => {
+  const store = new MemoryStore();
+  const git = new FakeGit();
+  const herdr = new FakeHerdr([{ lane: "worker", status: "completed", headSha: "b".repeat(40) }]);
+  const preflight = new FakeRuntimePreflight();
+  let releaseValidation!: () => void;
+  git.reviewerValidationGate = new Promise<void>((resolveGate) => { releaseValidation = resolveGate; });
+  const controller = new HarnessController({
+    config,
+    store,
+    github: new FakeGitHub([issue({ number: 240, title: "Long deterministic validation" })]),
+    git,
+    herdr,
+    analyst: new FakeAnalyst(),
+    evidence: new FakeEvidence(),
+    clock: new FakeClock(),
+    ids: new SequenceIds(),
+    preflight,
+  });
+  for (let index = 0; index < 9; index += 1) await controller.tick();
+  const reviewerProbesBefore = preflight.providerCalls.filter((call) => call.lane === "reviewer").length;
+  const pending = controller.tick();
+  while (!git.reviewerValidationStarted) await Promise.resolve();
+
+  assert.equal(preflight.providerCalls.filter((call) => call.lane === "reviewer").length, reviewerProbesBefore);
+  assert.equal(herdr.prepared.some((entry) => entry.lane === "reviewer"), false);
+  assert.equal(herdr.started.some((name) => name.includes("reviewer")), false);
+  assert.equal(herdr.prompts.some((prompt) => prompt.skill === "code-review"), false);
+
+  releaseValidation();
+  assert.equal((await pending).action, "reviewer_validation_ready");
+  assert.equal(store.state.activeJob?.activeAttempt?.phase, "prepared");
+  assert.equal(store.state.activeJob?.activeAttempt?.reviewerValidationReceipt?.status, "passed");
+  assert.equal(herdr.prepared.some((entry) => entry.lane === "reviewer"), false);
+  assert.equal(preflight.providerCalls.filter((call) => call.lane === "reviewer").length, reviewerProbesBefore);
+  assert.equal((await controller.tick()).action, "attempt_pane_ready");
+  assert.equal(preflight.providerCalls.filter((call) => call.lane === "reviewer").length, reviewerProbesBefore + 1);
+  assert.equal(git.reviewerValidationExecutions, 1);
+});
+
+test("a persisted Reviewer validation receipt survives a pre-pane restart without rerunning the command", async () => {
+  const store = new MemoryStore();
+  const git = new FakeGit();
+  const herdr = new FakeHerdr([{ lane: "worker", status: "completed", headSha: "b".repeat(40) }]);
+  const preflight = new FakeRuntimePreflight();
+  const dependencies = {
+    config,
+    store,
+    github: new FakeGitHub([issue({ number: 241, title: "Resume validation receipt" })]),
+    git,
+    herdr,
+    analyst: new FakeAnalyst(),
+    evidence: new FakeEvidence(),
+    clock: new FakeClock(),
+    ids: new SequenceIds(),
+    preflight,
+  };
+  const controller = new HarnessController(dependencies);
+  for (let index = 0; index < 9; index += 1) await controller.tick();
+  assert.equal((await controller.tick()).action, "reviewer_validation_ready");
+  assert.equal(git.reviewerValidationExecutions, 1);
+  assert.equal(store.state.activeJob?.activeAttempt?.phase, "prepared");
+  assert.equal(herdr.prepared.some((entry) => entry.lane === "reviewer"), false);
+
+  const restarted = new HarnessController(dependencies);
+  preflight.providerFailure = new Error("Provider unavailable after validation");
+  assert.equal((await restarted.tick()).action, "preflight_failed");
+  assert.equal(git.reviewerValidationExecutions, 1);
+  preflight.providerFailure = null;
+  assert.equal((await restarted.tick()).action, "attempt_pane_ready");
+  assert.equal(git.reviewerValidationExecutions, 1);
+  assert.equal(store.state.activeJob?.activeAttempt?.reviewerValidationReceipt?.status, "passed");
+});
+
+test("failed checks remain Reviewer evidence while validation infrastructure blocks before Provider startup", async () => {
+  for (const status of ["failed-checks", "infrastructure-error"] as const) {
+    const store = new MemoryStore();
+    const git = new FakeGit();
+    git.reviewerValidationStatus = status;
+    const herdr = new FakeHerdr([{ lane: "worker", status: "completed", headSha: "b".repeat(40) }]);
+    const controller = new HarnessController({
+      config,
+      store,
+      github: new FakeGitHub([issue({ number: status === "failed-checks" ? 242 : 243, title: status })]),
+      git,
+      herdr,
+      analyst: new FakeAnalyst(),
+      evidence: new FakeEvidence(),
+      clock: new FakeClock(),
+      ids: new SequenceIds(),
+      preflight: new FakeRuntimePreflight(),
+    });
+    for (let index = 0; index < 9; index += 1) await controller.tick();
+    const output = await controller.tick();
+    assert.equal(git.reviewerValidationExecutions, 1);
+    assert.equal(store.state.activeJob?.activeAttempt?.reviewerValidationReceipt?.status, status);
+    if (status === "failed-checks") {
+      assert.equal(output.action, "reviewer_validation_ready");
+      assert.equal(store.state.activeJob?.incident, null);
+      assert.equal(herdr.prepared.some((entry) => entry.lane === "reviewer"), false);
+      assert.equal((await controller.tick()).action, "attempt_pane_ready");
+      assert.equal(herdr.prepared.some((entry) => entry.lane === "reviewer"), true);
+    } else {
+      assert.equal(output.action, "blocked");
+      assert.equal(store.state.activeJob?.incident?.class, "validation_infrastructure");
+      assert.equal(herdr.prepared.some((entry) => entry.lane === "reviewer"), false);
+      assert.equal((await controller.tick()).action, "analysis_recorded");
+      assert.equal(store.state.activeJob?.approval, null);
+      assert.equal((store.state.activeJob?.automaticRecoveries ?? []).length, 0);
+    }
+  }
+});
+
+test("Reviewer validation receipt drift blocks before agent startup", async () => {
+  const store = new MemoryStore();
+  const git = new FakeGit();
+  const herdr = new FakeHerdr([{ lane: "worker", status: "completed", headSha: "b".repeat(40) }]);
+  const controller = new HarnessController({
+    config,
+    store,
+    github: new FakeGitHub([issue({ number: 244, title: "Reject receipt drift" })]),
+    git,
+    herdr,
+    analyst: new FakeAnalyst(),
+    evidence: new FakeEvidence(),
+    clock: new FakeClock(),
+    ids: new SequenceIds(),
+    preflight: new FakeRuntimePreflight(),
+  });
+  for (let index = 0; index < 10; index += 1) await controller.tick();
+  git.reviewerReceiptFailure = new Error("receipt reviewedHeadSha no longer matches exact HEAD");
+
+  assert.equal((await controller.tick()).action, "blocked");
+  assert.equal(store.state.activeJob?.incident?.class, "integrity_violation");
+  assert.equal(herdr.started.some((name) => name.includes("reviewer")), false);
 });
 
 test("Reviewer preflight attributes pre-existing worktree residue before any Reviewer handle", async () => {
@@ -855,7 +992,7 @@ test("blocked Reviewer cannot bypass worktree verification", async () => {
     preflight: new FakeRuntimePreflight(),
   });
 
-  for (let index = 0; index < 12; index += 1) await controller.tick();
+  for (let index = 0; index < 13; index += 1) await controller.tick();
   git.reviewerFailure = "reviewer left an untracked product file";
   await controller.tick();
   assert.equal(store.state.activeJob?.incident?.class, "integrity_violation");
@@ -881,7 +1018,7 @@ test("Reviewer wait failure cannot bypass worktree verification", async () => {
     preflight: new FakeRuntimePreflight(),
   });
 
-  for (let index = 0; index < 12; index += 1) await controller.tick();
+  for (let index = 0; index < 13; index += 1) await controller.tick();
   git.reviewerFailure = "reviewer changed the worktree before wait failed";
   herdr.waitFailure = new Error("Herdr wait unavailable");
   await controller.tick();
@@ -911,7 +1048,7 @@ test("happy path claims, starts Analyst, runs fresh Pi worker/reviewer, publishe
   });
 
   const actions: string[] = [];
-  for (let index = 0; index < 14; index += 1) actions.push((await controller.tick()).action);
+  for (let index = 0; index < 15; index += 1) actions.push((await controller.tick()).action);
   github.mergeStatus = "open";
   actions.push((await controller.tick()).action);
   github.mergeStatus = "merged";
@@ -928,6 +1065,7 @@ test("happy path claims, starts Analyst, runs fresh Pi worker/reviewer, publishe
     "attempt_dispatched",
     "attempt_completed",
     "attempt_prepared",
+    "reviewer_validation_ready",
     "attempt_pane_ready",
     "attempt_agent_ready",
     "attempt_dispatched",
@@ -1009,7 +1147,7 @@ test("Reviewer context budget fails closed before prompt dispatch", async () => 
   });
 
   let action = "";
-  for (let index = 0; index < 10; index += 1) action = (await controller.tick()).action;
+  for (let index = 0; index < 11; index += 1) action = (await controller.tick()).action;
 
   assert.equal(action, "blocked");
   assert.equal(store.state.activeJob?.incident?.class, "review_uncertain");
@@ -1102,7 +1240,7 @@ test("terminal archive keeps Analyst close fail-closed but treats claim cleanup 
     preflight: new FakeRuntimePreflight(),
   });
 
-  for (let index = 0; index < 14; index += 1) await controller.tick();
+  for (let index = 0; index < 15; index += 1) await controller.tick();
   github.mergeStatus = "merged";
   await controller.tick();
   const retained = await controller.tick();

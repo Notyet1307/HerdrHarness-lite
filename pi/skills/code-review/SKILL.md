@@ -21,11 +21,10 @@ aliases do not exist here. A tool error never grants another tool.
 ## 0. Preflight the Reviewer environment
 
 Call `review_preflight` exactly once before reading the full evidence or
-launching either review axis. It verifies the read-only source, writable
-validation copy, configured validation executable, and required Docker daemon
-from inside the actual Reviewer process. If it fails, call `review_submit` with
-`status=blocked`, include the concrete failed check, and do not launch
-subagents or call `review_validate`.
+launching either review axis. It verifies the read-only Reviewer runtime and
+returns the bounded Controller-owned validation receipt already bound to this
+exact Head. If it fails, call `review_submit` with `status=blocked`, include the
+concrete failed check, and do not launch subagents.
 
 ## 1. Pin the review identity
 
@@ -115,7 +114,7 @@ scope creep, quoting the relevant requirement for each finding; stay under
 400 words.
 
 Both briefs must tell the child not to run project validation commands; the
-parent owns the single recorded validation run.
+Harness Controller owns the single recorded validation run.
 
 Both briefs must require the exact JSON object defined by the bound
 `herdr-harness-review-axis` agent: only `status`, `summary`, `findings`, and
@@ -135,11 +134,11 @@ opinion.
 ## 4. Aggregate without collapsing the axes
 
 Keep the two reports under `Standards` and `Spec`. Do not merge or rerank across
-axes. Call `review_validate` exactly once; it runs the Harness-configured argv
-in a disposable writable copy and returns the exact exit status. Model-visible
-stdout and stderr are each limited to 8 KiB head-and-tail projections with the
-original byte count and SHA-256; those projections never replace the exit code
-or the Attempt-private full-output evidence digest.
+axes. Validation is an external deterministic fact: use only the receipt from
+`review_preflight`; never rerun, wait for, or reconstruct its command. Its
+stdout and stderr content is replaced by a fixed redaction marker; the receipt
+keeps only that bounded projection plus the original byte count and SHA-256.
+Raw validation output is not persisted.
 
 Never edit product source or write a result file directly. Call
 `review_submit` exactly once with only status, summary, and findings; the
@@ -158,6 +157,9 @@ For a top-level Reviewer result:
 Translate actionable findings into the Harness finding schema with severity,
 summary, and concrete evidence. Preserve every axis finding mechanically:
 severity and summary unchanged, with `evidence` equal to that finding's
-`evidenceRefs` joined by newlines. Omission, substitution, or fabrication is
-rejected by `review_submit`. The durable JSON result is authoritative;
+`evidenceRefs` joined by newlines. When the receipt has `status=failed-checks`,
+submit `changes` and also copy the exact item returned in
+`validationFindings`; a nonzero validation exit is review evidence, not an
+infrastructure failure. Omission, substitution, or fabrication is rejected by
+`review_submit`. The durable JSON result is authoritative;
 prose is only a summary.

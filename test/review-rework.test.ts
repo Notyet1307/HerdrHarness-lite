@@ -60,7 +60,7 @@ test("actionable review findings create a fresh worker and a fresh reviewer", as
     preflight: new FakeRuntimePreflight(),
   });
 
-  for (let index = 0; index < 13; index += 1) await controller.tick();
+  for (let index = 0; index < 14; index += 1) await controller.tick();
   const handoff = store.state.activeJob?.pendingHandoff;
   assert.equal(handoff?.kind, "review_changes");
   assert.equal(handoff?.source.attemptId, store.state.activeJob?.attempts.at(-1)?.id);
@@ -84,7 +84,7 @@ test("actionable review findings create a fresh worker and a fresh reviewer", as
   assert.equal(store.state.activeJob?.pendingHandoff, null);
   assert.deepEqual(store.state.activeJob?.activeAttempt?.contextEnvelope?.handoff?.value, handoff);
 
-  for (let index = 0; index < 9; index += 1) await controller.tick();
+  for (let index = 0; index < 10; index += 1) await controller.tick();
   assert.equal(store.state.activeJob?.state, "publish_ready");
   assert.equal(herdr.prepared.filter((entry) => entry.lane === "worker").length, 2);
   assert.equal(herdr.prepared.filter((entry) => entry.lane === "reviewer").length, 2);

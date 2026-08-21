@@ -6,6 +6,7 @@ import { makeSafeRuntimeDiagnostic } from "../pi-rpc-diagnostics.js";
 import type { ControllerContext } from "./context.js";
 import { reconcileAttemptOrBlock } from "./attempt-reconciliation.js";
 import { verifyReviewerIntegrity } from "./attempt-integrity.js";
+import { verifyBoundReviewerValidation } from "./reviewer-validation.js";
 import { message, result, settleAttempt, withHerdrDiagnostic } from "./helpers.js";
 import type { TickResult } from "./types.js";
 
@@ -17,6 +18,8 @@ export async function finishObservedAttempt(
   observation: { agentStatus: AgentStatus; result: AttemptResult | null; diagnostic: string | null },
 ): Promise<TickResult> {
   if (attempt.lane === "reviewer") {
+    const validationBlock = await verifyBoundReviewerValidation(ctx, state, job, attempt);
+    if (validationBlock) return validationBlock;
     const reportedHeadSha = observation.result?.lane === "reviewer"
       ? (observation.result.reviewedHeadSha ?? null)
       : null;
