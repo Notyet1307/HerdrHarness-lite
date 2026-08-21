@@ -1,4 +1,5 @@
 import type { Attempt, AttemptContextEnvelope, TypedHandoff } from "./model.js";
+import { REVIEWER_CONTEXT_BUDGET_BYTES, REVIEWER_CONTEXT_BUDGET_EXCEEDED } from "./reviewer-context-budget.js";
 
 export function renderAttemptPrompt(attempt: Attempt): string {
   const context = requireEnvelope(attempt);
@@ -52,6 +53,7 @@ export function renderPinnedWorkerTaskData(attempt: Attempt): string {
 }
 
 function reviewerPrompt(attempt: Attempt, context: AttemptContextEnvelope): string {
+  const tools = context.runtime.tools.join(",");
   return [
     "You are a fresh, read-only Pi reviewer in an exact-HEAD source snapshot. Do not modify product files, commit, push, or reuse the worker's conclusion.",
     envelopeIdentity(attempt, context),
@@ -65,6 +67,9 @@ function reviewerPrompt(attempt: Attempt, context: AttemptContextEnvelope): stri
     `Harness-generated fixed-point Git evidence: ${context.evidence.reviewEvidencePath ?? "missing"}`,
     `Objective:\n${context.task.objective}`,
     handoffInstruction(context.handoff?.value ?? null),
+    `Top-level Pi tool allowlist (case-sensitive, exact): ${tools}`,
+    "Only those real Pi tool names are available. Claude/Codex aliases such as Skill, Read, Glob, and PowerShell do not exist here; a tool error never widens this allowlist.",
+    `Harness-injected context budget: ${REVIEWER_CONTEXT_BUDGET_BYTES} UTF-8 bytes for this top-level Reviewer Attempt. Exceeding it fails closed as ${REVIEWER_CONTEXT_BUDGET_EXCEEDED}.`,
     "Call review_preflight before reading the full review evidence or launching review axes. If it fails, submit status=blocked with the concrete environment failure and do not launch subagents.",
     "After a successful preflight, follow the loaded code-review skill with Base SHA as the fixed point and independently review the exact Head SHA. Generic shell and file-writing tools are intentionally unavailable.",
     "Call review_validate exactly once for the configured validation command; it runs only in a disposable writable copy.",

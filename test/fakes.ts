@@ -220,6 +220,7 @@ export class FakeGit implements GitPort {
   reviewerDockerHosts: Array<string | null> = [];
   trustedContexts: ExecutionContext[] = [];
   trustedContextFailure: Error | null = null;
+  reviewerPreparationFailure: Error | null = null;
   workerVerifications: Array<{
     reportedHeadSha: string;
     expectedRemoteHeadSha: string | null;
@@ -282,7 +283,8 @@ export class FakeGit implements GitPort {
     if (this.trustedContextFailure) throw this.trustedContextFailure;
   }
 
-  async prepareReviewer(input: { rootPath: string; validationArgv: string[]; dockerHost: string | null; reviewAxisAgent: ExecutionResource; piExecutable: string; piRuntimeVersion: string; piAgentDir: string }): Promise<{ reviewPath: string; descriptorPath: string; evidencePath: string }> {
+  async prepareReviewer(input: { rootPath: string; validationArgv: string[]; dockerHost: string | null; reviewAxisAgent: ExecutionResource; piExecutable: string; piRuntimeVersion: string; piAgentDir: string; prompt: string; trustedContextPath: string; reviewerSkillPath: string; contextBudgetBytes: number; contextBudgetReserveBytes: number }): Promise<{ reviewPath: string; descriptorPath: string; evidencePath: string }> {
+    if (this.reviewerPreparationFailure) throw this.reviewerPreparationFailure;
     this.reviewerValidationArgv.push([...input.validationArgv]);
     this.reviewerDockerHosts.push(input.dockerHost);
     return {

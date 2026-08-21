@@ -6,6 +6,11 @@ import type { ContextEntry, ExecutionContext, ExecutionResource } from "../model
 import { executionResourceDigest } from "../attempt-plan.js";
 import type { BaseSyncVerification, GitPort, ReviewerVerification, WorkerVerification } from "../ports.js";
 import { pathIsWithin, pathsOverlap } from "../path-safety.js";
+import {
+  assertReviewerInitialContextBudget,
+  REVIEWER_CONTEXT_BUDGET_BYTES,
+  REVIEWER_CONTEXT_BUDGET_RESERVE_BYTES,
+} from "../reviewer-context-budget.js";
 import { type CommandRunner, requireSuccess, SyncCommandRunner } from "./command.js";
 
 const CONTEXT_CANDIDATES = ["AGENTS.override.md", "AGENTS.md", "AGENTS.MD", "CLAUDE.md", "CLAUDE.MD"] as const;
@@ -309,12 +314,26 @@ export class GitCli implements GitPort {
     piExecutable: string;
     piRuntimeVersion: string;
     piAgentDir: string;
+    prompt: string;
+    trustedContextPath: string;
+    reviewerSkillPath: string;
+    contextBudgetBytes: number;
+    contextBudgetReserveBytes: number;
   }): Promise<{ reviewPath: string; descriptorPath: string; evidencePath: string }> {
     const rootPath = resolve(input.rootPath);
     if (pathsOverlap(input.worktree.path, rootPath)) throw new Error("Reviewer state must be outside the product worktree");
     if (resolve(input.resultPath) !== join(rootPath, "result.json")) throw new Error("Reviewer result path escaped its attempt root");
     if (input.reviewAxisAgent.kind !== "agent" || executionResourceDigest(input.reviewAxisAgent.path) !== input.reviewAxisAgent.digest) {
       throw new Error("Reviewer child agent differs from the bound execution resource");
+    }
+    const initialContextBytes = Buffer.byteLength(input.prompt, "utf8")
+      + privateRegularFileBytes(input.trustedContextPath)
+      + privateRegularFileBytes(input.reviewerSkillPath);
+    assertReviewerInitialContextBudget(initialContextBytes);
+    if (input.contextBudgetBytes <= input.contextBudgetReserveBytes
+      || input.contextBudgetBytes !== REVIEWER_CONTEXT_BUDGET_BYTES
+      || input.contextBudgetReserveBytes !== REVIEWER_CONTEXT_BUDGET_RESERVE_BYTES) {
+      throw new Error("Reviewer context budget contract changed");
     }
 
     const workspacePath = join(rootPath, "workspace");
@@ -340,6 +359,7 @@ export class GitCli implements GitPort {
     const piSubagentWrapperDigest = textDigest(piSubagentWrapperContent);
     const descriptorPath = join(workspacePath, "descriptor.json");
     const evidencePath = join(workspacePath, "review-evidence.txt");
+    const privateEvidenceDir = join(rootPath, "evidence");
     const descriptor = {
       version: 1,
       jobId: input.jobId,
@@ -364,12 +384,16 @@ export class GitCli implements GitPort {
       piSubagentWrapperPath,
       piSubagentWrapperDigest,
       resultPath: resolve(input.resultPath),
+      privateEvidenceDir,
+      initialContextBytes,
+      contextBudgetBytes: input.contextBudgetBytes,
+      contextBudgetReserveBytes: input.contextBudgetReserveBytes,
     };
 
     if (existsSync(descriptorPath)) {
       const existing = JSON.parse(readFileSync(descriptorPath, "utf8")) as unknown;
       if (JSON.stringify(existing) !== JSON.stringify(descriptor)) throw new Error("Reviewer descriptor identity changed after preparation");
-      for (const path of [reviewPath, validationPath, scratchPath, runtimePath, reviewAxisAgentPath, subagentConfigDir, subagentConfigPath, emptyAppendSystemPromptPath, piSubagentWrapperPath, evidencePath]) {
+      for (const path of [reviewPath, validationPath, scratchPath, runtimePath, reviewAxisAgentPath, subagentConfigDir, subagentConfigPath, emptyAppendSystemPromptPath, piSubagentWrapperPath, evidencePath, privateEvidenceDir]) {
         if (!existsSync(path)) throw new Error(`Reviewer workspace is incomplete: ${path}`);
       }
       if (textDigest(readFileSync(reviewAxisAgentPath, "utf8")) !== reviewAxisAgentDigest || (lstatSync(reviewAxisAgentPath).mode & 0o222)) {
@@ -402,6 +426,7 @@ export class GitCli implements GitPort {
       rmSync(workspacePath, { recursive: true, force: true });
     }
     mkdirSync(reviewPath, { recursive: true, mode: 0o700 });
+    mkdirSync(privateEvidenceDir, { recursive: true, mode: 0o700 });
     mkdirSync(join(runtimePath, ".agents"), { recursive: true, mode: 0o700 });
     mkdirSync(join(subagentConfigDir, "extensions", "subagent"), { recursive: true, mode: 0o700 });
     mkdirSync(rootPath, { recursive: true, mode: 0o700 });
@@ -468,6 +493,13 @@ export class GitCli implements GitPort {
   private git(path: string, args: string[]): string {
     return requireSuccess(this.runner.run("git", ["-C", path, ...args]), `git ${args[0] ?? "command"}`);
   }
+}
+
+function privateRegularFileBytes(path: string): number {
+  if (!isAbsolute(path)) throw new Error("Reviewer context resource path must be absolute");
+  const stat = lstatSync(path);
+  if (!stat.isFile() || stat.isSymbolicLink()) throw new Error(`Reviewer context resource is not a regular file: ${path}`);
+  return readFileSync(path).byteLength;
 }
 
 function commandDiagnostic(result: { code: number | null; stderr: string; stdout: string; error: string | null }): string {

@@ -8,8 +8,16 @@ const number = (name, fallback = 0) => {
   return value;
 };
 
+const output = (stream, bytes, head, tail, fill) => {
+  const fixed = `${head}\n${tail}`;
+  const value = bytes <= Buffer.byteLength(fixed)
+    ? fixed.slice(0, bytes)
+    : `${head}\n${fill.repeat(bytes - Buffer.byteLength(fixed))}${tail}`;
+  stream.write(value);
+};
+
 writeFileSync("validation-only.txt", "ok");
 writeFileSync("validation-env.json", JSON.stringify(process.env));
-process.stdout.write("v".repeat(number("--stdout-bytes")));
-process.stderr.write("e".repeat(number("--stderr-bytes")));
+output(process.stdout, number("--stdout-bytes"), "stdout-head", "stdout-tail", "v");
+output(process.stderr, number("--stderr-bytes"), "stderr-head", "stderr-tail", "e");
 process.exitCode = number("--exit-code");
