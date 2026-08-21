@@ -1,8 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { dirname } from "node:path";
 import { HarnessController } from "../src/controller.js";
 import { LocalEvidence } from "../src/adapters/local-evidence.js";
 import { assertJobInvariant } from "../src/model.js";
+import { reviewerCheckpointIdentity } from "../src/reviewer-checkpoints.js";
 import { classifyProviderFailure, PiRpcRuntimeFailure } from "../src/pi-rpc-diagnostics.js";
 import { automaticRecoveryFor, operatorActionsFor, projectOperatorState } from "../src/policy.js";
 import { approveRecovery, cancelHeldJob, reassessIncident, resolveDecision } from "../src/recovery.js";
@@ -420,12 +422,122 @@ test("Reviewer infrastructure failure automatically retries once despite unknown
   assert.equal(store.state.activeJob?.reviewRound, 0);
   assert.equal(herdr.closed.length, 2);
 
-  for (let index = 0; index < 6; index += 1) await controller.tick();
+  for (let index = 0; index < 5; index += 1) await controller.tick();
   assert.equal(store.state.activeJob?.state, "publish_ready");
   assert.equal(herdr.prepared.filter((entry) => entry.lane === "worker").length, 1);
   assert.equal(herdr.prepared.filter((entry) => entry.lane === "reviewer").length, 2);
   assert.ok(herdr.prepared.at(-1)?.attemptId !== failedReviewerId);
 });
+
+test("fresh Reviewer aggregation reuses completed Standards and runs only the missing Spec stage", async () => {
+  const store = new MemoryStore();
+  const clock = new FakeClock();
+  const ids = new SequenceIds();
+  const git = new FakeGit();
+  const herdr = new FakeHerdr([{ lane: "worker", status: "completed", headSha: "b".repeat(40) }]);
+  const analyst = new FakeAnalyst([{
+    kind: "advice",
+    action: "retry_fresh_reviewer",
+    summary: "The Reviewer provider failed after Standards completed",
+    resolutionBrief: "Reuse only digest-bound Reviewer checkpoints and finish the missing stage in a fresh Attempt.",
+    evidenceRefs: ["task"],
+    unknowns: [],
+  }]);
+  const dependencies = {
+    config,
+    store,
+    github: new FakeGitHub([issue({ number: 330, title: "Resume Reviewer stages" })]),
+    git,
+    herdr,
+    analyst,
+    evidence: new FakeEvidence(),
+    clock,
+    ids,
+    preflight: new FakeRuntimePreflight(),
+  };
+  const controller = new HarnessController(dependencies);
+  for (let index = 0; index < 13; index += 1) await controller.tick();
+  const sourceJob = store.state.activeJob!;
+  const sourceAttempt = sourceJob.activeAttempt!;
+  const sourceIdentity = reviewerCheckpointIdentity(sourceJob, sourceAttempt);
+  git.recordReviewerCheckpoint({
+    rootPath: "/state/reviewer-attempts/job-001/" + sourceAttempt.id,
+    identity: sourceIdentity,
+    stage: "reviewer-preflight",
+    result: {
+      status: "passed",
+      validationReceiptDigest: sourceAttempt.reviewerValidationReceipt!.digest,
+      validationStatus: "passed",
+    },
+  });
+  git.recordReviewerCheckpoint({
+    rootPath: "/state/reviewer-attempts/job-001/" + sourceAttempt.id,
+    identity: sourceIdentity,
+    stage: "standards-axis",
+    result: {
+      status: "pass",
+      summary: "Standards satisfied",
+      findings: [],
+      evidenceRefs: ["src/model.ts:1"],
+      outputByteCount: 128,
+      outputDigest: "9".repeat(64),
+      truncated: false,
+    },
+  });
+  herdr.settleWithoutResult = { agentStatus: "idle", diagnostic: "provider continuation ended" };
+  assert.equal((await controller.tick()).action, "attempt_reconciling");
+  assert.equal((await controller.tick()).action, "blocked");
+  assert.equal((await controller.tick()).action, "auto_recovery_authorized");
+  assert.equal((await controller.tick()).action, "recovery_applied");
+
+  const restarted = new HarnessController(dependencies);
+  assert.equal((await restarted.tick()).action, "attempt_prepared");
+  const fresh = store.state.activeJob!.activeAttempt!;
+  assert.ok(fresh.id !== sourceAttempt.id);
+  assert.deepEqual(fresh.reviewerCheckpointInputs?.map((binding) => binding.stage).sort(), [
+    "reviewer-preflight",
+    "standards-axis",
+    "validation",
+  ]);
+  assert.equal(git.reviewerValidationExecutions, 1);
+  assert.equal((await restarted.tick()).action, "attempt_pane_ready");
+  assert.equal(git.reviewerValidationExecutions, 1);
+  for (let index = 0; index < 2; index += 1) await restarted.tick();
+  const prompt = herdr.prompts.at(-1)?.text ?? "";
+  assert.match(prompt, /Reused Reviewer stages:.*standards-axis/s);
+  assert.match(prompt, /Missing Reviewer stages:.*spec-axis/s);
+});
+
+for (const scenario of [
+  {
+    name: "preflight crash",
+    issueNumber: 331,
+    stages: ["reviewer-preflight"] as const,
+    expectedInputs: ["reviewer-preflight", "validation"],
+    expectedMissing: "standards-axis, spec-axis, reviewer-final",
+  },
+  {
+    name: "two-axis crash before final aggregation",
+    issueNumber: 332,
+    stages: ["reviewer-preflight", "standards-axis", "spec-axis"] as const,
+    expectedInputs: ["reviewer-preflight", "spec-axis", "standards-axis", "validation"],
+    expectedMissing: "reviewer-final",
+  },
+  {
+    name: "review_submit failure after final checkpoint",
+    issueNumber: 333,
+    stages: ["reviewer-preflight", "standards-axis", "spec-axis", "reviewer-final"] as const,
+    expectedInputs: ["reviewer-final", "reviewer-preflight", "spec-axis", "standards-axis", "validation"],
+    expectedMissing: "",
+  },
+]) {
+  test(`fresh Reviewer recovery resumes after ${scenario.name}`, async () => {
+    const recovered = await recoverReviewerStages(scenario.issueNumber, [...scenario.stages]);
+    assert.deepEqual(recovered.inputs, scenario.expectedInputs);
+    assert.equal(recovered.missing, scenario.expectedMissing);
+    assert.equal(recovered.validationExecutions, 1);
+  });
+}
 
 test("Worker pre-dispatch infrastructure failure automatically retries once per base", async () => {
   const store = new MemoryStore();
@@ -605,7 +717,6 @@ test("held Reviewer infrastructure incident can be reassessed without granting r
   );
   assert.equal((await controller.tick()).action, "recovery_applied");
   assert.equal((await controller.tick()).action, "attempt_prepared");
-  assert.equal((await controller.tick()).action, "reviewer_validation_ready");
   assert.equal((await controller.tick()).action, "attempt_pane_ready");
   assert.equal((await controller.tick()).action, "attempt_agent_ready");
   assert.equal((await controller.tick()).action, "attempt_dispatched");
@@ -708,7 +819,6 @@ test("held Reviewer validation block can be reassessed and retried on the same H
   assert.equal((await controller.tick()).action, "attempt_prepared");
   const freshAttemptId = store.state.activeJob!.activeAttempt!.id;
   assert.ok(freshAttemptId !== blockedAttemptId);
-  assert.equal((await controller.tick()).action, "reviewer_validation_ready");
   assert.equal((await controller.tick()).action, "attempt_pane_ready");
   assert.equal((await controller.tick()).action, "attempt_agent_ready");
   assert.equal((await controller.tick()).action, "attempt_dispatched");
@@ -1214,3 +1324,92 @@ test("integrity incidents cannot be converted into retry authority by the Analys
     /did not recommend retry/,
   );
 });
+
+async function recoverReviewerStages(
+  issueNumber: number,
+  stages: Array<"reviewer-preflight" | "standards-axis" | "spec-axis" | "reviewer-final">,
+): Promise<{ inputs: string[]; missing: string; validationExecutions: number }> {
+  const store = new MemoryStore();
+  const git = new FakeGit();
+  const herdr = new FakeHerdr([{ lane: "worker", status: "completed", headSha: "b".repeat(40) }]);
+  const dependencies = {
+    config,
+    store,
+    github: new FakeGitHub([issue({ number: issueNumber, title: `Resume ${stages.join("+")}` })]),
+    git,
+    herdr,
+    analyst: new FakeAnalyst([{
+      kind: "advice" as const,
+      action: "retry_fresh_reviewer" as const,
+      summary: "Resume only durable Reviewer stages",
+      resolutionBrief: "Use one fresh Reviewer Attempt against the unchanged exact HEAD.",
+      evidenceRefs: ["task"],
+      unknowns: [],
+    }]),
+    evidence: new FakeEvidence(),
+    clock: new FakeClock(),
+    ids: new SequenceIds(),
+    preflight: new FakeRuntimePreflight(),
+  };
+  const controller = new HarnessController(dependencies);
+  for (let index = 0; index < 13; index += 1) await controller.tick();
+  const sourceJob = store.state.activeJob!;
+  const sourceAttempt = sourceJob.activeAttempt!;
+  const identity = reviewerCheckpointIdentity(sourceJob, sourceAttempt);
+  const rootPath = dirname(sourceAttempt.resultPath);
+  for (const stage of stages) {
+    if (stage === "reviewer-preflight") {
+      git.recordReviewerCheckpoint({
+        rootPath,
+        identity,
+        stage,
+        result: {
+          status: "passed",
+          validationReceiptDigest: sourceAttempt.reviewerValidationReceipt!.digest,
+          validationStatus: "passed",
+        },
+      });
+    } else if (stage === "standards-axis" || stage === "spec-axis") {
+      git.recordReviewerCheckpoint({
+        rootPath,
+        identity,
+        stage,
+        result: {
+          status: "pass",
+          summary: `${stage} passed`,
+          findings: [],
+          evidenceRefs: [`${stage}:evidence`],
+          outputByteCount: 128,
+          outputDigest: (stage === "standards-axis" ? "8" : "9").repeat(64),
+          truncated: false,
+        },
+      });
+    } else {
+      git.recordReviewerCheckpoint({
+        rootPath,
+        identity,
+        stage,
+        result: {
+          status: "pass",
+          summary: "Standards and Spec passed; deterministic validation passed.",
+          findings: [],
+        },
+      });
+    }
+  }
+  herdr.settleWithoutResult = { agentStatus: "idle", diagnostic: "Reviewer crashed after a durable stage" };
+  assert.equal((await controller.tick()).action, "attempt_reconciling");
+  assert.equal((await controller.tick()).action, "blocked");
+  assert.equal((await controller.tick()).action, "auto_recovery_authorized");
+  assert.equal((await controller.tick()).action, "recovery_applied");
+  const restarted = new HarnessController(dependencies);
+  assert.equal((await restarted.tick()).action, "attempt_prepared");
+  const inputs = (store.state.activeJob!.activeAttempt!.reviewerCheckpointInputs ?? [])
+    .map((binding) => binding.stage)
+    .sort();
+  assert.equal((await restarted.tick()).action, "attempt_pane_ready");
+  assert.equal((await restarted.tick()).action, "attempt_agent_ready");
+  assert.equal((await restarted.tick()).action, "attempt_dispatched");
+  const missing = /^Missing Reviewer stages: ?(.*)$/m.exec(herdr.prompts.at(-1)?.text ?? "")?.[1] ?? "missing";
+  return { inputs, missing, validationExecutions: git.reviewerValidationExecutions };
+}

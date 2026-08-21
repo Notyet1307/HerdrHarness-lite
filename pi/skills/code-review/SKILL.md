@@ -73,12 +73,14 @@ never automatic violations; documented repository standards take precedence:
 
 Skip checks already enforced by tooling.
 
-## 3. Launch both axes once, fresh and foreground
+## 3. Launch each missing axis once, fresh and foreground
 
-Use one Pi `subagent` workflow call with two tasks. Do not launch background work,
-do not fork the parent conversation, and do not pass Harness dispatch IDs,
-pane/agent handles, lifecycle commands, result paths, or controller state to
-either child.
+Use the `missingAxes` and `reusedAxes` returned by `review_preflight`. Preserve
+reused structured results exactly and never try to recover their old session or
+transcript. For each missing axis, use one Pi `subagent` workflow call with one
+task, Standards before Spec when both are missing. Do not launch background
+work, fork the parent conversation, or pass Harness dispatch IDs, pane/agent
+handles, lifecycle commands, result paths, or controller state to a child.
 
 ```text
 subagent({
@@ -87,15 +89,15 @@ subagent({
   context: "fresh",
   async: false,
   chatProgress: "off",
-  workflowScript: "return await runs.all([{\"key\":\"standards\",\"agent\":\"herdr-harness-review-axis\",\"task\":\"Axis: Standards\\n<self-contained Standards brief>\"},{\"key\":\"spec\",\"agent\":\"herdr-harness-review-axis\",\"task\":\"Axis: Spec\\n<self-contained Spec brief>\"}]);"
+  workflowScript: "return await runs.all([{\"key\":\"standards\",\"agent\":\"herdr-harness-review-axis\",\"task\":\"Axis: Standards\\n<self-contained Standards brief>\"}]);"
 })
 ```
 
 The workflow string is a Harness protocol, not general JavaScript: keep the
-exact `return await runs.all(<JSON>);` shape, axis order, and fields
-shown above. The Harness parses the JSON and regenerates the script before the
-extension executes it; arbitrary JavaScript and legacy top-level `tasks` are
-rejected.
+exact `return await runs.all(<JSON>);` shape and fields shown above, changing
+only the key, axis name, and self-contained brief for Spec. The Harness parses
+the JSON and regenerates the script before the extension executes it;
+arbitrary JavaScript and legacy top-level `tasks` are rejected.
 
 Keep `artifacts: false`: child reports return inline to the parent without
 writing `.pi-subagents/` debug files into the reviewed worktree. Do not replace
@@ -127,9 +129,10 @@ The Harness review tool rewrites this call onto the Attempt-private project
 registry and gives both children the absolute read-only candidate source root.
 Do not supply `cwd`, child `cwd`, or any alternate agent registry.
 
-If either child fails, is interrupted, returns no evidence, or does not finish,
-the review is incomplete. Do not substitute the surviving axis or the parent's
-opinion.
+If a child fails, is interrupted, returns no evidence, or does not finish, that
+axis is incomplete. Do not substitute the other axis or the parent's opinion.
+After each successful tool result, the Harness atomically creates the
+Attempt-private axis checkpoint before returning control to the parent.
 
 ## 4. Aggregate without collapsing the axes
 
@@ -140,10 +143,13 @@ stdout and stderr content is replaced by a fixed redaction marker; the receipt
 keeps only that bounded projection plus the original byte count and SHA-256.
 Raw validation output is not persisted.
 
-Never edit product source or write a result file directly. Call
-`review_submit` exactly once with only status, summary, and findings; the
-Harness-owned tool binds the job, attempt, lane, and exact reviewed Head SHA
-before writing the external result channel.
+When both axes are complete, the Harness deterministic coordinator returns
+`reviewerFinal` either from the last axis tool result or from `review_preflight`
+when all stages were reused. Preserve that exact status, summary, and findings;
+do not recompute, rewrite, or add findings. Never edit product source or write
+a result file directly. Call `review_submit` exactly once with that exact
+`reviewerFinal`; the Harness-owned tool binds the job, attempt, lane, and exact
+reviewed Head SHA before writing the external result channel.
 
 For a top-level Reviewer result:
 
@@ -163,3 +169,6 @@ submit `changes` and also copy the exact item returned in
 infrastructure failure. Omission, substitution, or fabrication is rejected by
 `review_submit`. The durable JSON result is authoritative;
 prose is only a summary.
+
+`reviewerFinal` is a proposal checkpoint, not a pass by itself; only the fresh
+Attempt's successful `review_submit` is authoritative.

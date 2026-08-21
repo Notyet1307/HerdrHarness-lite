@@ -1,6 +1,7 @@
 import { join, resolve } from "node:path";
-import { digest, type AnalystSession, type AnalystTurn, type AttemptResult, type EvidenceItem, type EvidenceRequest, type ExecutionContext, type ExecutionResource, type HarnessState, type IssueSnapshot, type Job, type PullRequestCheck, type PullRequestObservation, type PullRequestRef, type ReviewerValidationReceipt, type ReviewerValidationReceiptBinding, type SelectedTask } from "../src/model.js";
-import type { AnalystPort, Clock, EvidencePort, GitHubPort, GitPort, HerdrPort, IdGenerator, ReviewerValidationInput, RuntimePreflightPort, StateStore } from "../src/ports.js";
+import { digest, type AnalystSession, type AnalystTurn, type AttemptResult, type EvidenceItem, type EvidenceRequest, type ExecutionContext, type ExecutionResource, type HarnessState, type IssueSnapshot, type Job, type PullRequestCheck, type PullRequestObservation, type PullRequestRef, type ReviewerCheckpoint, type ReviewerCheckpointBinding, type ReviewerCheckpointIdentity, type ReviewerCheckpointRecord, type ReviewerCheckpointStage, type ReviewerValidationCheckpoint, type ReviewerValidationReceipt, type ReviewerValidationReceiptBinding, type ReviewerValidationStageResult, type ReviewerValidationStatus, type SelectedTask } from "../src/model.js";
+import type { AnalystPort, Clock, EvidencePort, GitHubPort, GitPort, HerdrPort, IdGenerator, ReviewerCheckpointSource, ReviewerValidationInput, RuntimePreflightPort, StateStore } from "../src/ports.js";
+import { assertReviewerCheckpoint, REVIEWER_CHECKPOINT_FILES, reviewerCheckpointIsCompatible } from "../src/reviewer-checkpoints.js";
 
 export const validCodeReviewSkillPath = resolve("pi/skills/code-review");
 export const validFocusedSelfCheckSkillPath = resolve("pi/skills/focused-self-check");
@@ -221,13 +222,14 @@ export class FakeGit implements GitPort {
   reviewerValidationExecutions = 0;
   reviewerValidationStarted = false;
   reviewerValidationGate: Promise<void> | null = null;
-  reviewerValidationStatus: ReviewerValidationReceipt["status"] = "passed";
+  reviewerValidationStatus: ReviewerValidationStatus = "passed";
   reviewerValidationError: string | null = null;
   reviewerReceiptFailure: Error | null = null;
   trustedContexts: ExecutionContext[] = [];
   trustedContextFailure: Error | null = null;
   reviewerPreparationFailure: Error | null = null;
   private reviewerReceipts = new Map<string, { receipt: ReviewerValidationReceipt; binding: ReviewerValidationReceiptBinding }>();
+  private reviewerCheckpoints = new Map<string, ReviewerCheckpointRecord[]>();
   workerVerifications: Array<{
     reportedHeadSha: string;
     expectedRemoteHeadSha: string | null;
@@ -290,6 +292,79 @@ export class FakeGit implements GitPort {
     if (this.trustedContextFailure) throw this.trustedContextFailure;
   }
 
+  recordReviewerCheckpoint(input: {
+    rootPath: string;
+    identity: ReviewerCheckpointIdentity;
+    stage: ReviewerCheckpointStage;
+    result: ReviewerCheckpoint["result"];
+  }): ReviewerCheckpointRecord {
+    const checkpoint = {
+      version: input.stage === "validation" ? 2 : 1,
+      ...input.identity,
+      stage: input.stage,
+      createdAt: "2026-08-03T00:00:02.000Z",
+      result: clone(input.result),
+      resultDigest: digest(input.result),
+    } as unknown;
+    assertReviewerCheckpoint(checkpoint, input.identity, input.stage);
+    const binding: ReviewerCheckpointBinding = {
+      stage: input.stage,
+      path: join(input.rootPath, REVIEWER_CHECKPOINT_FILES[input.stage]),
+      digest: digest(checkpoint),
+      sourceAttemptId: input.identity.sourceAttemptId,
+    };
+    const records = this.reviewerCheckpoints.get(input.identity.sourceAttemptId) ?? [];
+    if (records.some((record) => record.binding.stage === input.stage)) throw new Error("checkpoint already exists");
+    const record = { binding, checkpoint } as ReviewerCheckpointRecord;
+    this.reviewerCheckpoints.set(input.identity.sourceAttemptId, [...records, clone(record)]);
+    return clone(record);
+  }
+
+  async findReusableReviewerCheckpoints(input: {
+    source: ReviewerCheckpointSource;
+    consumerIdentity: ReviewerCheckpointIdentity;
+    excludedDigests: string[];
+  }): Promise<ReviewerCheckpointBinding[]> {
+    const excluded = new Set(input.excludedDigests);
+    const records = (this.reviewerCheckpoints.get(input.source.identity.sourceAttemptId) ?? []).filter((record) => {
+      assertReviewerCheckpoint(record.checkpoint, input.source.identity, record.binding.stage);
+      return !excluded.has(record.binding.digest)
+        && reviewerCheckpointIsCompatible(record.checkpoint, input.consumerIdentity)
+        && (record.checkpoint.stage !== "validation" || record.checkpoint.result.status !== "infrastructure-error")
+        && (record.checkpoint.stage !== "reviewer-final"
+          || record.checkpoint.result.status === "pass" || record.checkpoint.result.status === "changes");
+    });
+    const validation = records.find((record) => record.binding.stage === "validation");
+    const preflight = records.find((record) => record.checkpoint.stage === "reviewer-preflight");
+    const reusable = records.filter((record) => record.checkpoint.stage !== "reviewer-preflight"
+      || (preflight?.checkpoint.stage === "reviewer-preflight"
+        && validation !== undefined
+        && preflight.checkpoint.result.validationReceiptDigest === validation.binding.digest))
+      .map((record) => record.binding);
+    const stages = new Set(reusable.map((binding) => binding.stage));
+    return clone(stages.has("reviewer-final")
+      && (!stages.has("validation") || !stages.has("standards-axis") || !stages.has("spec-axis"))
+      ? reusable.filter((binding) => binding.stage !== "reviewer-final")
+      : reusable);
+  }
+
+  async verifyReviewerCheckpoints(input: {
+    bindings: ReviewerCheckpointBinding[];
+    sources: ReviewerCheckpointSource[];
+    consumerIdentity: ReviewerCheckpointIdentity;
+  }): Promise<ReviewerCheckpointRecord[]> {
+    return clone(input.bindings.map((binding) => {
+      const source = input.sources.find((candidate) => candidate.identity.sourceAttemptId === binding.sourceAttemptId);
+      const record = (this.reviewerCheckpoints.get(binding.sourceAttemptId) ?? []).find((candidate) => (
+        JSON.stringify(candidate.binding) === JSON.stringify(binding)
+      ));
+      if (!source || !record) throw new Error("checkpoint binding drifted");
+      assertReviewerCheckpoint(record.checkpoint, source.identity, binding.stage);
+      if (!reviewerCheckpointIsCompatible(record.checkpoint, input.consumerIdentity)) throw new Error("checkpoint identity drifted");
+      return record;
+    }));
+  }
+
   async runReviewerValidation(input: ReviewerValidationInput): Promise<{
     receipt: ReviewerValidationReceipt;
     binding: ReviewerValidationReceiptBinding;
@@ -310,14 +385,8 @@ export class FakeGit implements GitPort {
       byteCount: 0,
       sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
     };
-    const receipt: ReviewerValidationReceipt = {
-      version: 1,
+    const result: ReviewerValidationStageResult = {
       status: this.reviewerValidationStatus,
-      jobId: input.jobId,
-      attemptId: input.attemptId,
-      taskDigest: input.taskDigest,
-      baseSha: input.baseSha,
-      reviewedHeadSha: input.expectedHeadSha,
       validationArgv: [...input.validationArgv],
       validationArgvDigest: digest(input.validationArgv),
       startedAt: "2026-08-03T00:00:00.000Z",
@@ -331,10 +400,16 @@ export class FakeGit implements GitPort {
       stderr: { ...emptyOutput },
       dockerHost: input.dockerHost,
       relevantEnvironmentDigest: "e".repeat(64),
-      resourceDigest: input.resourceDigest,
       sourceSnapshotDigest: "f".repeat(64),
     };
-    const binding = { path: join(input.rootPath, "validation-receipt.json"), digest: digest(receipt), status: receipt.status };
+    const record = this.recordReviewerCheckpoint({
+      rootPath: input.rootPath,
+      identity: input.checkpointIdentity,
+      stage: "validation",
+      result,
+    });
+    const receipt = record.checkpoint as ReviewerValidationCheckpoint;
+    const binding = { path: record.binding.path, digest: record.binding.digest, status: result.status };
     const output = { receipt, binding };
     this.reviewerReceipts.set(input.attemptId, clone(output));
     return clone(output);

@@ -17,6 +17,9 @@ import type {
   PullRequestRef,
   ReviewerValidationReceipt,
   ReviewerValidationReceiptBinding,
+  ReviewerCheckpointIdentity,
+  ReviewerCheckpointBinding,
+  ReviewerCheckpointRecord,
   SelectedTask,
   TaskSnapshot,
   WorktreeHandle,
@@ -152,6 +155,12 @@ export type ReviewerValidationInput = {
   validationArgv: string[];
   dockerHost: string | null;
   resourceDigest: string;
+  checkpointIdentity: ReviewerCheckpointIdentity;
+};
+
+export type ReviewerCheckpointSource = {
+  rootPath: string;
+  identity: ReviewerCheckpointIdentity;
 };
 
 export interface GitPort {
@@ -189,6 +198,16 @@ export interface GitPort {
     agentDir: string;
   }): Promise<ExecutionContext>;
   verifyTrustedContext(context: ExecutionContext): Promise<void>;
+  findReusableReviewerCheckpoints(input: {
+    source: ReviewerCheckpointSource;
+    consumerIdentity: ReviewerCheckpointIdentity;
+    excludedDigests: string[];
+  }): Promise<ReviewerCheckpointBinding[]>;
+  verifyReviewerCheckpoints(input: {
+    bindings: ReviewerCheckpointBinding[];
+    sources: ReviewerCheckpointSource[];
+    consumerIdentity: ReviewerCheckpointIdentity;
+  }): Promise<ReviewerCheckpointRecord[]>;
   runReviewerValidation(input: ReviewerValidationInput): Promise<{
     receipt: ReviewerValidationReceipt;
     binding: ReviewerValidationReceiptBinding;
@@ -208,7 +227,11 @@ export interface GitPort {
     validationArgv: string[];
     dockerHost: string | null;
     resourceDigest: string;
+    checkpointIdentity: ReviewerCheckpointIdentity;
+    validationSource: ReviewerValidationInput;
     validationReceipt: ReviewerValidationReceiptBinding;
+    checkpointInputs: ReviewerCheckpointBinding[];
+    checkpointSources: ReviewerCheckpointSource[];
     reviewAxisAgent: ExecutionResource;
     piExecutable: string;
     piRuntimeVersion: string;

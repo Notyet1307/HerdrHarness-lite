@@ -9,6 +9,8 @@ import { GitCli } from "../src/adapters/git-cli.js";
 import { executionResourceDigest } from "../src/attempt-plan.js";
 import { type CommandResult, type CommandRunner, requireSuccess, SyncCommandRunner } from "../src/adapters/command.js";
 import { REVIEWER_CONTEXT_BUDGET_BYTES, REVIEWER_CONTEXT_BUDGET_RESERVE_BYTES } from "../src/reviewer-context-budget.js";
+import type { ReviewerValidationCheckpoint, ReviewerValidationReceipt } from "../src/model.js";
+import type { ReviewerCheckpointIdentity } from "../src/model.js";
 
 const head = "b".repeat(40);
 const worktree = { path: "/repo", branch: "agent/issue-1", workspaceId: "w1" };
@@ -16,6 +18,14 @@ const allowedResultPaths = [
   "/repo/.harness/attempt-worker.json",
   "/repo/.harness/attempt-reviewer.json",
 ];
+
+function requireValidationCheckpoint(receipt: ReviewerValidationReceipt): ReviewerValidationCheckpoint {
+  assert.equal("stage" in receipt && receipt.stage === "validation" && receipt.version === 2, true);
+  if (!("stage" in receipt) || receipt.stage !== "validation" || receipt.version !== 2) {
+    throw new Error("expected a v2 validation checkpoint");
+  }
+  return receipt;
+}
 
 test("Reviewer Git verification rejects untracked files outside Harness results", async () => {
   const allowed = await new GitCli(new ReviewRunner(
@@ -185,6 +195,19 @@ test("Reviewer preparation exports a read-only exact-HEAD snapshot and writable 
       ],
       dockerHost: null,
       resourceDigest: "2".repeat(64),
+      checkpointIdentity: {
+        jobId: "job-1",
+        sourceAttemptId: "reviewer-1",
+        jobRevision: 7,
+        taskDigest: "1".repeat(64),
+        baseSha,
+        reviewedHeadSha: expectedHeadSha,
+        runtimeDigest: "3".repeat(64),
+        providerDigest: "4".repeat(64),
+        modelDigest: "5".repeat(64),
+        resourceDigest: "2".repeat(64),
+        repositoryContextBundleDigest: "6".repeat(64),
+      },
       reviewAxisAgent: {
         kind: "agent" as const,
         path: reviewAxisAgentPath,
@@ -203,17 +226,20 @@ test("Reviewer preparation exports a read-only exact-HEAD snapshot and writable 
     const cli = new GitCli(runner);
     process.env.HERDR_REVIEWER_TEST_SECRET = "must-not-leak";
     const validation = await cli.runReviewerValidation(input);
-    assert.equal(validation.receipt.status, "passed");
-    assert.equal(validation.receipt.stdout.byteCount, 21 * 1024 * 1024);
-    assert.equal(validation.receipt.stderr.byteCount, 5 * 1024 * 1024);
-    assert.equal(validation.receipt.stdout.truncated, true);
-    assert.equal(validation.receipt.stderr.truncated, true);
-    assert.equal(validation.receipt.stdout.redacted, true);
-    assert.equal(validation.receipt.stderr.redacted, true);
-    assert.equal(validation.receipt.stdout.text, "[redacted validation output]");
-    assert.equal(validation.receipt.stderr.text, "[redacted validation output]");
-    assert.match(validation.receipt.stdout.sha256, /^[0-9a-f]{64}$/);
-    assert.match(validation.receipt.stderr.sha256, /^[0-9a-f]{64}$/);
+    const validationReceipt = requireValidationCheckpoint(validation.receipt);
+    assert.equal(validationReceipt.sourceAttemptId, "reviewer-1");
+    assert.equal(validationReceipt.jobRevision, 7);
+    assert.equal(validationReceipt.result.status, "passed");
+    assert.equal(validationReceipt.result.stdout.byteCount, 21 * 1024 * 1024);
+    assert.equal(validationReceipt.result.stderr.byteCount, 5 * 1024 * 1024);
+    assert.equal(validationReceipt.result.stdout.truncated, true);
+    assert.equal(validationReceipt.result.stderr.truncated, true);
+    assert.equal(validationReceipt.result.stdout.redacted, true);
+    assert.equal(validationReceipt.result.stderr.redacted, true);
+    assert.equal(validationReceipt.result.stdout.text, "[redacted validation output]");
+    assert.equal(validationReceipt.result.stderr.text, "[redacted validation output]");
+    assert.match(validationReceipt.result.stdout.sha256, /^[0-9a-f]{64}$/);
+    assert.match(validationReceipt.result.stderr.sha256, /^[0-9a-f]{64}$/);
     assert.deepEqual(readdirSync(join(attemptRoot, "evidence")), []);
     const validationEnv = JSON.parse(readFileSync(join(attemptRoot, "workspace", "validation", "validation-env.json"), "utf8")) as Record<string, string>;
     assert.equal(validationEnv.HERDR_REVIEWER_TEST_SECRET, undefined);
@@ -226,39 +252,51 @@ test("Reviewer preparation exports a read-only exact-HEAD snapshot and writable 
       ...input,
       expectedHeadSha: "c".repeat(40),
       binding: validation.binding,
-    }), /receipt binding is invalid or drifted/);
+    }), /checkpoint identity drifted|receipt binding is invalid or drifted/);
     const failedRoot = join(root, "state", "attempt-failed");
     const failed = await cli.runReviewerValidation({
       ...input,
       rootPath: failedRoot,
       resultPath: join(failedRoot, "result.json"),
       attemptId: "reviewer-failed",
+      checkpointIdentity: { ...input.checkpointIdentity, sourceAttemptId: "reviewer-failed" },
       validationArgv: [process.execPath, resolve("test/fixtures/reviewer-validation.js"), "--exit-code", "7"],
     });
-    assert.equal(failed.receipt.status, "failed-checks");
-    assert.equal(failed.receipt.exitCode, 7);
-    assert.equal(failed.receipt.error, null);
+    const failedReceipt = requireValidationCheckpoint(failed.receipt);
+    assert.equal(failedReceipt.result.status, "failed-checks");
+    assert.equal(failedReceipt.result.exitCode, 7);
+    assert.equal(failedReceipt.result.error, null);
     const missingRoot = join(root, "state", "attempt-missing");
     const missing = await cli.runReviewerValidation({
       ...input,
       rootPath: missingRoot,
       resultPath: join(missingRoot, "result.json"),
       attemptId: "reviewer-missing",
+      checkpointIdentity: { ...input.checkpointIdentity, sourceAttemptId: "reviewer-missing" },
       validationArgv: ["definitely-missing-review-command"],
     });
-    assert.equal(missing.receipt.status, "infrastructure-error");
-    assert.match(missing.receipt.error ?? "", /executable is unavailable/);
+    const missingReceipt = requireValidationCheckpoint(missing.receipt);
+    assert.equal(missingReceipt.result.status, "infrastructure-error");
+    assert.match(missingReceipt.result.error ?? "", /executable is unavailable/);
     const timeoutRoot = join(root, "state", "attempt-timeout");
     const timedOut = await new GitCli(runner, 25).runReviewerValidation({
       ...input,
       rootPath: timeoutRoot,
       resultPath: join(timeoutRoot, "result.json"),
       attemptId: "reviewer-timeout",
+      checkpointIdentity: { ...input.checkpointIdentity, sourceAttemptId: "reviewer-timeout" },
       validationArgv: [process.execPath, resolve("test/fixtures/reviewer-validation.js"), "--sleep-ms", "200"],
     });
-    assert.equal(timedOut.receipt.status, "infrastructure-error");
-    assert.equal(timedOut.receipt.timeout, true);
-    const preparedInput = { ...input, validationReceipt: validation.binding };
+    const timedOutReceipt = requireValidationCheckpoint(timedOut.receipt);
+    assert.equal(timedOutReceipt.result.status, "infrastructure-error");
+    assert.equal(timedOutReceipt.result.timeout, true);
+    const preparedInput = {
+      ...input,
+      validationSource: input,
+      validationReceipt: validation.binding,
+      checkpointInputs: [],
+      checkpointSources: [],
+    };
     const workspace = await cli.prepareReviewer(preparedInput);
     assert.equal(readFileSync(join(workspace.reviewPath, "product.txt"), "utf8"), "head\n");
     assert.equal(lstatSync(join(workspace.reviewPath, "product.txt")).mode & 0o222, 0);
@@ -267,6 +305,9 @@ test("Reviewer preparation exports a read-only exact-HEAD snapshot and writable 
     const descriptor = JSON.parse(readFileSync(join(attemptRoot, "workspace", "descriptor.json"), "utf8")) as {
       validationReceiptPath: string;
       validationReceiptDigest: string;
+      checkpointIdentity: { sourceAttemptId: string; jobRevision: number; resourceDigest: string };
+      checkpointInputs: unknown[];
+      checkpointPaths: Record<string, string>;
       runtimePath: string;
       emptyAppendSystemPromptPath: string;
       piSubagentWrapperPath: string;
@@ -278,6 +319,16 @@ test("Reviewer preparation exports a read-only exact-HEAD snapshot and writable 
     };
     assert.equal(descriptor.validationReceiptPath, validation.binding.path);
     assert.equal(descriptor.validationReceiptDigest, validation.binding.digest);
+    assert.equal(descriptor.checkpointIdentity.sourceAttemptId, "reviewer-1");
+    assert.equal(descriptor.checkpointIdentity.jobRevision, 7);
+    assert.equal(descriptor.checkpointIdentity.resourceDigest, "2".repeat(64));
+    assert.deepEqual(descriptor.checkpointInputs, []);
+    assert.deepEqual(Object.values(descriptor.checkpointPaths).sort(), [
+      join(attemptRoot, "reviewer-final.json"),
+      join(attemptRoot, "reviewer-preflight.json"),
+      join(attemptRoot, "spec-axis.json"),
+      join(attemptRoot, "standards-axis.json"),
+    ].sort());
     assert.equal(descriptor.runtimePath, join(attemptRoot, "workspace", "review-runtime"));
     assert.equal(descriptor.piRuntimeVersion, "0.84.0");
     assert.equal(descriptor.privateEvidenceDir, join(attemptRoot, "evidence"));
@@ -361,6 +412,80 @@ test("Reviewer preparation exports a read-only exact-HEAD snapshot and writable 
     if (existsSync(sourcePath)) chmodSync(sourcePath, 0o700);
     if (existsSync(productPath)) chmodSync(productPath, 0o600);
     makeWritableForCleanup(root);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Reviewer checkpoints are reusable once only for the same bound work", async () => {
+  const root = mkdtempSync(join(tmpdir(), "herdr-review-checkpoint-"));
+  const sourceIdentity: ReviewerCheckpointIdentity = {
+    jobId: "job-1",
+    sourceAttemptId: "reviewer-1",
+    jobRevision: 7,
+    taskDigest: "1".repeat(64),
+    baseSha: "a".repeat(40),
+    reviewedHeadSha: "b".repeat(40),
+    runtimeDigest: "2".repeat(64),
+    providerDigest: "3".repeat(64),
+    modelDigest: "4".repeat(64),
+    resourceDigest: "5".repeat(64),
+    repositoryContextBundleDigest: "6".repeat(64),
+  };
+  const checkpoint = {
+    version: 1,
+    ...sourceIdentity,
+    stage: "standards-axis",
+    createdAt: "2026-08-21T00:00:00.000Z",
+    result: {
+      status: "pass",
+      summary: "Standards satisfied",
+      findings: [],
+      evidenceRefs: ["src/model.ts:1"],
+      outputByteCount: 128,
+      outputDigest: "b".repeat(64),
+      truncated: false,
+    },
+    resultDigest: "f1f5fac7699901395a04b5ecf01f16ae82cfee2ff64e593e056878ff68226aba",
+  };
+  try {
+    mkdirSync(root, { recursive: true, mode: 0o700 });
+    writeFileSync(join(root, "standards-axis.json"), `${JSON.stringify(checkpoint)}\n`, { mode: 0o400 });
+    const cli = new GitCli();
+    const consumerIdentity = { ...sourceIdentity, sourceAttemptId: "reviewer-2", jobRevision: 12 };
+    const reusable = await cli.findReusableReviewerCheckpoints({
+      source: { rootPath: root, identity: sourceIdentity },
+      consumerIdentity,
+      excludedDigests: [],
+    });
+    assert.deepEqual(reusable.map((binding) => binding.stage), ["standards-axis"]);
+    const verified = await cli.verifyReviewerCheckpoints({
+      bindings: reusable,
+      sources: [{ rootPath: root, identity: sourceIdentity }],
+      consumerIdentity,
+    });
+    assert.deepEqual(verified.map((record) => record.checkpoint.stage), ["standards-axis"]);
+    assert.deepEqual(await cli.findReusableReviewerCheckpoints({
+      source: { rootPath: root, identity: sourceIdentity },
+      consumerIdentity,
+      excludedDigests: [reusable[0]!.digest],
+    }), []);
+    assert.deepEqual(await cli.findReusableReviewerCheckpoints({
+      source: { rootPath: root, identity: sourceIdentity },
+      consumerIdentity: { ...consumerIdentity, reviewedHeadSha: "c".repeat(40) },
+      excludedDigests: [],
+    }), []);
+    assert.deepEqual(await cli.findReusableReviewerCheckpoints({
+      source: { rootPath: root, identity: sourceIdentity },
+      consumerIdentity: { ...consumerIdentity, resourceDigest: "a".repeat(64) },
+      excludedDigests: [],
+    }), []);
+    chmodSync(join(root, "standards-axis.json"), 0o600);
+    await assert.rejects(() => cli.verifyReviewerCheckpoints({
+      bindings: reusable,
+      sources: [{ rootPath: root, identity: sourceIdentity }],
+      consumerIdentity,
+    }), /not immutable/);
+  } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });

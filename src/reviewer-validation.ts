@@ -1,4 +1,11 @@
-import { digest, type ReviewerValidationOutput, type ReviewerValidationReceipt } from "./model.js";
+import {
+  digest,
+  type LegacyReviewerValidationReceipt,
+  type ReviewerValidationOutput,
+  type ReviewerValidationReceipt,
+  type ReviewerValidationStageResult,
+} from "./model.js";
+import { assertReviewerCheckpoint } from "./reviewer-checkpoints.js";
 
 export const REVIEWER_VALIDATION_OUTPUT_REDACTED = "[redacted validation output]";
 export const REVIEWER_VALIDATION_TIMEOUT_MS = 30 * 60 * 1000;
@@ -15,6 +22,7 @@ export type ReviewerValidationIdentity = {
   validationArgv: string[];
   dockerHost: string | null;
   resourceDigest: string;
+  checkpointIdentity: import("./model.js").ReviewerCheckpointIdentity;
 };
 
 export function assertReviewerValidationReceipt(
@@ -25,6 +33,21 @@ export function assertReviewerValidationReceipt(
     throw new ReviewerValidationIntegrityError("Reviewer validation receipt is not an object");
   }
   const receipt = value as ReviewerValidationReceipt;
+  if (isReviewerValidationCheckpoint(receipt)) {
+    assertReviewerCheckpoint(receipt, expected.checkpointIdentity, "validation");
+    if (
+      receipt.jobId !== expected.jobId
+      || receipt.sourceAttemptId !== expected.attemptId
+      || receipt.taskDigest !== expected.taskDigest
+      || receipt.baseSha !== expected.baseSha
+      || receipt.reviewedHeadSha !== expected.reviewedHeadSha
+      || receipt.resourceDigest !== expected.resourceDigest
+      || JSON.stringify(receipt.result.validationArgv) !== JSON.stringify(expected.validationArgv)
+      || receipt.result.validationArgvDigest !== digest(expected.validationArgv)
+      || receipt.result.dockerHost !== expected.dockerHost
+    ) throw new ReviewerValidationIntegrityError("Reviewer validation receipt binding is invalid or drifted");
+    return;
+  }
   if (
     receipt.version !== 1
     || !["passed", "failed-checks", "infrastructure-error"].includes(receipt.status)
@@ -57,6 +80,33 @@ export function assertReviewerValidationReceipt(
     || (receipt.status === "failed-checks" && (!deterministic || receipt.exitCode === null || receipt.exitCode === 0))
     || (receipt.status === "infrastructure-error" && deterministic)
   ) throw new ReviewerValidationIntegrityError("Reviewer validation receipt status contradicts its process outcome");
+}
+
+export function reviewerValidationResult(receipt: ReviewerValidationReceipt): ReviewerValidationStageResult {
+  if (isReviewerValidationCheckpoint(receipt)) return receipt.result;
+  return {
+    status: receipt.status,
+    validationArgv: [...receipt.validationArgv],
+    validationArgvDigest: receipt.validationArgvDigest,
+    startedAt: receipt.startedAt,
+    completedAt: receipt.completedAt,
+    durationMs: receipt.durationMs,
+    exitCode: receipt.exitCode,
+    signal: receipt.signal,
+    timeout: receipt.timeout,
+    error: receipt.error,
+    stdout: receipt.stdout,
+    stderr: receipt.stderr,
+    dockerHost: receipt.dockerHost,
+    relevantEnvironmentDigest: receipt.relevantEnvironmentDigest,
+    sourceSnapshotDigest: receipt.sourceSnapshotDigest,
+  };
+}
+
+export function isReviewerValidationCheckpoint(
+  receipt: ReviewerValidationReceipt,
+): receipt is Exclude<ReviewerValidationReceipt, LegacyReviewerValidationReceipt> {
+  return "stage" in receipt && receipt.stage === "validation";
 }
 
 function validOutput(value: ReviewerValidationOutput): boolean {

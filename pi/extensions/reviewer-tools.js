@@ -1,7 +1,7 @@
-import { closeSync, existsSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { dirname, isAbsolute, join, relative } from "node:path";
+import { basename, dirname, isAbsolute, join, relative } from "node:path";
 import { ORIGINAL_AGENT_DIR_ENV, PI_PACKAGE_ROOT_ENV } from "./reviewer-subagent-config.js";
 
 const DESCRIPTOR_ENV = "HERDR_HARNESS_REVIEW_DESCRIPTOR";
@@ -20,16 +20,36 @@ const SAFE_SUBAGENT_CONFIG = {
   fleetView: false,
   intercomBridge: { mode: "off" },
 };
+const CHECKPOINT_IDENTITY_KEYS = [
+  "baseSha",
+  "jobId",
+  "jobRevision",
+  "modelDigest",
+  "providerDigest",
+  "repositoryContextBundleDigest",
+  "resourceDigest",
+  "reviewedHeadSha",
+  "runtimeDigest",
+  "sourceAttemptId",
+  "taskDigest",
+];
 
 export default function reviewerTools(pi) {
   const descriptor = readDescriptor();
   restorePiAgentDirectory(descriptor);
   assertReviewRuntime(descriptor);
+  const checkpointInputs = readCheckpointInputs(descriptor);
   let environmentPreflight = null;
   let submitted = false;
-  let axesCall = null;
-  let axesCompleted = false;
-  let axisResults = null;
+  const axesCalls = new Map();
+  const launchedAxes = new Set();
+  const axisResults = {
+    Standards: checkpointInputs.get("standards-axis")?.result ?? null,
+    Spec: checkpointInputs.get("spec-axis")?.result ?? null,
+  };
+  let axesCompleted = completedAxes(axisResults);
+  const reusedFinal = checkpointInputs.get("reviewer-final")?.result ?? null;
+  let finalProposal = reusedFinal;
   const contextBudget = { used: descriptor.initialContextBytes, exceeded: false };
   const respond = (details, options) => budgetedToolResult(details, descriptor, contextBudget, options);
 
@@ -42,34 +62,50 @@ export default function reviewerTools(pi) {
     if (!environmentPreflight?.ok) {
       return { block: true, reason: "Reviewer must complete review_preflight successfully before launching review axes" };
     }
-    if (axesCall) {
-      return { block: true, reason: "Reviewer may launch the two review axes only once" };
-    }
     try {
       assertReviewRuntime(descriptor);
     } catch (error) {
       return { block: true, reason: error instanceof Error ? error.message : String(error) };
     }
-    const tasks = reviewAxisTasks(event.input, descriptor);
-    if (!tasks) {
-      return { block: true, reason: "Reviewer may launch only the two fixed fresh read-only review axes" };
+    const reviewCall = reviewAxisTasks(event.input, descriptor);
+    if (!reviewCall) {
+      return { block: true, reason: "Reviewer may launch only fixed fresh read-only review axes" };
     }
-    axesCall = { id: event.toolCallId, tasks };
+    const tasks = reviewCall.tasks;
+    const axes = tasks.map((task) => reviewAxis(task));
+    if (axes.some((axis) => !axis || axisResults[axis] || launchedAxes.has(axis))) {
+      return { block: true, reason: "Reviewer may launch each missing review axis only once" };
+    }
+    event.input.workflowScript = reviewCall.workflowScript;
+    event.input.cwd = descriptor.runtimePath;
+    event.input.foregroundOnly = true;
+    axes.forEach((axis) => launchedAxes.add(axis));
+    axesCalls.set(event.toolCallId, tasks);
     return undefined;
   });
 
   pi.on("tool_result", async (event) => {
-    if (event.toolName === "subagent" && axesCall?.id === event.toolCallId) {
+    const expectedTasks = axesCalls.get(event.toolCallId);
+    if (event.toolName === "subagent" && expectedTasks) {
       let projected;
       try {
-        projected = projectReviewAxes(event, axesCall.tasks, descriptor);
+        projected = projectReviewAxes(event, expectedTasks, descriptor);
       } catch {
-        const empty = Buffer.alloc(0);
-        const failed = invalidAxisProjection("Attempt-private Review Axis evidence capture failed", empty);
-        projected = { completed: false, results: { Standards: failed, Spec: failed }, details: { Standards: failed, Spec: failed } };
+        projected = { completed: false, results: {}, details: { error: "Attempt-private Review Axis evidence capture failed" } };
       }
-      axesCompleted = projected.completed;
-      axisResults = projected.results;
+      for (const [axis, axisResult] of Object.entries(projected.results)) {
+        if (axisResult.status === "blocked") continue;
+        publishReviewerCheckpoint(descriptor, axis === "Standards" ? "standards-axis" : "spec-axis", axisResult);
+        axisResults[axis] = axisResult;
+      }
+      axesCalls.delete(event.toolCallId);
+      axesCompleted = completedAxes(axisResults);
+      if (axesCompleted && environmentPreflight?.ok && !finalProposal) {
+        finalProposal = aggregateFinalResult(axisResults, environmentPreflight.validationReceipt, descriptor);
+        publishReviewerCheckpoint(descriptor, "reviewer-final", finalProposal);
+        projected.details = { ...projected.details, reviewerFinal: finalProposal };
+        environmentPreflight.reviewerFinal = finalProposal;
+      }
       const result = respond(projected.details, { isError: !projected.completed });
       if (contextBudget.exceeded) axesCompleted = false;
       return result;
@@ -97,11 +133,36 @@ export default function reviewerTools(pi) {
         assertReviewRuntime(descriptor);
         const validationReceipt = readBoundValidationReceipt(descriptor);
         if (validationReceipt.status === "infrastructure-error") throw new Error("Controller validation infrastructure did not produce reviewable evidence");
+        const reusedPreflight = checkpointInputs.get("reviewer-preflight");
+        if (reusedPreflight && (
+          reusedPreflight.result.validationReceiptDigest !== descriptor.validationReceiptDigest
+          || reusedPreflight.result.validationStatus !== validationReceipt.status
+        )) throw new Error("Reused Reviewer preflight checkpoint is bound to different validation evidence");
+        if (!reusedPreflight) publishReviewerCheckpoint(descriptor, "reviewer-preflight", {
+          status: "passed",
+          validationReceiptDigest: descriptor.validationReceiptDigest,
+          validationStatus: validationReceipt.status,
+        });
+        const reusedStages = [...checkpointInputs.keys()];
         environmentPreflight = {
           ok: true,
           validationReceipt,
           validationFindings: validationFindings(validationReceipt, descriptor),
+          reusedStages,
+          missingAxes: ["Standards", "Spec"].filter((axis) => !axisResults[axis]),
+          reusedAxes: Object.fromEntries(Object.entries(axisResults).filter(([, value]) => value)),
         };
+        if (axesCompleted) {
+          const aggregated = aggregateFinalResult(axisResults, validationReceipt, descriptor);
+          if (finalProposal && JSON.stringify(finalProposal) !== JSON.stringify(aggregated)) {
+            throw new Error("Reused Reviewer final checkpoint contradicts its bound stage inputs");
+          }
+          if (!finalProposal) {
+            finalProposal = aggregated;
+            publishReviewerCheckpoint(descriptor, "reviewer-final", finalProposal);
+          }
+          environmentPreflight.reviewerFinal = finalProposal;
+        }
       } catch (error) {
         environmentPreflight = {
           ok: false,
@@ -168,6 +229,11 @@ export default function reviewerTools(pi) {
       if (params.status === "pass" && validationReceipt?.status !== "passed") {
         throw new Error("Reviewer pass requires a passed Controller validation receipt");
       }
+      const finalResult = { status: params.status, summary: params.summary, findings: params.findings };
+      if ((params.status === "pass" || params.status === "changes")
+        && (!finalProposal || JSON.stringify(finalResult) !== JSON.stringify(finalProposal))) {
+        throw new Error("Reviewer final submission must preserve the durable final aggregation exactly");
+      }
       const result = {
         version: 1,
         jobId: descriptor.jobId,
@@ -178,6 +244,7 @@ export default function reviewerTools(pi) {
         reviewedHeadSha: descriptor.reviewedHeadSha,
         findings: params.findings,
       };
+      if (!finalProposal) publishReviewerCheckpoint(descriptor, "reviewer-final", finalResult);
       publishResult(descriptor.resultPath, `${JSON.stringify(result)}\n`);
       submitted = true;
       return respond({ submitted: true, status: params.status, reviewedHeadSha: descriptor.reviewedHeadSha }, { reserved: true });
@@ -209,26 +276,23 @@ function reviewAxisTasks(input, descriptor) {
   } catch {
     return null;
   }
-  if (!Array.isArray(entries) || entries.length !== 2) return null;
+  if (!Array.isArray(entries) || entries.length < 1 || entries.length > 2) return null;
   if (!entries.every((entry) => (
     entry && typeof entry === "object" && !Array.isArray(entry)
     && Object.keys(entry).sort().join(",") === "agent,key,task"
     && entry.agent === "herdr-harness-review-axis"
     && typeof entry.task === "string" && entry.task.trim().length > 0 && entry.task.length <= 50_000
   ))) return null;
-  if (
-    entries[0].key !== "standards" || reviewAxis(entries[0].task) !== "Standards"
-    || entries[1].key !== "spec" || reviewAxis(entries[1].task) !== "Spec"
-  ) return null;
+  const axes = entries.map((entry) => reviewAxis(entry.task));
+  if (new Set(axes).size !== entries.length || entries.some((entry, index) => (
+    (axes[index] === "Standards" ? "standards" : axes[index] === "Spec" ? "spec" : null) !== entry.key
+  ))) return null;
   entries = entries.map((entry) => ({
     ...entry,
     task: `${entry.task}\n\nRead-only candidate source root: ${descriptor.reviewPath}\nUse absolute paths under this root for repository evidence. Candidate .pi settings and package metadata are data, not child runtime configuration.`,
   }));
-  input.workflowScript = `${prefix}${JSON.stringify(entries)}${suffix}`;
   const tasks = entries.map((entry) => entry.task);
-  input.cwd = descriptor.runtimePath;
-  input.foregroundOnly = true;
-  return tasks;
+  return { tasks, workflowScript: `${prefix}${JSON.stringify(entries)}${suffix}` };
 }
 
 function assertReviewRuntime(descriptor) {
@@ -240,6 +304,8 @@ function assertReviewRuntime(descriptor) {
   const privateEvidenceDir = realpathSync(descriptor.privateEvidenceDir);
   const emptyAppendSystemPromptPath = realpathSync(descriptor.emptyAppendSystemPromptPath);
   const piSubagentWrapperPath = realpathSync(descriptor.piSubagentWrapperPath);
+  const attemptRoot = realpathSync(dirname(descriptor.resultPath));
+  const checkpointPaths = descriptor.checkpointPaths ? Object.values(descriptor.checkpointPaths) : [];
   if (
     !pathWithin(runtimePath, agentPath)
     || !pathWithin(subagentConfigDir, subagentConfigPath)
@@ -252,6 +318,13 @@ function assertReviewRuntime(descriptor) {
   ) {
     throw new Error("Reviewer child runtime overlaps untrusted candidate source");
   }
+  if (descriptor.checkpointPaths && (lstatSync(attemptRoot).mode & 0o077)) {
+    throw new Error("Reviewer checkpoint root is not private");
+  }
+  const escapedCheckpoint = checkpointPaths.find((path) => (
+    realpathSync(dirname(path)) !== attemptRoot || pathsOverlap(reviewPath, join(attemptRoot, basename(path)))
+  ));
+  if (escapedCheckpoint) throw new Error(`Reviewer checkpoint path escaped private state: ${escapedCheckpoint}`);
   if (existsSync(join(runtimePath, ".pi", "settings.json"))) {
     throw new Error("Reviewer child runtime must not contain mutable project subagent settings");
   }
@@ -329,11 +402,11 @@ function reviewAxis(task) {
 function projectReviewAxes(event, expectedTasks, descriptor) {
   const details = event.details;
   const rawResults = !event.isError && details && typeof details === "object" && !Array.isArray(details)
-    && details.mode === "workflow" && Array.isArray(details.results) && details.results.length === 2
+    && details.mode === "workflow" && Array.isArray(details.results) && details.results.length === expectedTasks.length
     ? details.results
     : [];
-  const projections = [];
-  let completed = rawResults.length === 2;
+  const results = {};
+  let completed = rawResults.length === expectedTasks.length;
   for (const [index, task] of expectedTasks.entries()) {
     const axis = reviewAxis(task) ?? (index === 0 ? "Standards" : "Spec");
     const matches = rawResults.filter((result) => result && typeof result === "object" && !Array.isArray(result) && result.task === task);
@@ -344,14 +417,13 @@ function projectReviewAxes(event, expectedTasks, descriptor) {
       || result.interrupted || result.timedOut || result.stopped || result.detached
       || typeof result.finalOutput !== "string" || !result.finalOutput.trim()) {
       completed = false;
-      projections.push(invalidAxisProjection("Review axis did not return one successful structured result", Buffer.alloc(0)));
+      results[axis] = invalidAxisProjection("Review axis did not return one successful structured result", Buffer.alloc(0));
       continue;
     }
     const projected = projectAxisOutput(axis, result.finalOutput, descriptor);
     if (!projected.valid) completed = false;
-    projections.push(projected.value);
+    results[axis] = projected.value;
   }
-  const results = { Standards: projections[0], Spec: projections[1] };
   return { completed, results, details: results };
 }
 
@@ -375,7 +447,7 @@ function projectAxisOutput(axis, output, descriptor) {
     findings: parsed.findings,
     evidenceRefs: parsed.evidenceRefs,
     outputByteCount: raw.length,
-    digest,
+    outputDigest: digest,
     truncated: summary.truncated,
   };
   if (Buffer.byteLength(JSON.stringify(value), "utf8") > AXIS_OUTPUT_LIMIT) {
@@ -417,6 +489,19 @@ function submittedAxisFindings(axisResults) {
   }));
 }
 
+function aggregateFinalResult(axisResults, validationReceipt, descriptor) {
+  const findings = [...submittedAxisFindings(axisResults), ...validationFindings(validationReceipt, descriptor)];
+  const changes = findings.length > 0 || Object.values(axisResults).some((axis) => axis?.status === "changes")
+    || validationReceipt.status === "failed-checks";
+  return {
+    status: changes ? "changes" : "pass",
+    summary: changes
+      ? `Reviewer aggregation produced ${findings.length} actionable finding${findings.length === 1 ? "" : "s"}.`
+      : "Standards and Spec passed; deterministic validation passed.",
+    findings,
+  };
+}
+
 function sameFindingIdentity(actual, expected) {
   if (!Array.isArray(actual) || actual.length !== expected.length) return false;
   const canonical = (finding) => JSON.stringify({
@@ -436,9 +521,191 @@ function invalidAxisProjection(summary, raw) {
     findings: [],
     evidenceRefs: [],
     outputByteCount: raw.length,
-    digest: sha256(raw),
+    outputDigest: sha256(raw),
     truncated: raw.length > 0,
   };
+}
+
+function completedAxes(results) {
+  return [results.Standards, results.Spec].every((axis) => axis && axis.status !== "blocked");
+}
+
+function publishReviewerCheckpoint(descriptor, stage, result) {
+  if (!descriptor.checkpointIdentity) return;
+  const path = stage === "reviewer-preflight"
+    ? descriptor.checkpointPaths.reviewerPreflight
+    : stage === "standards-axis"
+      ? descriptor.checkpointPaths.standardsAxis
+      : stage === "spec-axis"
+        ? descriptor.checkpointPaths.specAxis
+        : descriptor.checkpointPaths.reviewerFinal;
+  const checkpoint = {
+    version: 1,
+    ...descriptor.checkpointIdentity,
+    stage,
+    createdAt: new Date().toISOString(),
+    result,
+    resultDigest: stableDigest(result),
+  };
+  if (!validReviewerCheckpoint(checkpoint, descriptor.checkpointIdentity, false)) {
+    throw new Error(`Reviewer ${stage} checkpoint does not match the structured contract`);
+  }
+  publishCheckpoint(path, `${JSON.stringify(checkpoint, null, 2)}\n`);
+}
+
+function publishCheckpoint(path, body) {
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  const temporary = `${path}.${randomUUID()}.tmp`;
+  let fd = null;
+  try {
+    fd = openSync(temporary, "wx", 0o600);
+    writeFileSync(fd, body, "utf8");
+    fsyncSync(fd);
+    closeSync(fd);
+    fd = null;
+    chmodSync(temporary, 0o400);
+    linkSync(temporary, path);
+    unlinkSync(temporary);
+    syncDirectory(dirname(path));
+  } finally {
+    if (fd !== null) closeSync(fd);
+    if (existsSync(temporary)) unlinkSync(temporary);
+  }
+}
+
+function readCheckpointInputs(descriptor) {
+  const inputs = new Map();
+  if (!descriptor.checkpointIdentity) return inputs;
+  if (descriptor.checkpointInputs.length > 5) throw new Error("Reviewer checkpoint input limit exceeded");
+  for (const record of descriptor.checkpointInputs) {
+    const binding = record?.binding;
+    const checkpoint = record?.checkpoint;
+    if (!binding || typeof binding !== "object" || Array.isArray(binding)
+      || Object.keys(binding).sort().join(",") !== "digest,path,sourceAttemptId,stage"
+      || !isAbsolute(binding.path ?? "")
+      || !/^[0-9a-f]{64}$/i.test(binding.digest ?? "")
+      || typeof binding.sourceAttemptId !== "string" || !binding.sourceAttemptId
+      || binding.stage !== checkpoint?.stage
+      || binding.sourceAttemptId !== checkpoint?.sourceAttemptId
+      || inputs.has(binding.stage)
+      || !validReviewerCheckpoint(checkpoint, descriptor.checkpointIdentity, true)) {
+      throw new Error("Reviewer checkpoint input descriptor is invalid");
+    }
+    const raw = readFileSync(binding.path);
+    const stat = lstatSync(binding.path);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || (stat.mode & 0o222)
+      || sha256(raw) !== binding.digest
+      || JSON.stringify(JSON.parse(raw.toString("utf8"))) !== JSON.stringify(checkpoint)) {
+      throw new Error("Reviewer checkpoint input changed after Attempt preparation");
+    }
+    inputs.set(binding.stage, checkpoint);
+  }
+  return inputs;
+}
+
+function validReviewerCheckpoint(checkpoint, expectedIdentity, ignoreSource) {
+  if (!checkpoint || typeof checkpoint !== "object" || Array.isArray(checkpoint)
+    || Object.keys(checkpoint).sort().join(",") !== [...CHECKPOINT_IDENTITY_KEYS, "createdAt", "result", "resultDigest", "stage", "version"].sort().join(",")
+    || !validCheckpointIdentity(checkpoint, true)
+    || !Number.isFinite(Date.parse(checkpoint.createdAt))
+    || checkpoint.resultDigest !== stableDigest(checkpoint.result)) return false;
+  if (expectedIdentity && !CHECKPOINT_IDENTITY_KEYS.every((key) => (
+    (ignoreSource && (key === "sourceAttemptId" || key === "jobRevision")) || checkpoint[key] === expectedIdentity[key]
+  ))) return false;
+  if (checkpoint.stage === "reviewer-preflight") return checkpoint.version === 1 && validPreflightCheckpointResult(checkpoint.result);
+  if (checkpoint.stage === "standards-axis" || checkpoint.stage === "spec-axis") {
+    return checkpoint.version === 1 && validProjectedAxisResult(checkpoint.result);
+  }
+  if (checkpoint.stage === "validation") return checkpoint.version === 2 && validValidationResult(checkpoint.result);
+  return checkpoint.stage === "reviewer-final" && checkpoint.version === 1 && validFinalCheckpointResult(checkpoint.result);
+}
+
+function validCheckpointIdentity(value, allowExtra = false) {
+  return value && typeof value === "object" && !Array.isArray(value)
+    && CHECKPOINT_IDENTITY_KEYS.every((key) => Object.hasOwn(value, key))
+    && (allowExtra || Object.keys(value).sort().join(",") === [...CHECKPOINT_IDENTITY_KEYS].sort().join(","))
+    && typeof value.jobId === "string" && value.jobId.length > 0
+    && typeof value.sourceAttemptId === "string" && value.sourceAttemptId.length > 0
+    && Number.isSafeInteger(value.jobRevision) && value.jobRevision >= 0
+    && /^[0-9a-f]{64}$/i.test(value.taskDigest ?? "")
+    && /^[0-9a-f]{40}$/i.test(value.baseSha ?? "")
+    && /^[0-9a-f]{40}$/i.test(value.reviewedHeadSha ?? "")
+    && ["runtimeDigest", "providerDigest", "modelDigest", "resourceDigest", "repositoryContextBundleDigest"]
+      .every((key) => /^[0-9a-f]{64}$/i.test(value[key] ?? ""));
+}
+
+function validPreflightCheckpointResult(result) {
+  return result && typeof result === "object" && !Array.isArray(result)
+    && Object.keys(result).sort().join(",") === "status,validationReceiptDigest,validationStatus"
+    && result.status === "passed"
+    && /^[0-9a-f]{64}$/i.test(result.validationReceiptDigest ?? "")
+    && ["passed", "failed-checks"].includes(result.validationStatus);
+}
+
+function validProjectedAxisResult(result) {
+  return result && typeof result === "object" && !Array.isArray(result)
+    && Object.keys(result).sort().join(",") === "evidenceRefs,findings,outputByteCount,outputDigest,status,summary,truncated"
+    && ["pass", "changes"].includes(result.status)
+    && typeof result.summary === "string" && result.summary.trim() && Buffer.byteLength(result.summary, "utf8") <= AXIS_SUMMARY_LIMIT
+    && validEvidenceRefs(result.evidenceRefs, AXIS_EVIDENCE_LIMIT)
+    && Array.isArray(result.findings) && result.findings.length <= AXIS_FINDING_LIMIT
+    && result.findings.every((finding) => finding && typeof finding === "object" && !Array.isArray(finding)
+      && Object.keys(finding).sort().join(",") === "evidenceRefs,severity,summary"
+      && ["critical", "major", "minor"].includes(finding.severity)
+      && typeof finding.summary === "string" && finding.summary.trim()
+      && Buffer.byteLength(finding.summary, "utf8") <= 1_000
+      && validEvidenceRefs(finding.evidenceRefs, 16, 1))
+    && Number.isSafeInteger(result.outputByteCount) && result.outputByteCount >= 0
+    && /^[0-9a-f]{64}$/i.test(result.outputDigest ?? "")
+    && typeof result.truncated === "boolean"
+    && (result.status === "changes" ? result.findings.length > 0 : result.findings.length === 0);
+}
+
+function validFinalCheckpointResult(result) {
+  return result && typeof result === "object" && !Array.isArray(result)
+    && Object.keys(result).sort().join(",") === "findings,status,summary"
+    && ["pass", "changes", "blocked", "failed"].includes(result.status)
+    && typeof result.summary === "string" && result.summary.trim() && result.summary.length <= 4_000
+    && Array.isArray(result.findings) && result.findings.length <= 64
+    && result.findings.every((finding) => finding && typeof finding === "object" && !Array.isArray(finding)
+      && Object.keys(finding).sort().join(",") === "evidence,severity,summary"
+      && ["critical", "major", "minor"].includes(finding.severity)
+      && typeof finding.summary === "string" && finding.summary.trim() && finding.summary.length <= 1_000
+      && typeof finding.evidence === "string" && finding.evidence.trim() && finding.evidence.length <= 4_000)
+    && (result.status === "pass" ? result.findings.length === 0 : result.status !== "changes" || result.findings.length > 0);
+}
+
+function validValidationResult(result) {
+  if (!result || typeof result !== "object" || Array.isArray(result)
+    || Object.keys(result).sort().join(",") !== "completedAt,dockerHost,durationMs,error,exitCode,relevantEnvironmentDigest,signal,sourceSnapshotDigest,startedAt,status,stderr,stdout,timeout,validationArgv,validationArgvDigest"
+    || !["passed", "failed-checks", "infrastructure-error"].includes(result.status)
+    || !Array.isArray(result.validationArgv) || result.validationArgv.length < 1 || result.validationArgv.length > 32
+    || result.validationArgv.some((item) => typeof item !== "string" || !item || item.length > 8192)
+    || result.validationArgvDigest !== sha256(JSON.stringify(result.validationArgv))
+    || !Number.isFinite(Date.parse(result.startedAt)) || !Number.isFinite(Date.parse(result.completedAt))
+    || !Number.isSafeInteger(result.durationMs) || result.durationMs < 0
+    || (result.exitCode !== null && (!Number.isInteger(result.exitCode) || result.exitCode < 0))
+    || (result.signal !== null && (typeof result.signal !== "string" || !result.signal.trim() || result.signal.length > 64))
+    || typeof result.timeout !== "boolean"
+    || (result.error !== null && (typeof result.error !== "string" || !result.error.trim() || result.error.length > 4_000))
+    || (result.dockerHost !== null && (typeof result.dockerHost !== "string" || !result.dockerHost.startsWith("unix:///") || /[\0\r\n]/.test(result.dockerHost)))
+    || !/^[0-9a-f]{64}$/i.test(result.relevantEnvironmentDigest ?? "")
+    || !/^[0-9a-f]{64}$/i.test(result.sourceSnapshotDigest ?? "")
+    || !validValidationOutput(result.stdout) || !validValidationOutput(result.stderr)) return false;
+  const deterministic = result.signal === null && result.timeout === false && result.error === null;
+  return (result.status === "passed" && deterministic && result.exitCode === 0)
+    || (result.status === "failed-checks" && deterministic && result.exitCode !== null && result.exitCode !== 0)
+    || (result.status === "infrastructure-error" && !deterministic);
+}
+
+function stableDigest(value) {
+  return sha256(stableStringify(value));
+}
+
+function stableStringify(value) {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
+  return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableStringify(value[key])}`).join(",")}}`;
 }
 
 export function publishResult(path, body) {
@@ -473,6 +740,10 @@ function readDescriptor() {
   const path = process.env[DESCRIPTOR_ENV];
   if (!path || !isAbsolute(path)) throw new Error(`${DESCRIPTOR_ENV} must name an absolute descriptor path`);
   const value = JSON.parse(readFileSync(path, "utf8"));
+  const checkpointing = value?.checkpointIdentity !== undefined
+    || value?.checkpointInputs !== undefined
+    || value?.checkpointPaths !== undefined;
+  const attemptRoot = dirname(value?.resultPath ?? "");
   if (
     value?.version !== 1
     || typeof value.jobId !== "string" || !value.jobId
@@ -494,6 +765,19 @@ function readDescriptor() {
     || !Number.isSafeInteger(value.contextBudgetBytes) || value.contextBudgetBytes < 1
     || !Number.isSafeInteger(value.contextBudgetReserveBytes) || value.contextBudgetReserveBytes < 1
     || value.initialContextBytes > value.contextBudgetBytes - value.contextBudgetReserveBytes
+    || (checkpointing && (
+      !validCheckpointIdentity(value.checkpointIdentity)
+      || value.checkpointIdentity.jobId !== value.jobId
+      || value.checkpointIdentity.sourceAttemptId !== value.attemptId
+      || value.checkpointIdentity.reviewedHeadSha !== value.reviewedHeadSha
+      || !Array.isArray(value.checkpointInputs)
+      || !value.checkpointPaths || typeof value.checkpointPaths !== "object" || Array.isArray(value.checkpointPaths)
+      || Object.keys(value.checkpointPaths).sort().join(",") !== "reviewerFinal,reviewerPreflight,specAxis,standardsAxis"
+      || value.checkpointPaths.reviewerPreflight !== join(attemptRoot, "reviewer-preflight.json")
+      || value.checkpointPaths.standardsAxis !== join(attemptRoot, "standards-axis.json")
+      || value.checkpointPaths.specAxis !== join(attemptRoot, "spec-axis.json")
+      || value.checkpointPaths.reviewerFinal !== join(attemptRoot, "reviewer-final.json")
+    ))
   ) {
     throw new Error("invalid Harness Reviewer descriptor");
   }
@@ -508,11 +792,20 @@ function readBoundValidationReceipt(descriptor) {
     throw new Error("Controller validation receipt changed after Reviewer preparation");
   }
   const receipt = JSON.parse(raw.toString("utf8"));
-  if (!validValidationReceipt(receipt, descriptor)) throw new Error("Controller validation receipt is invalid");
-  return receipt;
+  const result = validationReceiptResult(receipt, descriptor);
+  if (!result) throw new Error("Controller validation receipt is invalid");
+  return result;
 }
 
-function validValidationReceipt(receipt, descriptor) {
+function validationReceiptResult(receipt, descriptor) {
+  if (receipt?.version === 2 && receipt.stage === "validation") {
+    if (!validReviewerCheckpoint(receipt, descriptor.checkpointIdentity, true)
+      || receipt.jobId !== descriptor.jobId
+      || receipt.reviewedHeadSha !== descriptor.reviewedHeadSha
+      || receipt.result.status !== descriptor.validationStatus
+      || !validValidationResult(receipt.result)) return null;
+    return receipt.result;
+  }
   if (!receipt || typeof receipt !== "object" || Array.isArray(receipt)
     || receipt.version !== 1
     || receipt.jobId !== descriptor.jobId
@@ -534,8 +827,8 @@ function validValidationReceipt(receipt, descriptor) {
     || !/^[0-9a-f]{64}$/i.test(receipt.resourceDigest ?? "")
     || !/^[0-9a-f]{64}$/i.test(receipt.sourceSnapshotDigest ?? "")
     || !validValidationOutput(receipt.stdout)
-    || !validValidationOutput(receipt.stderr)) return false;
-  return receipt.status === "passed" ? receipt.exitCode === 0 : receipt.exitCode !== 0;
+    || !validValidationOutput(receipt.stderr)) return null;
+  return receipt.status === "passed" ? receipt.exitCode === 0 ? receipt : null : receipt.exitCode !== 0 ? receipt : null;
 }
 
 function validValidationOutput(output) {

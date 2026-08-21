@@ -63,8 +63,11 @@ export function buildAttemptContextEnvelope(input: {
         : null,
       validationArgv: input.attempt.reviewerValidationArgv ? [...input.attempt.reviewerValidationArgv] : null,
       validationReceiptPath: input.attempt.lane === "reviewer"
-        ? resolve(dirname(input.attempt.resultPath), "validation-receipt.json")
+        ? input.attempt.reviewerValidationReceipt?.path ?? resolve(dirname(input.attempt.resultPath), "validation-receipt.json")
         : null,
+      ...(input.attempt.lane === "reviewer"
+        ? { reviewerCheckpointInputs: (input.attempt.reviewerCheckpointInputs ?? []).map((binding) => ({ ...binding })) }
+        : {}),
     },
     runtime: {
       snapshotDigest: digest(input.executionSnapshot),

@@ -19,6 +19,7 @@ Fleet 是独立的进程生命周期层：每个项目对应一个单项目 Cont
 - Worker/Reviewer 使用 fresh Attempt；blocked Agent 上下文不得续跑。
 - Worker 完成必须有 Harness-owned durable result 与 Git verification。
 - Reviewer 保持 fresh、read-only、exact-HEAD 和双轴；固定验证由 Controller 在 Provider 启动前独立执行并绑定 receipt。
+- Reviewer 阶段 checkpoint 只在 Harness private state 中原子创建、digest 绑定且最多跨 fresh Attempt 复用一次；checkpoint 本身不是 review pass。
 - Runtime event、Herdr status、child completion 与短 probe 都只是观察事实。
 - Analyst 只有建议权；policy 或精确 human gate 才能授权恢复。
 - Pi RPC auto-retry 与 Pi 自有 auto-compaction 保持关闭。只有 Worker RPC 可使用 snapshot 绑定、最多一次的受控阈值压缩；Reviewer 压缩仍关闭。
@@ -127,6 +128,7 @@ node dist/src/fleet-cli.js status --config /PRIVATE/PATH/fleet.config.json --ope
 - `attempt-driver.ts`：pane、Agent、dispatch、wait；
 - `attempt-settlement.ts`：Worker/Reviewer 结果收口；
 - `runtime-preflight.ts`、`attempt-integrity.ts`：runtime 与 Git gate；
+- `reviewer-validation.ts`、`reviewer-checkpoints.ts`：固定验证与 fresh aggregation checkpoint；
 - `delivery.ts`：PR、CI、base refresh、merge；
 - `recovery-flow.ts`：Analyst 证据、授权和 fresh retry；
 - `config-validation.ts`：路径与角色契约。

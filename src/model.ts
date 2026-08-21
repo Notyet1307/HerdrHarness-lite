@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { isAbsolute } from "node:path";
 import { isSafePiRpcDiagnostic, type SafeRuntimeDiagnostic } from "./pi-rpc-diagnostics.js";
 
 export type IssueState = "OPEN" | "CLOSED";
@@ -136,6 +137,57 @@ export type ReviewerResult = {
   findings: ReviewerFinding[];
 };
 
+export type ReviewerCheckpointStage =
+  | "reviewer-preflight"
+  | "standards-axis"
+  | "spec-axis"
+  | "validation"
+  | "reviewer-final";
+
+const REVIEWER_CHECKPOINT_STAGES = new Set<ReviewerCheckpointStage>([
+  "reviewer-preflight",
+  "standards-axis",
+  "spec-axis",
+  "validation",
+  "reviewer-final",
+]);
+
+export type ReviewerCheckpointIdentity = {
+  jobId: string;
+  sourceAttemptId: string;
+  jobRevision: number;
+  taskDigest: string;
+  baseSha: string;
+  reviewedHeadSha: string;
+  runtimeDigest: string;
+  providerDigest: string;
+  modelDigest: string;
+  resourceDigest: string;
+  repositoryContextBundleDigest: string;
+};
+
+export type ReviewerPreflightCheckpointResult = {
+  status: "passed";
+  validationReceiptDigest: string;
+  validationStatus: "passed" | "failed-checks";
+};
+
+export type ReviewerAxisCheckpointResult = {
+  status: "pass" | "changes";
+  summary: string;
+  findings: Array<{
+    severity: ReviewerFinding["severity"];
+    summary: string;
+    evidenceRefs: string[];
+  }>;
+  evidenceRefs: string[];
+  outputByteCount: number;
+  outputDigest: string;
+  truncated: boolean;
+};
+
+export type ReviewerFinalCheckpointResult = Pick<ReviewerResult, "status" | "summary" | "findings">;
+
 export type ReviewerValidationStatus = "passed" | "failed-checks" | "infrastructure-error";
 
 export type ReviewerValidationOutput = {
@@ -146,7 +198,36 @@ export type ReviewerValidationOutput = {
   sha256: string;
 };
 
-export type ReviewerValidationReceipt = {
+export type ReviewerValidationStageResult = {
+  status: ReviewerValidationStatus;
+  validationArgv: string[];
+  validationArgvDigest: string;
+  startedAt: string;
+  completedAt: string;
+  durationMs: number;
+  exitCode: number | null;
+  signal: string | null;
+  timeout: boolean;
+  error: string | null;
+  stdout: ReviewerValidationOutput;
+  stderr: ReviewerValidationOutput;
+  dockerHost: string | null;
+  relevantEnvironmentDigest: string;
+  sourceSnapshotDigest: string;
+};
+
+export type ReviewerCheckpoint = ReviewerCheckpointIdentity & {
+  createdAt: string;
+  resultDigest: string;
+} & (
+  | { version: 1; stage: "reviewer-preflight"; result: ReviewerPreflightCheckpointResult }
+  | { version: 1; stage: "standards-axis" | "spec-axis"; result: ReviewerAxisCheckpointResult }
+  | { version: 2; stage: "validation"; result: ReviewerValidationStageResult }
+  | { version: 1; stage: "reviewer-final"; result: ReviewerFinalCheckpointResult }
+);
+
+/** Read-only compatibility for receipts created before Reviewer stage checkpoints. */
+export type LegacyReviewerValidationReceipt = {
   version: 1;
   status: ReviewerValidationStatus;
   jobId: string;
@@ -169,6 +250,21 @@ export type ReviewerValidationReceipt = {
   relevantEnvironmentDigest: string;
   resourceDigest: string;
   sourceSnapshotDigest: string;
+};
+
+export type ReviewerValidationCheckpoint = Extract<ReviewerCheckpoint, { stage: "validation" }>;
+export type ReviewerValidationReceipt = LegacyReviewerValidationReceipt | ReviewerValidationCheckpoint;
+
+export type ReviewerCheckpointBinding = {
+  stage: ReviewerCheckpointStage;
+  path: string;
+  digest: string;
+  sourceAttemptId: string;
+};
+
+export type ReviewerCheckpointRecord = {
+  binding: ReviewerCheckpointBinding;
+  checkpoint: ReviewerCheckpoint;
 };
 
 /** Durable runtime output; like `result`, this is not part of the immutable dispatch plan. */
@@ -255,6 +351,7 @@ export type AttemptContextEnvelope = {
     reviewEvidencePath: string | null;
     validationArgv: string[] | null;
     validationReceiptPath: string | null;
+    reviewerCheckpointInputs?: ReviewerCheckpointBinding[];
   };
   runtime: {
     snapshotDigest: string;
@@ -298,6 +395,8 @@ export type Attempt = {
   result: AttemptResult | null;
   /** Missing before deterministic Reviewer validation or on ledgers written before that stage existed. */
   reviewerValidationReceipt?: ReviewerValidationReceiptBinding;
+  /** Verified checkpoint inputs from older Reviewer Attempts; every binding may be consumed once. */
+  reviewerCheckpointInputs?: ReviewerCheckpointBinding[];
   /** Optional for V1 ledgers written before bounded same-attempt reconciliation. */
   reconciliationAttempts?: number;
   startedAt: string;
@@ -795,6 +894,40 @@ export function assertJobInvariant(job: Job): void {
     || !["passed", "failed-checks", "infrastructure-error"].includes(validationReceipt.status)
   )) {
     throw new Error("attempt has an invalid Reviewer validation receipt binding");
+  }
+  const allAttempts = [...job.attempts, ...(job.activeAttempt ? [job.activeAttempt] : [])];
+  const consumedCheckpointDigests: string[] = [];
+  for (const attempt of allAttempts) {
+    const inputs = attempt.reviewerCheckpointInputs ?? [];
+    if (inputs.length === 0) continue;
+    if (attempt.lane !== "reviewer" || inputs.length > 5
+      || new Set(inputs.map((binding) => binding.stage)).size !== inputs.length
+      || new Set(inputs.map((binding) => binding.digest)).size !== inputs.length) {
+      throw new Error("attempt has invalid Reviewer checkpoint inputs");
+    }
+    for (const binding of inputs) {
+      const source = job.attempts.find((candidate) => candidate.id === binding.sourceAttemptId);
+      if (!source || source.lane !== "reviewer" || source.phase !== "settled"
+        || !REVIEWER_CHECKPOINT_STAGES.has(binding.stage)
+        || !isAbsolute(binding.path)
+        || !isBoundedText(binding.path, 8_192)
+        || !/^[0-9a-f]{64}$/i.test(binding.digest)) {
+        throw new Error("attempt has an invalid Reviewer checkpoint binding");
+      }
+      consumedCheckpointDigests.push(binding.digest);
+    }
+    const reusedValidation = inputs.find((binding) => binding.stage === "validation");
+    if (reusedValidation && (
+      attempt.reviewerValidationReceipt?.path !== reusedValidation.path
+      || attempt.reviewerValidationReceipt.digest !== reusedValidation.digest
+    )) throw new Error("Reviewer validation receipt is not bound to its reused checkpoint");
+    const envelopeInputs = attempt.contextEnvelope?.evidence.reviewerCheckpointInputs;
+    if (envelopeInputs !== undefined && JSON.stringify(envelopeInputs) !== JSON.stringify(inputs)) {
+      throw new Error("Reviewer checkpoint inputs drifted from the Attempt context envelope");
+    }
+  }
+  if (new Set(consumedCheckpointDigests).size !== consumedCheckpointDigests.length) {
+    throw new Error("Reviewer checkpoint was reused more than once");
   }
   const handoff = job.activeAttempt?.contextEnvelope?.handoff?.value;
   if (handoff && job.activeAttempt) {
