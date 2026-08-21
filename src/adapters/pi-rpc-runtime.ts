@@ -17,6 +17,7 @@ import {
 import { assertQualifiedPiRpcVersion } from "../compatibility.js";
 import {
   formatSafePiRpcDiagnostic,
+  makeSafeRuntimeDiagnostic,
   PiRpcRuntimeFailure,
   safePiRpcDiagnosticFrom,
 } from "../pi-rpc-diagnostics.js";
@@ -170,10 +171,24 @@ export class PiRpcRuntime implements AttemptRuntimePort {
     const result = existsSync(input.resultPath)
       ? JSON.parse(readFileSync(input.resultPath, "utf8")) as AttemptResult
       : null;
+    if (!result) {
+      const diagnostic = makeSafeRuntimeDiagnostic({
+        domain: "acceptance",
+        code: "result_missing",
+        stage: "result-validation",
+        failureDomain: "result",
+        failureCode: "result_missing",
+        retryable: false,
+      });
+      throw new PiRpcRuntimeFailure(
+        `Pi RPC settled without a durable result (${formatSafePiRpcDiagnostic(diagnostic)})`,
+        diagnostic,
+      );
+    }
     return {
       agentStatus: "done",
       result,
-      diagnostic: result ? null : `Pi RPC settled without a durable result; events: ${spoolPath(plan.runtimeRoot, "runtime-events.jsonl")}`,
+      diagnostic: null,
     };
   }
 

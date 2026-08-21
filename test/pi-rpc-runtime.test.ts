@@ -11,6 +11,7 @@ import { executionResource, executionResourceDigest } from "../src/attempt-plan.
 import { StrictJsonlDecoder } from "../src/pi-rpc-runner.js";
 import {
   classifyProviderFailure,
+  makeSafeRuntimeDiagnostic,
   PiRpcRuntimeFailure,
 } from "../src/pi-rpc-diagnostics.js";
 import {
@@ -144,15 +145,22 @@ test("Pi RPC adapter propagates only validated structured diagnostics", async ()
       toolErrorCount: 0,
       transcriptBytes: 70_000,
     });
+    assert.ok(diagnostic.domain && diagnostic.code && diagnostic.stage);
+    const { diagnosticFingerprint: _fingerprint, ...diagnosticFields } = diagnostic;
+    const terminalDiagnostic = makeSafeRuntimeDiagnostic({
+      ...diagnosticFields,
+      domain: diagnostic.domain,
+      code: diagnostic.code,
+      stage: diagnostic.stage,
+      childExit: { code: 0, signal: null },
+    });
     writeExclusiveJson(join(plan.runtimeRoot, "plan.json"), plan);
     writeExclusiveJson(join(plan.runtimeRoot, "dispatch.json"), { version: 1 });
     writeAtomicJson(join(plan.runtimeRoot, "terminal.json"), {
       ...identity,
       ok: false,
       error: "Pi RPC assistant ended with error",
-      failureStage: "agent-run",
-      ...diagnostic,
-      childExit: { code: 0, signal: null },
+      ...terminalDiagnostic,
     });
 
     let failure: unknown;
@@ -169,11 +177,7 @@ test("Pi RPC adapter propagates only validated structured diagnostics", async ()
       failure = error;
     }
     assert.ok(failure instanceof PiRpcRuntimeFailure);
-    assert.deepEqual(failure.diagnostic, {
-      ...diagnostic,
-      failureStage: "agent-run",
-      childExit: { code: 0, signal: null },
-    });
+    assert.deepEqual(failure.diagnostic, terminalDiagnostic);
     assert.match(failure.message, /provider\/provider_overloaded/);
     assert.match(failure.message, /api=anthropic-messages/);
     assert.match(failure.message, /phase=tool_continuation/);
@@ -197,6 +201,41 @@ test("Pi RPC adapter propagates only validated structured diagnostics", async ()
       expectedAttemptId: fixture.attempt.id,
       expectedLane: "worker",
     }), /invalid runtime diagnostic/);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("a successful terminal receipt without a durable result is an acceptance failure", async () => {
+  const fixture = rpcFixture();
+  try {
+    const plan = fixture.plan();
+    const identity = receiptIdentity(plan);
+    writeExclusiveJson(join(plan.runtimeRoot, "plan.json"), plan);
+    writeExclusiveJson(join(plan.runtimeRoot, "dispatch.json"), { version: 1 });
+    writeAtomicJson(join(plan.runtimeRoot, "terminal.json"), { ...identity, ok: true, agentSettled: true });
+    writeAtomicJson(join(plan.runtimeRoot, "terminated.json"), { ...identity, ok: true });
+
+    let failure: unknown;
+    try {
+      await new PiRpcRuntime({ runInPane: async () => undefined }).wait({
+        handle: fixture.handle,
+        attempt: fixture.attempt,
+        resultPath: fixture.attempt.resultPath,
+        expectedJobId: "job-1",
+        expectedAttemptId: fixture.attempt.id,
+        expectedLane: "worker",
+      });
+    } catch (error) {
+      failure = error;
+    }
+    assert.ok(failure instanceof PiRpcRuntimeFailure);
+    assert.deepEqual(stableFailure(failure.diagnostic as unknown as Record<string, unknown>), {
+      domain: "acceptance",
+      code: "result_missing",
+      stage: "result-validation",
+      retryable: false,
+    });
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
   }
@@ -242,7 +281,7 @@ test("strict Pi RPC JSONL keeps Unicode separators inside one record", () => {
   decoder.finish();
   assert.equal(records.length, 1);
   assert.equal(records[0]?.text, "left\u2028right\u2029done");
-  assert.throws(() => new StrictJsonlDecoder().push(`${"x".repeat(1024 * 1024 + 1)}`), /rpc_line_too_large/);
+  assert.throws(() => new StrictJsonlDecoder().push(`${"x".repeat(1024 * 1024 + 1)}`), /rpc_event_oversize/);
   const accepted: Record<string, unknown>[] = [];
   assert.throws(
     () => new StrictJsonlDecoder().push('{"type":"agent_settled"}\n{malformed\n', (record) => accepted.push(record)),
@@ -530,41 +569,57 @@ test("durable runner rejects Reviewer UI requests during an active agent or with
 test("durable runner still rejects every Worker UI request", () => {
   const fixture = rpcFixture();
   try {
-    const plan = fixture.plan({
-      executable: process.execPath,
-      argv: [
-        resolve("test/fixtures/fake-pi-rpc.js"),
-        "--no-session", "--no-context-files", "--no-prompt-templates", "--no-themes",
-        "--provider", "test", "--model", "model", "--mode", "rpc",
-      ],
-    });
-    writeExclusiveJson(join(plan.runtimeRoot, "plan.json"), plan);
-    writeExclusiveJson(join(plan.runtimeRoot, "dispatch.json"), {
-      version: 1,
-      attemptId: plan.attemptId,
-      generation: plan.generation,
-      planDigest: plan.planDigest,
-      dispatchId: plan.attemptId,
-      promptDigest: fixture.attempt.promptDigest,
-      message: "/skill:implement [harness-dispatch:worker-1]\nimplement",
-    });
-    const execution = new SyncCommandRunner().run(process.execPath, [
-      resolve("dist/src/pi-rpc-runner.js"),
-      "--sdk-entry", resolve("test/fixtures/pi-rpc-sdk-entry.js"),
-      "--plan", join(plan.runtimeRoot, "plan.json"),
-    ], {
-      cwd: fixture.root,
-      timeoutMs: 10_000,
-      env: {
-        ...process.env,
-        FAKE_PI_RESULT_PATH: fixture.attempt.resultPath,
-        FAKE_PI_JOB_ID: "job-1",
-        FAKE_PI_ATTEMPT_ID: fixture.attempt.id,
-        FAKE_PI_WORKER_UI_REQUEST: "1",
-      },
-    });
+    const { execution, plan } = runWorkerFault(fixture, { FAKE_PI_WORKER_UI_REQUEST: "1" });
     assert.equal(execution.ok, true, execution.stderr);
     assert.equal(readJson<{ ok: boolean }>(join(plan.runtimeRoot, "terminal.json")).ok, false);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("terminal failure remains authoritative when a durable result already exists", async () => {
+  const fixture = rpcFixture();
+  try {
+    const { execution, plan } = runWorkerFault(fixture, { FAKE_PI_TERMINAL_FAILURE_AFTER_RESULT: "1" });
+
+    assert.equal(execution.ok, true, execution.stderr);
+    assert.equal(existsSync(fixture.attempt.resultPath), true);
+    const terminal = readJson<Record<string, unknown>>(join(plan.runtimeRoot, "terminal.json"));
+    assert.equal(terminal.ok, false);
+    assert.deepEqual(stableFailure(terminal), {
+      domain: "execution",
+      code: "policy_violation",
+      stage: "agent-run",
+      retryable: false,
+    });
+    assert.equal(readFileSync(join(plan.runtimeRoot, "runtime-events.jsonl"), "utf8").includes("must-not-be-persisted"), false);
+    await assert.rejects(() => new PiRpcRuntime({ runInPane: async () => undefined }).wait({
+      handle: fixture.handle,
+      attempt: fixture.attempt,
+      resultPath: fixture.attempt.resultPath,
+      expectedJobId: "job-1",
+      expectedAttemptId: fixture.attempt.id,
+      expectedLane: "worker",
+    }), /execution\/policy_violation/);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("unknown RPC events produce a content-free policy failure", () => {
+  const fixture = rpcFixture();
+  try {
+    const { execution, plan } = runWorkerFault(fixture, { FAKE_PI_UNKNOWN_EVENT: "1" });
+    assert.equal(execution.ok, true, execution.stderr);
+    assert.equal(existsSync(fixture.attempt.resultPath), false);
+    const terminal = readJson<Record<string, unknown>>(join(plan.runtimeRoot, "terminal.json"));
+    assert.deepEqual(stableFailure(terminal), {
+      domain: "execution",
+      code: "policy_violation",
+      stage: "agent-run",
+      retryable: false,
+    });
+    assert.equal(readFileSync(join(plan.runtimeRoot, "runtime-events.jsonl"), "utf8").includes("must-not-be-persisted"), false);
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
   }
@@ -573,42 +628,16 @@ test("durable runner still rejects every Worker UI request", () => {
 test("durable runner records a content-free controlled compaction failure", () => {
   const fixture = rpcFixture();
   try {
-    const plan = fixture.plan({
-      executable: process.execPath,
-      argv: [
-        resolve("test/fixtures/fake-pi-rpc.js"),
-        "--no-session", "--no-context-files", "--no-prompt-templates", "--no-themes",
-        "--provider", "test", "--model", "model", "--mode", "rpc",
-      ],
-    });
-    writeExclusiveJson(join(plan.runtimeRoot, "plan.json"), plan);
-    writeExclusiveJson(join(plan.runtimeRoot, "dispatch.json"), {
-      version: 1,
-      attemptId: plan.attemptId,
-      generation: plan.generation,
-      planDigest: plan.planDigest,
-      dispatchId: plan.attemptId,
-      promptDigest: fixture.attempt.promptDigest,
-      message: "/skill:implement [harness-dispatch:worker-1]\nimplement",
-    });
-    const execution = new SyncCommandRunner().run(process.execPath, [
-      resolve("dist/src/pi-rpc-runner.js"),
-      "--sdk-entry", resolve("test/fixtures/pi-rpc-sdk-entry.js"),
-      "--plan", join(plan.runtimeRoot, "plan.json"),
-    ], {
-      cwd: fixture.root,
-      timeoutMs: 10_000,
-      env: {
-        ...process.env,
-        FAKE_PI_RESULT_PATH: fixture.attempt.resultPath,
-        FAKE_PI_JOB_ID: "job-1",
-        FAKE_PI_ATTEMPT_ID: fixture.attempt.id,
-        FAKE_PI_CONTROLLED_COMPACTION: "fail",
-      },
-    });
+    const { execution, plan } = runWorkerFault(fixture, { FAKE_PI_CONTROLLED_COMPACTION: "fail" });
     assert.equal(execution.ok, true, execution.stderr);
     const terminal = readJson<{ ok: boolean; controlledCompaction: Record<string, unknown> }>(join(plan.runtimeRoot, "terminal.json"));
     assert.equal(terminal.ok, false);
+    assert.deepEqual(stableFailure(terminal), {
+      domain: "execution",
+      code: "compaction_failure",
+      stage: "compaction",
+      retryable: false,
+    });
     assert.deepEqual(terminal.controlledCompaction, {
       count: 1,
       triggerPercent: 75,
@@ -835,6 +864,131 @@ test("durable runner rejects a settled assistant failure without persisting Prov
   }
 });
 
+test("tool completion followed by child exit is classified as a lost Provider continuation", () => {
+  const fixture = rpcFixture();
+  try {
+    const { execution, plan } = runWorkerFault(fixture, {
+      FAKE_PI_TOOL_BEFORE_FAILURE: "success",
+      FAKE_PI_CONTINUATION_LOST: "1",
+    });
+    assert.equal(execution.ok, false);
+    const terminal = readJson<Record<string, unknown>>(join(plan.runtimeRoot, "terminal.json"));
+    assert.equal(terminal.ok, false);
+    assert.equal(terminal.failureCode, "provider_continuation_lost");
+    assert.deepEqual(stableFailure(terminal), {
+      domain: "observation",
+      code: "provider_continuation_lost",
+      stage: "agent-run",
+      retryable: false,
+    });
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("a single RPC event over 1 MiB produces a bounded oversize receipt", () => {
+  const fixture = rpcFixture();
+  try {
+    const { execution, plan } = runWorkerFault(fixture, { FAKE_PI_OVERSIZE_EVENT: "1" });
+    assert.equal(execution.ok, false);
+    const terminal = readJson<Record<string, unknown>>(join(plan.runtimeRoot, "terminal.json"));
+    assert.equal(terminal.failureCode, "rpc_event_oversize");
+    assert.deepEqual(stableFailure(terminal), {
+      domain: "observation",
+      code: "rpc_event_oversize",
+      stage: "agent-run",
+      retryable: false,
+    });
+    assert.ok(readFileSync(join(plan.runtimeRoot, "runtime-events.jsonl"), "utf8").length < 512 * 1024);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("fault fixtures reproduce runtime stalls and result-without-terminal observation gaps", async () => {
+  for (const [fault, resultExpected] of [
+    ["FAKE_PI_PROVIDER_NEVER_RETURNS", false],
+    ["FAKE_PI_RESULT_BEFORE_STALL", true],
+  ] as const) {
+    const fixture = rpcFixture();
+    let child: ReturnType<typeof spawn> | null = null;
+    let exit: Promise<number | null> | null = null;
+    try {
+      const plan = prepareWorkerFault(fixture);
+      const running = spawn(process.execPath, [
+        resolve("dist/src/pi-rpc-runner.js"),
+        "--sdk-entry", resolve("test/fixtures/pi-rpc-sdk-entry.js"),
+        "--plan", join(plan.runtimeRoot, "plan.json"),
+      ], {
+        cwd: fixture.root,
+        env: {
+          ...process.env,
+          FAKE_PI_RESULT_PATH: fixture.attempt.resultPath,
+          FAKE_PI_JOB_ID: "job-1",
+          FAKE_PI_ATTEMPT_ID: fixture.attempt.id,
+          [fault]: "1",
+        },
+        stdio: "ignore",
+      });
+      child = running;
+      exit = new Promise<number | null>((resolveExit) => running.on("exit", resolveExit));
+      await waitForFile(resultExpected ? fixture.attempt.resultPath : join(plan.runtimeRoot, "accepted.json"));
+      assert.equal(existsSync(fixture.attempt.resultPath), resultExpected, fault);
+      assert.equal(existsSync(join(plan.runtimeRoot, "terminal.json")), false, fault);
+
+      writeExclusiveJson(join(plan.runtimeRoot, "terminate.json"), {
+        ...receiptIdentity(plan),
+        reason: "recovery",
+      });
+      const code = await exit;
+      assert.equal(code, 0);
+      assert.deepEqual(stableFailure(readJson<Record<string, unknown>>(join(plan.runtimeRoot, "terminal.json"))), {
+        domain: "execution",
+        code: "runtime_terminated",
+        stage: "agent-run",
+        retryable: false,
+      });
+    } finally {
+      if (child && exit) {
+        child.kill("SIGKILL");
+        await exit;
+      }
+      rmSync(fixture.root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("pre-dispatch termination still writes a classified failure receipt", async () => {
+  const fixture = rpcFixture();
+  let child: ReturnType<typeof spawn> | null = null;
+  let exit: Promise<number | null> | null = null;
+  try {
+    const plan = prepareWorkerFault(fixture, false);
+    const running = spawn(process.execPath, [
+      resolve("dist/src/pi-rpc-runner.js"),
+      "--sdk-entry", resolve("test/fixtures/pi-rpc-sdk-entry.js"),
+      "--plan", join(plan.runtimeRoot, "plan.json"),
+    ], { cwd: fixture.root, stdio: "ignore" });
+    child = running;
+    exit = new Promise<number | null>((resolveExit) => running.on("exit", resolveExit));
+    await waitForFile(join(plan.runtimeRoot, "ready.json"));
+    writeExclusiveJson(join(plan.runtimeRoot, "terminate.json"), { ...receiptIdentity(plan), reason: "recovery" });
+    assert.equal(await exit, 0);
+    assert.deepEqual(stableFailure(readJson<Record<string, unknown>>(join(plan.runtimeRoot, "terminal.json"))), {
+      domain: "execution",
+      code: "runtime_terminated",
+      stage: "await-dispatch",
+      retryable: false,
+    });
+  } finally {
+    if (child && exit) {
+      child.kill("SIGKILL");
+      await exit;
+    }
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("durable runner redacts malformed Provider output before ready or after settlement", () => {
   const sentinel = "access_token_SENTINEL";
   for (const phase of ["before-ready", "after-settled"] as const) {
@@ -1041,7 +1195,7 @@ test("durable runner handles child exit races and records sanitized failures", a
           expectedJobId: "job-1",
           expectedAttemptId: fixture.attempt.id,
           expectedLane: "worker",
-        }), new RegExp(`Pi RPC runner failed \\(child_process/child_exit_after_settled, retryable=no, stage=child-exit, child=${mode === "code" ? "exit:23" : "signal:SIGTERM"}, fingerprint=[0-9a-f]{12}\\)`));
+        }), new RegExp(`Pi RPC runner failed \\(execution/child_exit, retryable=no, detail=child_process/child_exit_after_settled, stage=child-exit, child=${mode === "code" ? "exit:23" : "signal:SIGTERM"}, fingerprint=[0-9a-f]{12}\\)`));
       }
       for (const path of filesUnder(plan.runtimeRoot)) assert.equal(readFileSync(path, "utf8").includes(sentinel), false, path);
     } finally {
@@ -1311,6 +1465,59 @@ function reviewerPlan(fixture: ReturnType<typeof rpcFixture>): { plan: PiRpcPlan
 
 function receiptIdentity(plan: PiRpcPlan): Record<string, unknown> {
   return { version: 1, attemptId: plan.attemptId, generation: plan.generation, planDigest: plan.planDigest };
+}
+
+function stableFailure(receipt: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(["domain", "code", "stage", "retryable"].map((key) => [key, receipt[key]]));
+}
+
+function runWorkerFault(
+  fixture: ReturnType<typeof rpcFixture>,
+  env: Record<string, string>,
+): { plan: PiRpcPlan; execution: ReturnType<SyncCommandRunner["run"]> } {
+  const plan = prepareWorkerFault(fixture);
+  return {
+    plan,
+    execution: new SyncCommandRunner().run(process.execPath, [
+      resolve("dist/src/pi-rpc-runner.js"),
+      "--sdk-entry", resolve("test/fixtures/pi-rpc-sdk-entry.js"),
+      "--plan", join(plan.runtimeRoot, "plan.json"),
+    ], {
+      cwd: fixture.root,
+      timeoutMs: 10_000,
+      env: {
+        ...process.env,
+        FAKE_PI_RESULT_PATH: fixture.attempt.resultPath,
+        FAKE_PI_JOB_ID: "job-1",
+        FAKE_PI_ATTEMPT_ID: fixture.attempt.id,
+        ...env,
+      },
+    }),
+  };
+}
+
+function prepareWorkerFault(fixture: ReturnType<typeof rpcFixture>, dispatch = true): PiRpcPlan {
+  const plan = fixture.plan({
+    executable: process.execPath,
+    argv: [
+      resolve("test/fixtures/fake-pi-rpc.js"),
+      "--no-session", "--no-context-files", "--no-prompt-templates", "--no-themes",
+      "--provider", "test", "--model", "model", "--mode", "rpc",
+    ],
+  });
+  writeExclusiveJson(join(plan.runtimeRoot, "plan.json"), plan);
+  if (dispatch) {
+    writeExclusiveJson(join(plan.runtimeRoot, "dispatch.json"), {
+      version: 1,
+      attemptId: plan.attemptId,
+      generation: plan.generation,
+      planDigest: plan.planDigest,
+      dispatchId: plan.attemptId,
+      promptDigest: fixture.attempt.promptDigest,
+      message: "/skill:implement [harness-dispatch:worker-1]\nimplement",
+    });
+  }
+  return plan;
 }
 
 function runtimeResource(path: string): { kind: "runtime"; path: string; digest: string } {

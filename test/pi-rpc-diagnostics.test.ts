@@ -2,7 +2,11 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   classifyProviderFailure,
+  FAILURE_CODES,
+  FAILURE_DOMAINS,
+  FAILURE_STAGES,
   isSafePiRpcDiagnostic,
+  makeSafeRuntimeDiagnostic,
   providerApi,
   type PiRpcFailureCode,
   type ProviderFailureContext,
@@ -39,6 +43,8 @@ test("Provider failures are classified into safe, bounded diagnostics", () => {
     const diagnostic = classifyProviderFailure("error", message, context);
     assert.equal(diagnostic.failureDomain, "provider", message);
     assert.equal(diagnostic.failureCode, failureCode, message);
+    assert.equal(diagnostic.domain, "execution", message);
+    assert.equal(diagnostic.stage, "agent-run", message);
     assert.equal(diagnostic.retryable, retryable, message);
     assert.equal(diagnostic.httpStatus, httpStatus, message);
     assert.equal(diagnostic.providerApi, "anthropic-messages");
@@ -47,6 +53,70 @@ test("Provider failures are classified into safe, bounded diagnostics", () => {
     assert.match(diagnostic.diagnosticFingerprint, /^[0-9a-f]{64}$/);
     assert.equal(isSafePiRpcDiagnostic(diagnostic), true);
   }
+});
+
+test("runtime failure taxonomy exposes the stable cross-layer baseline", () => {
+  assert.deepEqual(FAILURE_DOMAINS, ["execution", "observation", "acceptance", "deterministic"]);
+  for (const code of [
+    "provider_auth",
+    "provider_rate_limit",
+    "provider_network",
+    "provider_timeout",
+    "provider_continuation_lost",
+    "rpc_protocol",
+    "rpc_event_oversize",
+    "rpc_terminal_missing",
+    "runtime_stall",
+    "child_exit",
+    "tool_contract",
+    "result_missing",
+    "result_identity",
+    "git_integrity",
+    "policy_violation",
+    "compaction_failure",
+    "validation_infrastructure",
+    "validation_failed",
+  ]) assert.equal(FAILURE_CODES.includes(code as never), true, code);
+  for (const stage of ["agent-run", "terminal-observation", "result-validation", "git-verification", "review-validation"]) {
+    assert.equal(FAILURE_STAGES.includes(stage as never), true, stage);
+  }
+
+  const missing = makeSafeRuntimeDiagnostic({
+    domain: "acceptance",
+    code: "result_missing",
+    stage: "result-validation",
+    failureDomain: "result",
+    failureCode: "result_missing",
+    retryable: false,
+  });
+  assert.equal(isSafePiRpcDiagnostic(missing), true);
+  assert.equal(isSafePiRpcDiagnostic({ ...missing, code: undefined }), false);
+  assert.equal(isSafePiRpcDiagnostic({ ...missing, retryable: true }), false);
+  assert.equal(isSafePiRpcDiagnostic({ ...missing, accessToken: "MUST_NOT_LEAK" }), false);
+
+  const childExit = makeSafeRuntimeDiagnostic({
+    domain: "execution",
+    code: "child_exit",
+    stage: "agent-run",
+    failureDomain: "child_process",
+    failureCode: "child_exit_before_settled",
+    retryable: true,
+    childExit: { code: 23, signal: null },
+  });
+  assert.equal(isSafePiRpcDiagnostic(childExit), true);
+  assert.equal(isSafePiRpcDiagnostic({ ...childExit, retryable: false }), false);
+  assert.equal(isSafePiRpcDiagnostic({ ...childExit, childExit: { code: 24, signal: null } }), false);
+
+  const terminalMissing = makeSafeRuntimeDiagnostic({
+    domain: "observation",
+    code: "rpc_terminal_missing",
+    stage: "child-shutdown",
+    failureDomain: "child_process",
+    failureCode: "child_shutdown_unconfirmed",
+    retryable: false,
+  });
+  assert.equal(isSafePiRpcDiagnostic(terminalMissing), true);
+  assert.equal(isSafePiRpcDiagnostic({ ...terminalMissing, failureCode: "child_exit_after_settled" }), false);
 });
 
 test("canonical Codex Responses API remains identifiable in safe diagnostics", () => {
@@ -77,6 +147,7 @@ test("assistant aborts and malformed diagnostics fail closed", () => {
   assert.equal(isSafePiRpcDiagnostic({ ...aborted, failureDomain: "provider" }), false);
   const overloaded = classifyProviderFailure("error", "HTTP 529 overloaded_error", context);
   assert.equal(isSafePiRpcDiagnostic({ ...overloaded, retryable: false }), false);
+  assert.equal(isSafePiRpcDiagnostic({ ...overloaded, code: "result_missing" }), false);
   assert.equal(isSafePiRpcDiagnostic({ ...overloaded, phase: "initial_generation" }), false);
   assert.equal(isSafePiRpcDiagnostic({ ...overloaded, toolErrorCount: 2 }), false);
   assert.equal(isSafePiRpcDiagnostic({ ...overloaded, failureStage: "unknown-stage" }), false);

@@ -1,5 +1,6 @@
 import { type Attempt, type AttemptResult, type HarnessState, type Job } from "../model.js";
 import { pathIsWithin } from "../path-safety.js";
+import { makeSafeRuntimeDiagnostic } from "../pi-rpc-diagnostics.js";
 import type { ControllerContext } from "./context.js";
 import type { TickResult } from "./types.js";
 
@@ -17,6 +18,7 @@ export async function verifyReviewerIntegrity(
       lane: "reviewer",
       summary: "reviewer lane lost its expected worktree or implementation HEAD",
       attemptResult,
+      runtimeDiagnostic: gitDiagnostic(),
     });
   }
   const verification = await ctx.deps.git.verifyReviewer({
@@ -32,6 +34,7 @@ export async function verifyReviewerIntegrity(
     lane: "reviewer",
     summary: `Reviewer boundary violation: ${verification.reason}`,
     attemptResult,
+    runtimeDiagnostic: gitDiagnostic(),
   });
 }
 
@@ -49,6 +52,7 @@ export async function verifyReviewerPreflight(
       lane: "reviewer",
       summary: "reviewer lane lost its expected worktree or implementation HEAD",
       attemptResult,
+      runtimeDiagnostic: gitDiagnostic(),
     });
   }
   const verification = await ctx.deps.git.verifyReviewer({
@@ -67,5 +71,17 @@ export async function verifyReviewerPreflight(
       ? `Worktree residue existed before Reviewer start: ${verification.reason}`
       : `Reviewer boundary violation: ${verification.reason}`,
     attemptResult,
+    runtimeDiagnostic: gitDiagnostic(),
+  });
+}
+
+function gitDiagnostic() {
+  return makeSafeRuntimeDiagnostic({
+    domain: "acceptance",
+    code: "git_integrity",
+    stage: "git-verification",
+    failureDomain: "git",
+    failureCode: "git_integrity",
+    retryable: false,
   });
 }

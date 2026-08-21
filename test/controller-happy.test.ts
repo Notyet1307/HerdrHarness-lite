@@ -829,6 +829,7 @@ test("Reviewer preflight attributes pre-existing worktree residue before any Rev
   await controller.tick();
 
   assert.equal(store.state.activeJob?.incident?.class, "reviewer_preflight_dirty");
+  assert.equal(store.state.activeJob?.incident?.runtimeDiagnostic?.code, "git_integrity");
   assert.equal(store.state.activeJob?.activeAttempt?.handle, null);
   assert.equal(herdr.prepared.filter((entry) => entry.lane === "reviewer").length, 0);
   assert.match(store.state.activeJob?.incident?.summary ?? "", /before Reviewer start/);

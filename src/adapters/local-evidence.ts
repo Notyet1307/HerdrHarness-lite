@@ -212,7 +212,7 @@ function readSelectedJson(path: string): unknown {
     const value = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
     const allowed = [
       "version", "attemptId", "generation", "planDigest", "ok", "dispatchId", "credentialMode", "compactionMode",
-      "autoRetryDisableAccepted", "autoCompactionEnabled", "failureStage", "failureDomain",
+      "autoRetryDisableAccepted", "autoCompactionEnabled", "domain", "code", "stage", "failureStage", "failureDomain",
       "failureCode", "retryable", "providerApi", "phase", "turnCount", "assistantMessageCount",
       "toolExecutionCount", "toolErrorCount", "transcriptSizeBucket", "diagnosticFingerprint", "childExit",
       "agentSettled", "reason", "updatedAt", "parentPid",
