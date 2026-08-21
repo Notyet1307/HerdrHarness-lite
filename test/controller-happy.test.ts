@@ -7,6 +7,7 @@ import { dirname, join, resolve } from "node:path";
 import { HarnessController } from "../src/controller.js";
 import { digest } from "../src/model.js";
 import type { HarnessConfig } from "../src/ports.js";
+import { ReviewerContextBudgetExceededError } from "../src/reviewer-context-budget.js";
 import {
   FakeAnalyst,
   FakeClock,
@@ -970,6 +971,12 @@ test("happy path claims, starts Analyst, runs fresh Pi worker/reviewer, publishe
   assert.match(herdr.prompts[0]?.text ?? "", /call worker_submit exactly once/);
   assert.equal(/Required identity:/.test(herdr.prompts[0]?.text ?? ""), false);
   assert.match(herdr.prompts[1]?.text ?? "", /Call review_preflight before/);
+  const promptAllowlist = /Top-level Pi tool allowlist \(case-sensitive, exact\): ([^\n]+)/
+    .exec(herdr.prompts[1]?.text ?? "")?.[1]?.split(",") ?? [];
+  const configuredAllowlist = validReviewerArgv[validReviewerArgv.indexOf("--tools") + 1]?.split(",") ?? [];
+  assert.deepEqual(promptAllowlist, configuredAllowlist);
+  assert.match(herdr.prompts[1]?.text ?? "", /Skill, Read, Glob, and PowerShell do not exist/);
+  assert.match(herdr.prompts[1]?.text ?? "", /tool error never widens this allowlist/);
   assert.deepEqual(herdr.closed, [
     herdr.prepared[0]!.handle.agentName,
     herdr.prepared[1]!.handle.agentName,
@@ -979,6 +986,35 @@ test("happy path claims, starts Analyst, runs fresh Pi worker/reviewer, publishe
   assert.ok(!github.graph[0]?.labels.includes("agent:claimed"));
   assert.equal(store.state.activeJob, null);
   assert.equal(store.state.terminalJobs[0]?.state, "done");
+});
+
+test("Reviewer context budget fails closed before prompt dispatch", async () => {
+  const store = new MemoryStore();
+  const git = new FakeGit();
+  git.reviewerPreparationFailure = new ReviewerContextBudgetExceededError(300_000);
+  const herdr = new FakeHerdr([
+    { lane: "worker", status: "completed", headSha: "b".repeat(40) },
+  ]);
+  const controller = new HarnessController({
+    config,
+    store,
+    github: new FakeGitHub([issue({ number: 210, title: "Bound Reviewer context" })]),
+    git,
+    herdr,
+    analyst: new FakeAnalyst(),
+    evidence: new FakeEvidence(),
+    clock: new FakeClock(),
+    ids: new SequenceIds(),
+    preflight: new FakeRuntimePreflight(),
+  });
+
+  let action = "";
+  for (let index = 0; index < 10; index += 1) action = (await controller.tick()).action;
+
+  assert.equal(action, "blocked");
+  assert.equal(store.state.activeJob?.incident?.class, "review_uncertain");
+  assert.match(store.state.activeJob?.incident?.summary ?? "", /reviewer_context_budget_exceeded/);
+  assert.deepEqual(herdr.prompts.map((prompt) => prompt.skill), ["implement"]);
 });
 
 test("an ambiguous prompt failure never replays the same dispatch", async () => {

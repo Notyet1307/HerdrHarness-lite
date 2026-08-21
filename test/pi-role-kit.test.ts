@@ -44,6 +44,10 @@ test("Pi review adapter uses fresh foreground Attempt-private project reviewers"
   assert.match(skill, /arbitrary JavaScript and legacy top-level `tasks` are\s+rejected/);
   assert.match(skill, /trusted standards text copied from the injected bundle/);
   assert.match(skill, /Objective injected\s+from the bound AttemptContextEnvelope is the only task specification input/);
+  assert.match(skill, /Pi tool names are case-sensitive/);
+  assert.match(skill, /`Skill`, `Read`, `Glob`, `PowerShell`/);
+  assert.match(skill, /returns at most 12 KiB per\s+axis/);
+  assert.match(skill, /stdout and stderr are each limited to 8 KiB/);
   for (const forbidden of ["docs/agents/issue-tracker.md", "gh issue", "fetch the issue"]) {
     assert.equal(skill.toLowerCase().includes(forbidden), false);
   }
@@ -61,6 +65,9 @@ test("Pi child reviewer has a strict non-writing, non-recursive tool list", () =
   assert.match(agent, /^defaultContext:\s*fresh$/m);
   assert.match(agent, /^extensions:\s*$/m);
   assert.match(agent, /Do not run\s+project\s+validation commands/);
+  assert.match(agent, /Return exactly one JSON object/);
+  assert.match(agent, /"status":"pass\|changes\|blocked"/);
+  assert.match(agent, /Never return\s+transcript, assistant-message/);
 });
 
 test("example config pins the Worker and Reviewer Pi role contracts", () => {

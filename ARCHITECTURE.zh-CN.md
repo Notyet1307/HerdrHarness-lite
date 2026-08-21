@@ -214,6 +214,8 @@ Reviewer 必须：
 
 Reviewer skill 只允许双轴完成、固定验证成功且无 blocking finding 时提交 `pass`。运行时工具强制双轴、preflight 与验证成功；Controller 再独立强制身份、exact HEAD 与 clean-tree gate。
 
+顶层 Reviewer prompt 从绑定 snapshot 明示大小写敏感的真实工具 allowlist。Harness 注入上下文总预算为 256 KiB；初始 prompt、trusted bundle 与 bundled review skill 在 dispatch 前计数，后续 `read`/`grep`/`find`/`ls`、双轴和 validation 等 Harness tool projection 继续累计，超限以 `reviewer_context_budget_exceeded` fail closed。`review_validate` 的 stdout/stderr 各只向模型返回最多 8 KiB 的头尾、原始 byte count 与 SHA-256；Standards/Spec 各只返回最多 12 KiB 的结构化 status/summary/findings/evidence refs 与原始输出 digest，`review_submit` 机械绑定每项 finding identity。完整原始 validation/axis 输出只写入 Attempt 私有 evidence，不能替代 exit code、finding identity、durable result 或 Git gate。
+
 ### Analyst
 
 Analyst 绑定当前 Job 和 task digest，只在 blocked flow 中读取有界 EvidencePack。它没有 shell、Git、Herdr、ledger write 或 approval 权限；引用 pack 外证据、越界 action 或无效 brief 会被降为 `hold`。
@@ -311,6 +313,7 @@ Analyst `hold` 不授权 retry。`reassess` 只创建新的可审计 Incident/An
 | `attempt-context.ts` | role-scoped AttemptContextEnvelope |
 | `handoff.ts` | review/recovery/CI TypedHandoff 生成与绑定 |
 | `prompts.ts` | 只从 bound envelope 渲染 Worker/Reviewer prompt |
+| `reviewer-context-budget.ts` | 顶层 Reviewer Harness 注入上下文的固定预算与 fail-closed code |
 | `compatibility.ts` | Pi RPC 与 `pi-subagents` exact compatibility facts |
 | `reviewer-provider-profile.ts` | active Reviewer provider profile 的验证与 selector 替换 |
 | `controller-lease.ts` / `controller-heartbeat.ts` | 单活 lease 与 liveness heartbeat |

@@ -1,12 +1,18 @@
-import { dirname, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { executionPlanMatches } from "../attempt-plan.js";
 import { digest, evolveJob, type Attempt, type HarnessState, type Job } from "../model.js";
 import { renderAttemptPrompt } from "../prompts.js";
 import { safePiRpcDiagnosticFromError } from "../pi-rpc-diagnostics.js";
+import {
+  REVIEWER_CONTEXT_BUDGET_BYTES,
+  REVIEWER_CONTEXT_BUDGET_RESERVE_BYTES,
+  ReviewerContextBudgetExceededError,
+} from "../reviewer-context-budget.js";
 import type { ControllerContext } from "./context.js";
 import { message, result, safeToken, validReviewerValidationArgv } from "./helpers.js";
 import {
   PI_AGENT_DIR_ENV,
+  BUNDLED_CODE_REVIEW_SKILL,
   REVIEW_CANONICAL_AGENT_DIR_ENV,
   REVIEW_DESCRIPTOR_ENV,
   REVIEW_SUBAGENT_CEILING,
@@ -105,6 +111,7 @@ export async function driveAttempt(ctx: ControllerContext, state: HarnessState, 
         }
         const reviewAxisAgents = attempt.executionSnapshot!.resources.filter((resource) => resource.kind === "agent");
         if (reviewAxisAgents.length !== 1) throw new Error("Reviewer execution snapshot must bind exactly one child agent");
+        const reviewerPrompt = renderAttemptPrompt(attempt);
         const workspace = await ctx.deps.git.prepareReviewer({
           worktree: job.worktree,
           rootPath: dirname(attempt.resultPath),
@@ -119,6 +126,11 @@ export async function driveAttempt(ctx: ControllerContext, state: HarnessState, 
           piExecutable: attempt.executionSnapshot!.executable,
           piRuntimeVersion: attempt.executionSnapshot!.runtimeVersion,
           piAgentDir: attempt.executionSnapshot!.context!.agentDir,
+          prompt: reviewerPrompt,
+          trustedContextPath: attempt.executionSnapshot!.context!.bundlePath,
+          reviewerSkillPath: join(BUNDLED_CODE_REVIEW_SKILL, "SKILL.md"),
+          contextBudgetBytes: REVIEWER_CONTEXT_BUDGET_BYTES,
+          contextBudgetReserveBytes: REVIEWER_CONTEXT_BUDGET_RESERVE_BYTES,
         });
         cwd = workspace.reviewPath;
         env = {
@@ -136,6 +148,14 @@ export async function driveAttempt(ctx: ControllerContext, state: HarnessState, 
         env,
       });
     } catch (error) {
+      if (error instanceof ReviewerContextBudgetExceededError) {
+        return ctx.block(state, job, {
+          class: "review_uncertain",
+          lane: "reviewer",
+          summary: error.message,
+          attemptResult: null,
+        });
+      }
       return reconcileAttemptOrBlock(ctx, state, job, attempt, `Herdr ${lane} pane creation failed: ${message(error)}`);
     }
     const ready: Attempt = { ...attempt, phase: "pane_ready", handle, reconciliationAttempts: 0 };

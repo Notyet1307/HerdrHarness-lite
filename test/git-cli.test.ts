@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { Buffer } from "node:buffer";
 import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -7,6 +8,7 @@ import { join } from "node:path";
 import { GitCli } from "../src/adapters/git-cli.js";
 import { executionResourceDigest } from "../src/attempt-plan.js";
 import { type CommandResult, type CommandRunner, requireSuccess, SyncCommandRunner } from "../src/adapters/command.js";
+import { REVIEWER_CONTEXT_BUDGET_BYTES, REVIEWER_CONTEXT_BUDGET_RESERVE_BYTES } from "../src/reviewer-context-budget.js";
 
 const head = "b".repeat(40);
 const worktree = { path: "/repo", branch: "agent/issue-1", workspaceId: "w1" };
@@ -178,6 +180,11 @@ test("Reviewer preparation exports a read-only exact-HEAD snapshot and writable 
       piExecutable: fakePiPath,
       piRuntimeVersion: "0.84.0",
       piAgentDir: join(root, "pi-agent"),
+      prompt: "bounded Reviewer prompt",
+      trustedContextPath: join(attemptRoot, "trusted-context.md"),
+      reviewerSkillPath: reviewAxisAgentPath,
+      contextBudgetBytes: REVIEWER_CONTEXT_BUDGET_BYTES,
+      contextBudgetReserveBytes: REVIEWER_CONTEXT_BUDGET_RESERVE_BYTES,
     };
 
     const workspace = await new GitCli(runner).prepareReviewer(input);
@@ -191,10 +198,20 @@ test("Reviewer preparation exports a read-only exact-HEAD snapshot and writable 
       emptyAppendSystemPromptPath: string;
       piSubagentWrapperPath: string;
       piRuntimeVersion: string;
+      privateEvidenceDir: string;
+      initialContextBytes: number;
+      contextBudgetBytes: number;
+      contextBudgetReserveBytes: number;
     };
     assert.equal(descriptor.dockerHost, "unix:///tmp/docker.sock");
     assert.equal(descriptor.runtimePath, join(attemptRoot, "workspace", "review-runtime"));
     assert.equal(descriptor.piRuntimeVersion, "0.84.0");
+    assert.equal(descriptor.privateEvidenceDir, join(attemptRoot, "evidence"));
+    assert.equal(lstatSync(descriptor.privateEvidenceDir).mode & 0o077, 0);
+    assert.equal(descriptor.initialContextBytes, Buffer.byteLength(input.prompt)
+      + readFileSync(input.trustedContextPath).byteLength + readFileSync(input.reviewerSkillPath).byteLength);
+    assert.equal(descriptor.contextBudgetBytes, REVIEWER_CONTEXT_BUDGET_BYTES);
+    assert.equal(descriptor.contextBudgetReserveBytes, REVIEWER_CONTEXT_BUDGET_RESERVE_BYTES);
     assert.equal(readFileSync(descriptor.emptyAppendSystemPromptPath, "utf8"), "");
     assert.match(readFileSync(descriptor.piSubagentWrapperPath, "utf8"), /--append-system-prompt/);
     assert.equal(lstatSync(descriptor.piSubagentWrapperPath).mode & 0o222, 0);
@@ -213,6 +230,10 @@ test("Reviewer preparation exports a read-only exact-HEAD snapshot and writable 
     ]);
     assert.equal(readFileSync(join(attemptRoot, "trusted-context.md"), "utf8"), "preserve me\n");
     assert.deepEqual(await new GitCli(runner).prepareReviewer(input), workspace);
+    await assert.rejects(() => new GitCli(runner).prepareReviewer({
+      ...input,
+      prompt: "x".repeat(REVIEWER_CONTEXT_BUDGET_BYTES),
+    }), /reviewer_context_budget_exceeded/);
     chmodSync(fakePiPath, 0o700);
     writeFileSync(fakePiPath, "#!/bin/sh\nif [ \"$1\" = --version ]; then printf '0.85.0\\n'; exit 0; fi\nexit 0\n", { mode: 0o500 });
     chmodSync(fakePiPath, 0o500);

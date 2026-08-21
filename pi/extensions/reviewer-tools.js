@@ -1,11 +1,19 @@
-import { accessSync, closeSync, constants, existsSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
+import { accessSync, chmodSync, closeSync, constants, existsSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { ORIGINAL_AGENT_DIR_ENV, PI_PACKAGE_ROOT_ENV } from "./reviewer-subagent-config.js";
 
 const DESCRIPTOR_ENV = "HERDR_HARNESS_REVIEW_DESCRIPTOR";
-const OUTPUT_LIMIT = 50_000;
+const VALIDATION_OUTPUT_LIMIT = 8 * 1024;
+const AXIS_OUTPUT_LIMIT = 12 * 1024;
+const AXIS_SUMMARY_LIMIT = 2 * 1024;
+const AXIS_FINDING_LIMIT = 32;
+const AXIS_EVIDENCE_LIMIT = 64;
+const AXIS_EVIDENCE_REF_LIMIT = 512;
+const GENERIC_TOOL_OUTPUT_LIMIT = 16 * 1024;
+const CONTEXT_BUDGET_EXCEEDED = "reviewer_context_budget_exceeded";
+const BOUNDED_TOP_LEVEL_TOOLS = new Set(["read", "grep", "find", "ls", "subagent"]);
 const SAFE_SUBAGENT_CONFIG = {
   asyncByDefault: false,
   forceTopLevelAsync: false,
@@ -22,8 +30,15 @@ export default function reviewerTools(pi) {
   let submitted = false;
   let axesCall = null;
   let axesCompleted = false;
+  let axisResults = null;
+  const contextBudget = { used: descriptor.initialContextBytes, exceeded: false };
+  const respond = (details, options) => budgetedToolResult(details, descriptor, contextBudget, options);
 
   pi.on("tool_call", async (event) => {
+    if (contextBudget.exceeded) {
+      if (event.toolName === "review_submit" && ["blocked", "failed"].includes(event.input?.status)) return undefined;
+      return { block: true, reason: CONTEXT_BUDGET_EXCEEDED, terminate: true };
+    }
     if (event.toolName !== "subagent") return undefined;
     if (!environmentPreflight?.ok) {
       return { block: true, reason: "Reviewer must complete review_preflight successfully before launching review axes" };
@@ -46,7 +61,27 @@ export default function reviewerTools(pi) {
 
   pi.on("tool_result", async (event) => {
     if (event.toolName === "subagent" && axesCall?.id === event.toolCallId) {
-      axesCompleted = completedReviewAxes(event, axesCall.tasks);
+      let projected;
+      try {
+        projected = projectReviewAxes(event, axesCall.tasks, descriptor);
+      } catch {
+        const empty = Buffer.alloc(0);
+        const failed = invalidAxisProjection("Attempt-private Review Axis evidence capture failed", empty);
+        projected = { completed: false, results: { Standards: failed, Spec: failed }, details: { Standards: failed, Spec: failed } };
+      }
+      axesCompleted = projected.completed;
+      axisResults = projected.results;
+      const result = respond(projected.details, { isError: !projected.completed });
+      if (contextBudget.exceeded) axesCompleted = false;
+      return result;
+    }
+    if (BOUNDED_TOP_LEVEL_TOOLS.has(event.toolName)) {
+      try {
+        return respond(projectGenericToolResult(event), { isError: event.isError });
+      } catch {
+        contextBudget.exceeded = true;
+        return respond({ error: CONTEXT_BUDGET_EXCEEDED }, { isError: true, reserved: true });
+      }
     }
     return undefined;
   });
@@ -57,7 +92,7 @@ export default function reviewerTools(pi) {
     description: "Verify the actual Reviewer source, validation copy, command path, and required Docker daemon before review axes start.",
     parameters: { type: "object", properties: {}, additionalProperties: false },
     execute: async () => {
-      if (environmentPreflight) return toolResult(environmentPreflight);
+      if (environmentPreflight) return respond(environmentPreflight);
       try {
         const env = reviewerEnv(descriptor);
         if (!existsSync(process.cwd())) throw new Error("read-only Reviewer source is missing");
@@ -100,7 +135,7 @@ export default function reviewerTools(pi) {
           failure: failure("acceptance", "validation_infrastructure", "review-preflight", true),
         };
       }
-      return toolResult(environmentPreflight);
+      return respond(environmentPreflight);
     },
   });
 
@@ -111,31 +146,46 @@ export default function reviewerTools(pi) {
     parameters: { type: "object", properties: {}, additionalProperties: false },
     execute: async () => {
       if (!environmentPreflight?.ok) throw new Error("review_validate requires a successful review_preflight run");
-      if (validation) return toolResult(validation);
+      if (validation) return respond(validation);
       const env = reviewerEnv(descriptor);
       const [command, ...args] = descriptor.validationArgv;
-      const output = spawnSync(command, args, {
-        cwd: descriptor.validationPath,
-        env,
-        encoding: "utf8",
-        maxBuffer: 20 * 1024 * 1024,
-        timeout: 30 * 60 * 1000,
-      });
+      const output = await runValidation(command, args, descriptor, env);
       const validationFailure = output.error || output.status === null
         ? failure("acceptance", "validation_infrastructure", "review-validation", true)
         : output.status === 0
           ? null
           : failure("deterministic", "validation_failed", "review-validation", false);
-      validation = {
-        command: descriptor.validationArgv,
-        exitCode: output.status,
-        signal: output.signal,
-        error: output.error?.message ?? null,
-        stdout: tail(output.stdout ?? ""),
-        stderr: tail(output.stderr ?? ""),
-        ...(validationFailure ? { failure: validationFailure } : {}),
-      };
-      return toolResult(validation);
+      try {
+        if (!output.stdout || !output.stderr) throw new Error("validation evidence capture failed");
+        const stdout = output.stdout;
+        const stderr = output.stderr;
+        validation = {
+          command: descriptor.validationArgv,
+          exitCode: output.status,
+          signal: output.signal,
+          error: output.error,
+          stdout: stdout.text,
+          stderr: stderr.text,
+          stdoutByteCount: stdout.byteCount,
+          stderrByteCount: stderr.byteCount,
+          stdoutSha256: stdout.digest,
+          stderrSha256: stderr.digest,
+          stdoutTruncated: stdout.truncated,
+          stderrTruncated: stderr.truncated,
+          stdoutEvidenceRef: stdout.evidenceRef,
+          stderrEvidenceRef: stderr.evidenceRef,
+          ...(validationFailure ? { failure: validationFailure } : {}),
+        };
+      } catch {
+        validation = {
+          command: descriptor.validationArgv,
+          exitCode: output.status,
+          signal: output.signal,
+          error: "Attempt-private validation evidence capture failed",
+          failure: failure("acceptance", "validation_infrastructure", "review-validation", false),
+        };
+      }
+      return respond(validation);
     },
   });
 
@@ -168,8 +218,21 @@ export default function reviewerTools(pi) {
     },
     execute: async (_toolCallId, params) => {
       if (submitted) throw new Error("Reviewer result was already submitted");
+      if ((params.status === "pass" || params.status === "changes") && contextBudget.exceeded) {
+        throw new Error(`Reviewer pass or changes is forbidden after ${CONTEXT_BUDGET_EXCEEDED}`);
+      }
       if ((params.status === "pass" || params.status === "changes") && !axesCompleted) {
         throw new Error("Reviewer pass or changes requires one completed Standards and Spec subagent run");
+      }
+      if (params.status === "pass" && Object.values(axisResults ?? {}).some((axis) => axis.status !== "pass")) {
+        throw new Error("Reviewer pass requires pass from both Standards and Spec axes");
+      }
+      if (params.status === "changes" && !Object.values(axisResults ?? {}).some((axis) => axis.status === "changes")) {
+        throw new Error("Reviewer changes requires changes from at least one review axis");
+      }
+      if ((params.status === "pass" || params.status === "changes")
+        && !sameFindingIdentity(params.findings, submittedAxisFindings(axisResults))) {
+        throw new Error("Reviewer result findings must preserve every Review Axis finding identity");
       }
       if ((params.status === "pass" || params.status === "changes") && !environmentPreflight?.ok) {
         throw new Error("Reviewer pass or changes requires a successful review_preflight run");
@@ -192,7 +255,7 @@ export default function reviewerTools(pi) {
       };
       publishResult(descriptor.resultPath, `${JSON.stringify(result)}\n`);
       submitted = true;
-      return toolResult({ submitted: true, status: params.status, reviewedHeadSha: descriptor.reviewedHeadSha });
+      return respond({ submitted: true, status: params.status, reviewedHeadSha: descriptor.reviewedHeadSha }, { reserved: true });
     },
   });
 }
@@ -249,6 +312,7 @@ function assertReviewRuntime(descriptor) {
   const agentPath = realpathSync(descriptor.reviewAxisAgentPath);
   const subagentConfigDir = realpathSync(descriptor.subagentConfigDir);
   const subagentConfigPath = realpathSync(descriptor.subagentConfigPath);
+  const privateEvidenceDir = realpathSync(descriptor.privateEvidenceDir);
   const emptyAppendSystemPromptPath = realpathSync(descriptor.emptyAppendSystemPromptPath);
   const piSubagentWrapperPath = realpathSync(descriptor.piSubagentWrapperPath);
   if (
@@ -258,6 +322,8 @@ function assertReviewRuntime(descriptor) {
     || !pathWithin(runtimePath, piSubagentWrapperPath)
     || pathsOverlap(runtimePath, reviewPath)
     || pathsOverlap(subagentConfigDir, reviewPath)
+    || pathsOverlap(privateEvidenceDir, reviewPath)
+    || (lstatSync(privateEvidenceDir).mode & 0o077)
   ) {
     throw new Error("Reviewer child runtime overlaps untrusted candidate source");
   }
@@ -335,21 +401,119 @@ function reviewAxis(task) {
   return match?.[1] ?? null;
 }
 
-function completedReviewAxes(event, expectedTasks) {
+function projectReviewAxes(event, expectedTasks, descriptor) {
   const details = event.details;
-  if (event.isError || !details || typeof details !== "object" || Array.isArray(details)
-    || details.mode !== "workflow" || !Array.isArray(details.results) || details.results.length !== 2) return false;
-  const tasks = new Set();
-  for (const result of details.results) {
-    if (!result || typeof result !== "object" || Array.isArray(result)
+  const rawResults = !event.isError && details && typeof details === "object" && !Array.isArray(details)
+    && details.mode === "workflow" && Array.isArray(details.results) && details.results.length === 2
+    ? details.results
+    : [];
+  const projections = [];
+  let completed = rawResults.length === 2;
+  for (const [index, task] of expectedTasks.entries()) {
+    const axis = reviewAxis(task) ?? (index === 0 ? "Standards" : "Spec");
+    const matches = rawResults.filter((result) => result && typeof result === "object" && !Array.isArray(result) && result.task === task);
+    const result = matches.length === 1 ? matches[0] : null;
+    if (!result
       || result.agent !== "herdr-harness-review-axis"
-      || !expectedTasks.includes(result.task)
       || result.exitCode !== 0 || result.error
       || result.interrupted || result.timedOut || result.stopped || result.detached
-      || typeof result.finalOutput !== "string" || !result.finalOutput.trim()) return false;
-    tasks.add(result.task);
+      || typeof result.finalOutput !== "string" || !result.finalOutput.trim()) {
+      completed = false;
+      projections.push(invalidAxisProjection("Review axis did not return one successful structured result", Buffer.alloc(0)));
+      continue;
+    }
+    const projected = projectAxisOutput(axis, result.finalOutput, descriptor);
+    if (!projected.valid) completed = false;
+    projections.push(projected.value);
   }
-  return tasks.size === 2;
+  const results = { Standards: projections[0], Spec: projections[1] };
+  return { completed, results, details: results };
+}
+
+function projectAxisOutput(axis, output, descriptor) {
+  const raw = Buffer.from(output, "utf8");
+  const digest = sha256(raw);
+  persistPrivateEvidence(descriptor, `axis-${axis.toLowerCase()}-${digest.slice(0, 16)}.json`, raw);
+  let parsed;
+  try {
+    parsed = JSON.parse(output);
+  } catch {
+    return { valid: false, value: invalidAxisProjection("Review axis output is not JSON", raw) };
+  }
+  if (!validAxisResult(parsed)) {
+    return { valid: false, value: invalidAxisProjection("Review axis output does not match the structured contract", raw) };
+  }
+  const summary = boundedHeadTail(parsed.summary, AXIS_SUMMARY_LIMIT);
+  const value = {
+    status: parsed.status,
+    summary: summary.text,
+    findings: parsed.findings,
+    evidenceRefs: parsed.evidenceRefs,
+    outputByteCount: raw.length,
+    digest,
+    truncated: summary.truncated,
+  };
+  if (Buffer.byteLength(JSON.stringify(value), "utf8") > AXIS_OUTPUT_LIMIT) {
+    return { valid: false, value: invalidAxisProjection("Review axis structured projection exceeds 12 KiB", raw) };
+  }
+  return { valid: parsed.status !== "blocked", value };
+}
+
+function validAxisResult(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)
+    || Object.keys(value).sort().join(",") !== "evidenceRefs,findings,status,summary"
+    || !["pass", "changes", "blocked"].includes(value.status)
+    || typeof value.summary !== "string" || !value.summary.trim()
+    || !validEvidenceRefs(value.evidenceRefs, AXIS_EVIDENCE_LIMIT)
+    || !Array.isArray(value.findings) || value.findings.length > AXIS_FINDING_LIMIT) return false;
+  for (const finding of value.findings) {
+    if (!finding || typeof finding !== "object" || Array.isArray(finding)
+      || Object.keys(finding).sort().join(",") !== "evidenceRefs,severity,summary"
+      || !["critical", "major", "minor"].includes(finding.severity)
+      || typeof finding.summary !== "string" || !finding.summary.trim()
+      || Buffer.byteLength(finding.summary, "utf8") > 1_000
+      || !validEvidenceRefs(finding.evidenceRefs, 16, 1)
+      || Buffer.byteLength(finding.evidenceRefs.join("\n"), "utf8") > 4_000) return false;
+  }
+  return value.status === "changes" ? value.findings.length > 0 : value.status !== "pass" || value.findings.length === 0;
+}
+
+function validEvidenceRefs(value, limit, minimum = 0) {
+  return Array.isArray(value) && value.length >= minimum && value.length <= limit && value.every((ref) => (
+    typeof ref === "string" && ref.trim() && !/[\r\n]/.test(ref) && Buffer.byteLength(ref, "utf8") <= AXIS_EVIDENCE_REF_LIMIT
+  ));
+}
+
+function submittedAxisFindings(axisResults) {
+  return [axisResults?.Standards, axisResults?.Spec].flatMap((axis) => axis?.findings ?? []).map((finding) => ({
+    severity: finding.severity,
+    summary: finding.summary,
+    evidence: finding.evidenceRefs.join("\n"),
+  }));
+}
+
+function sameFindingIdentity(actual, expected) {
+  if (!Array.isArray(actual) || actual.length !== expected.length) return false;
+  const canonical = (finding) => JSON.stringify({
+    severity: finding?.severity,
+    summary: finding?.summary,
+    evidence: finding?.evidence,
+  });
+  const actualIdentities = actual.map(canonical).sort();
+  const expectedIdentities = expected.map(canonical).sort();
+  return actualIdentities.every((finding, index) => finding === expectedIdentities[index]);
+}
+
+function invalidAxisProjection(summary, raw) {
+  return {
+    status: "blocked",
+    summary,
+    findings: [],
+    evidenceRefs: [],
+    outputByteCount: raw.length,
+    digest: sha256(raw),
+    truncated: raw.length > 0,
+  };
 }
 
 function reviewerEnv(descriptor) {
@@ -489,6 +653,11 @@ function readDescriptor() {
     || !isAbsolute(value.subagentConfigPath ?? "")
     || !/^[0-9a-f]{64}$/i.test(value.subagentConfigDigest ?? "")
     || !isAbsolute(value.resultPath ?? "")
+    || value.privateEvidenceDir !== join(dirname(value.resultPath ?? ""), "evidence")
+    || !Number.isSafeInteger(value.initialContextBytes) || value.initialContextBytes < 0
+    || !Number.isSafeInteger(value.contextBudgetBytes) || value.contextBudgetBytes < 1
+    || !Number.isSafeInteger(value.contextBudgetReserveBytes) || value.contextBudgetReserveBytes < 1
+    || value.initialContextBytes > value.contextBudgetBytes - value.contextBudgetReserveBytes
     || (value.dockerHost !== null && (typeof value.dockerHost !== "string" || !safeDockerHost(value.dockerHost)))
   ) {
     throw new Error("invalid Harness Reviewer descriptor");
@@ -500,12 +669,221 @@ function safeDockerHost(host) {
   return host.startsWith("unix:///") && !/[\0\r\n]/.test(host);
 }
 
-function tail(value) {
-  return value.length <= OUTPUT_LIMIT ? value : `[truncated]\n${value.slice(-OUTPUT_LIMIT)}`;
+function projectGenericToolResult(event) {
+  const serialized = JSON.stringify(event.content ?? []);
+  const visible = (event.content ?? []).flatMap((item) => item?.type === "text" && typeof item.text === "string" ? [item.text] : []).join("\n");
+  const projection = boundedHeadTail(visible, GENERIC_TOOL_OUTPUT_LIMIT);
+  return {
+    tool: event.toolName,
+    isError: event.isError === true,
+    output: projection.text,
+    outputByteCount: Buffer.byteLength(serialized, "utf8"),
+    digest: sha256(serialized),
+    truncated: projection.truncated || (event.content ?? []).some((item) => item?.type !== "text"),
+  };
 }
 
-function toolResult(details) {
-  return { content: [{ type: "text", text: JSON.stringify(details, null, 2) }], details };
+async function runValidation(command, args, descriptor, env) {
+  let stdout;
+  let stderr;
+  try {
+    stdout = openOutputCapture(descriptor, "validation-stdout.log");
+    stderr = openOutputCapture(descriptor, "validation-stderr.log");
+  } catch {
+    stdout?.abort();
+    stderr?.abort();
+    return { status: null, signal: null, error: "Attempt-private validation evidence capture failed", stdout: null, stderr: null };
+  }
+  let child;
+  try {
+    child = spawn(command, args, { cwd: descriptor.validationPath, env, stdio: ["ignore", "pipe", "pipe"] });
+  } catch {
+    stdout.abort();
+    stderr.abort();
+    return { status: null, signal: null, error: "Reviewer validation process could not start", stdout: null, stderr: null };
+  }
+  return await new Promise((resolveRun) => {
+    let runtimeError = null;
+    let captureFailed = false;
+    let timedOut = false;
+    let forceTimer = null;
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGTERM");
+      forceTimer = setTimeout(() => child.kill("SIGKILL"), 5_000);
+    }, 30 * 60 * 1000);
+    const capture = (target, chunk) => {
+      if (captureFailed) return;
+      try {
+        target.write(chunk);
+      } catch {
+        captureFailed = true;
+        child.kill("SIGKILL");
+      }
+    };
+    const failCapture = () => {
+      captureFailed = true;
+      child.kill("SIGKILL");
+    };
+    child.stdout.on("data", (chunk) => capture(stdout, chunk));
+    child.stderr.on("data", (chunk) => capture(stderr, chunk));
+    child.stdout.on("error", failCapture);
+    child.stderr.on("error", failCapture);
+    child.on("error", (error) => { runtimeError = error; });
+    child.on("close", (status, signal) => {
+      clearTimeout(timeout);
+      if (forceTimer) clearTimeout(forceTimer);
+      if (captureFailed) {
+        stdout.abort();
+        stderr.abort();
+        resolveRun({ status, signal, error: "Attempt-private validation evidence capture failed", stdout: null, stderr: null });
+        return;
+      }
+      try {
+        const stdoutResult = stdout.finish();
+        const stderrResult = stderr.finish();
+        resolveRun({
+          status,
+          signal,
+          error: timedOut
+            ? "Reviewer validation timed out"
+            : runtimeError instanceof Error ? runtimeError.message : null,
+          stdout: stdoutResult,
+          stderr: stderrResult,
+        });
+      } catch {
+        stdout.abort();
+        stderr.abort();
+        resolveRun({ status, signal, error: "Attempt-private validation evidence capture failed", stdout: null, stderr: null });
+      }
+    });
+  });
+}
+
+function openOutputCapture(descriptor, evidenceRef) {
+  const path = join(descriptor.privateEvidenceDir, evidenceRef);
+  if (!pathWithin(descriptor.privateEvidenceDir, path) || existsSync(path)) {
+    throw new Error("Reviewer validation evidence path is unavailable");
+  }
+  const fd = openSync(path, "wx", 0o600);
+  const hash = createHash("sha256");
+  let byteCount = 0;
+  let head = Buffer.alloc(0);
+  let tail = Buffer.alloc(0);
+  let closed = false;
+  return {
+    write(value) {
+      const chunk = Buffer.isBuffer(value) ? value : Buffer.from(value);
+      let offset = 0;
+      while (offset < chunk.length) {
+        const written = writeSync(fd, chunk, offset, chunk.length - offset);
+        if (written < 1) throw new Error("Reviewer validation evidence write made no progress");
+        offset += written;
+      }
+      hash.update(chunk);
+      byteCount += chunk.length;
+      if (head.length < VALIDATION_OUTPUT_LIMIT) {
+        head = Buffer.concat([head, chunk]).subarray(0, VALIDATION_OUTPUT_LIMIT);
+      }
+      tail = Buffer.concat([tail, chunk]).subarray(-VALIDATION_OUTPUT_LIMIT);
+    },
+    finish() {
+      fsyncSync(fd);
+      closeSync(fd);
+      closed = true;
+      chmodSync(path, 0o400);
+      const source = byteCount <= VALIDATION_OUTPUT_LIMIT ? head : Buffer.concat([head, tail]);
+      const projection = boundedHeadTail(source.toString("utf8"), VALIDATION_OUTPUT_LIMIT);
+      return {
+        text: projection.text,
+        truncated: byteCount > VALIDATION_OUTPUT_LIMIT || projection.truncated,
+        byteCount,
+        digest: hash.digest("hex"),
+        evidenceRef,
+      };
+    },
+    abort() {
+      if (!closed) {
+        try { closeSync(fd); } catch {}
+        closed = true;
+      }
+      if (existsSync(path)) unlinkSync(path);
+    },
+  };
+}
+
+function persistPrivateEvidence(descriptor, name, raw) {
+  const path = join(descriptor.privateEvidenceDir, name);
+  if (!pathWithin(descriptor.privateEvidenceDir, path)) throw new Error("Reviewer private evidence path escaped its directory");
+  if (existsSync(path)) {
+    const stat = lstatSync(path);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || (stat.mode & 0o222)
+      || sha256(readFileSync(path)) !== sha256(raw)) {
+      throw new Error("Reviewer private evidence file changed");
+    }
+    return;
+  }
+  writeFileSync(path, raw, { flag: "wx", mode: 0o400 });
+}
+
+function boundedHeadTail(value, maxBytes) {
+  if (Buffer.byteLength(value, "utf8") <= maxBytes) return { text: value, truncated: false };
+  const marker = "\n...[truncated]...\n";
+  const remaining = maxBytes - Buffer.byteLength(marker, "utf8");
+  const headBytes = Math.ceil(remaining / 2);
+  const tailBytes = Math.floor(remaining / 2);
+  return {
+    text: `${utf8Prefix(value, headBytes)}${marker}${utf8Suffix(value, tailBytes)}`,
+    truncated: true,
+  };
+}
+
+function utf8Prefix(value, maxBytes) {
+  let low = 0;
+  let high = value.length;
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    if (Buffer.byteLength(value.slice(0, middle), "utf8") <= maxBytes) low = middle;
+    else high = middle - 1;
+  }
+  const last = value.charCodeAt(low - 1);
+  return value.slice(0, last >= 0xD800 && last <= 0xDBFF ? low - 1 : low);
+}
+
+function utf8Suffix(value, maxBytes) {
+  let low = 0;
+  let high = value.length;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    if (Buffer.byteLength(value.slice(middle), "utf8") <= maxBytes) high = middle;
+    else low = middle + 1;
+  }
+  const first = value.charCodeAt(low);
+  return value.slice(first >= 0xDC00 && first <= 0xDFFF ? low + 1 : low);
+}
+
+function budgetedToolResult(details, descriptor, budget, options = {}) {
+  const makeResult = (value, isError = false) => {
+    const text = JSON.stringify(value, null, 2);
+    return { text, bytes: Buffer.byteLength(text, "utf8"), result: { content: [{ type: "text", text }], details: value, ...(isError ? { isError: true } : {}) } };
+  };
+  const normal = makeResult(details, options.isError === true);
+  const ceiling = options.reserved ? descriptor.contextBudgetBytes : descriptor.contextBudgetBytes - descriptor.contextBudgetReserveBytes;
+  if ((!budget.exceeded || options.reserved) && budget.used + normal.bytes <= ceiling) {
+    budget.used += normal.bytes;
+    return normal.result;
+  }
+  budget.exceeded = true;
+  const failureDetails = {
+    error: CONTEXT_BUDGET_EXCEEDED,
+    failure: failure("acceptance", CONTEXT_BUDGET_EXCEEDED, "review-context", false),
+    contextBudgetBytes: descriptor.contextBudgetBytes,
+    contextBytesBeforeResult: budget.used,
+    rejectedResultBytes: normal.bytes,
+  };
+  const rejected = makeResult(failureDetails, true);
+  if (budget.used + rejected.bytes <= descriptor.contextBudgetBytes) budget.used += rejected.bytes;
+  return rejected.result;
 }
 
 function failure(domain, code, stage, retryable) {

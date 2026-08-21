@@ -187,6 +187,11 @@ export interface GitPort {
     piExecutable: string;
     piRuntimeVersion: string;
     piAgentDir: string;
+    prompt: string;
+    trustedContextPath: string;
+    reviewerSkillPath: string;
+    contextBudgetBytes: number;
+    contextBudgetReserveBytes: number;
   }): Promise<{ reviewPath: string; descriptorPath: string; evidencePath: string }>;
   verifyReviewer(input: {
     worktree: WorktreeHandle;

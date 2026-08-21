@@ -33,3 +33,16 @@ external attempt result.
 
 If evidence is unavailable or a command cannot be completed, report the gap;
 do not turn uncertainty into a pass.
+
+Return exactly one JSON object, with no Markdown fence or surrounding prose:
+
+```json
+{"status":"pass|changes|blocked","summary":"bounded axis summary","findings":[{"severity":"critical|major|minor","summary":"finding identity","evidenceRefs":["path:line or requirement fragment"]}],"evidenceRefs":["other bounded axis evidence"]}
+```
+
+Use `changes` only with at least one finding and `pass` only with no findings.
+Every finding must have at least one evidence ref. Keep each finding summary
+under 1,000 UTF-8 bytes, each evidence ref single-line and under 512 bytes,
+each axis at no more than 32 findings, and the summary under 2 KiB. Never return
+transcript, assistant-message,
+extension-detail, repository-context, or internal-reasoning fields.
