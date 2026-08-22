@@ -11,6 +11,7 @@ import type {
   RuntimePreflightPort,
   StateStore,
 } from "../ports.js";
+import type { SafeRuntimeDiagnostic } from "../pi-rpc-diagnostics.js";
 
 export type TickAction =
   | "idle"
@@ -44,6 +45,9 @@ export type TickResult = {
   action: TickAction;
   jobId: string | null;
   message: string;
+  failureCode?: string;
+  retryable?: boolean;
+  runtimeDiagnostic?: SafeRuntimeDiagnostic;
 };
 
 export type ControllerDependencies = {

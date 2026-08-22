@@ -1,9 +1,25 @@
 import type { Attempt, AttemptResult, EvidenceItem, PullRequestCheck, CiFailure } from "../model.js";
 import { digest } from "../model.js";
 import type { TickAction, TickResult } from "./types.js";
+import { safePiRpcDiagnosticFromError } from "../pi-rpc-diagnostics.js";
 
 export function result(ok: boolean, action: TickAction, jobId: string | null, messageValue: string): TickResult {
   return { ok, action, jobId, message: messageValue };
+}
+
+export function preflightFailureResult(jobId: string | null, error: unknown): TickResult {
+  const base = result(false, "preflight_failed", jobId, message(error));
+  const runtimeDiagnostic = safePiRpcDiagnosticFromError(error);
+  if (runtimeDiagnostic) {
+    return {
+      ...base,
+      failureCode: runtimeDiagnostic.code ?? runtimeDiagnostic.failureCode,
+      retryable: runtimeDiagnostic.retryable,
+      runtimeDiagnostic,
+    };
+  }
+  const failureCode = driftCode(base.message);
+  return failureCode ? { ...base, failureCode, retryable: false } : base;
 }
 
 export function safeToken(value: string): string {
@@ -26,6 +42,14 @@ export function withHerdrDiagnostic(summary: string, diagnostic: string | null):
 
 export function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function driftCode(value: string): "version_drift" | "resource_drift" | "config_drift" | "integrity_violation" | null {
+  if (/config(?:uration)?.*(?:changed|drift)|changed after Fleet validation/i.test(value)) return "config_drift";
+  if (/\bversion\b|requires Pi|executable.*changed/i.test(value)) return "version_drift";
+  if (/resource|models\.json|agent directory|context|manifest|bundle|extension|skill/i.test(value)) return "resource_drift";
+  if (/digest|\bdrift\b|\bchanged\b/i.test(value)) return "integrity_violation";
+  return null;
 }
 
 export function settleAttempt(attempt: Attempt, resultValue: AttemptResult | null, now: string): Attempt {

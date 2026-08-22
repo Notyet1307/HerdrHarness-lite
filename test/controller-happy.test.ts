@@ -10,6 +10,7 @@ import { digest } from "../src/model.js";
 import type { HarnessConfig } from "../src/ports.js";
 import { ReviewerContextBudgetExceededError } from "../src/reviewer-context-budget.js";
 import { reviewerOwnValidationInput } from "../src/controller/reviewer-validation.js";
+import { CredentialStartupError } from "../src/credential-startup.js";
 import {
   FakeAnalyst,
   FakeClock,
@@ -314,6 +315,34 @@ test("runtime preflight fails before claim and does not reserve an issue", async
   assert.match(output.message, /provider sessions are full/);
   assert.equal(store.state.activeJob, null);
   assert.equal(github.claims.length, 0);
+});
+
+test("runtime preflight emits a content-free structured credential classification", async () => {
+  const store = new MemoryStore();
+  const github = new FakeGitHub([issue({ number: 31, title: "Credential preflight" })]);
+  const preflight = new FakeRuntimePreflight();
+  preflight.providerFailure = new CredentialStartupError("oauth_missing");
+  const controller = new HarnessController({
+    config,
+    store,
+    github,
+    git: new FakeGit(),
+    herdr: new FakeHerdr([]),
+    analyst: new FakeAnalyst(),
+    evidence: new FakeEvidence(),
+    clock: new FakeClock(),
+    ids: new SequenceIds(),
+    preflight,
+  });
+
+  const output = await controller.tick();
+  assert.equal(output.action, "preflight_failed");
+  assert.equal(output.failureCode, "oauth_missing");
+  assert.equal(output.retryable, false);
+  assert.equal(output.runtimeDiagnostic?.code, "oauth_missing");
+  assert.equal("authPath" in output, false);
+  assert.equal(store.state.activeJob, null);
+  assert.deepEqual(github.claims, []);
 });
 
 test("Attempt binds one immutable execution snapshot and ignores later config drift", async () => {

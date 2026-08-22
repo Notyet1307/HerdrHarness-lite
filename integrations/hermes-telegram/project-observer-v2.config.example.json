@@ -1,0 +1,24 @@
+{
+  "transportVersion": 2,
+  "routeId": "exposure",
+  "projectId": "Exposure-Agent",
+  "fleetId": "engineering-fleet",
+  "harnessConfig": "/absolute/path/to/harness.config.json",
+  "nodeBin": "/absolute/path/to/node",
+  "statusScript": "/absolute/path/to/HerdrHarness-lite/dist/src/transport-cli.js",
+  "approvalScript": "/absolute/path/to/HerdrHarness-lite/dist/src/hermes-approval.js",
+  "harnessCliScript": "/absolute/path/to/HerdrHarness-lite/dist/src/cli.js",
+  "approvalState": "/absolute/path/to/telegram-approval/state.json",
+  "telegramAllowedUser": "123456789",
+  "deliveryCommand": [
+    "/absolute/path/to/node",
+    "/absolute/path/to/harness-telegram-bridge/src/bridge.js",
+    "send-card",
+    "--config",
+    "/absolute/path/to/harness-telegram-bridge/config.json"
+  ],
+  "observerState": "/absolute/path/to/telegram-observer/state.json",
+  "controllerLog": "/absolute/path/to/controller.log",
+  "pollMs": 5000,
+  "heartbeatTimeoutMs": 60000
+}

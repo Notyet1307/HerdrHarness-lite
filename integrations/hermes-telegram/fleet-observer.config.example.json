@@ -1,0 +1,20 @@
+{
+  "transportVersion": 2,
+  "routeId": "fleet",
+  "fleetConfig": "/absolute/path/to/fleet.config.json",
+  "routes": {
+    "Exposure-Agent": "exposure",
+    "CloudAtlas.v2": "atlas",
+    "Governance_Run": "governance"
+  },
+  "deliveryCommand": [
+    "/absolute/path/to/node",
+    "/absolute/path/to/harness-telegram-bridge/src/bridge.js",
+    "send-card",
+    "--config",
+    "/absolute/path/to/harness-telegram-bridge/config.json"
+  ],
+  "observerState": "/absolute/path/to/telegram-fleet-observer/state.json",
+  "pollMs": 5000,
+  "heartbeatTimeoutMs": 30000
+}

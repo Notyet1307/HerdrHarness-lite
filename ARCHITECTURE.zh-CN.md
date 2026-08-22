@@ -238,7 +238,7 @@ Analyst 绑定当前 Job 和 task digest，只在 blocked flow 中读取有界 E
 | Herdr | worktree、pane、agent 生命周期 | 任务完成或审查通过 |
 | Pi CLI / RPC | 角色执行与 runtime observation | durable delivery truth |
 | Ledger | workflow state、revision、Incident、Approval | GitHub 或 Git 的实时外部事实 |
-| Observer / Telegram | 状态投递、受控 action transport | workflow authority |
+| Transport projection / Observer / Telegram | 版本化只读事实、状态投递、受控 action transport | workflow authority |
 
 Worker 与顶层 Reviewer 都可选择 `herdr-pi-cli` 或 `pi-rpc`。两者仍在 Herdr pane 中运行；Reviewer 内部的两个 review-axis child 属于固定 `pi-subagents` contract，不是第三种顶层 Attempt adapter。
 
@@ -328,7 +328,9 @@ Analyst `hold` 不授权 retry。`reassess` 只创建新的可审计 Incident/An
 | `reviewer-provider-profile.ts` | active Reviewer provider profile 的验证与 selector 替换 |
 | `controller-lease.ts` / `controller-heartbeat.ts` | 单活 lease 与 liveness heartbeat |
 | `pi-rpc-*` | durable RPC plan/spool/runner/SDK host/diagnostics |
-| `hermes-status.ts` / `hermes-approval.ts` / `hermes-observer.ts` | Telegram/Hermes compatibility transport |
+| `transport/*` / `transport-cli.ts` | 无 Telegram HTML 的 v2 project/fleet/diagnostic/event 安全投影 |
+| `hermes-status.ts` / `hermes-approval.ts` / `hermes-observer.ts` | v1 Telegram/Hermes compatibility 与 v2 Project Observer/精确 challenge |
+| `fleet-observer.ts` / `observer/*` | Fleet 生命周期通知、Observer state/outbox/dedupe/delivery；不拥有 workflow transition |
 | `adapters/json-store.ts` | ledger lock、CAS、atomic write 与 event append |
 | `adapters/github-gh.ts` | GitHub Issue/claim/PR/checks/merge |
 | `adapters/git-cli.ts` | worktree、Git fixed point、trusted context、Reviewer snapshots |
@@ -367,6 +369,8 @@ Fleet 加载时绑定每个项目配置的 digest，并把该 digest 交给单�
 项目 state/worktree/Herdr session 继续完全隔离；canonical OAuth credential store 是显式共享的外部资源，只通过上述 digest-keyed startup lease 协调，不进入任何项目 `stateDir`。
 
 Fleet 状态位于独立 `fleet-state.json`，项目业务真相仍位于各项目 `state.json`。Supervisor 在启动 child 前要求初始 Fleet checkpoint 成功；运行中的观测 checkpoint 失败只告警并继续隔离监督，避免 Fleet 存储降级扩散成兄弟项目失控。两类状态在原子提交成功后，即使后续 audit append 失败，也不得向调用方伪装成状态未提交。
+
+Transport v2 从这些权威状态生成有界 JSON：Project projection 组合 ledger、Controller lease/heartbeat 和安全 runtime/Reviewer receipt；Fleet projection 组合真实 Supervisor state、lease、heartbeat 与项目 process phase；diagnostic projection 复用既有安全聚合。Projection 不含 Telegram HTML、task body、原始 evidence/result、绝对私有路径、auth path、Provider 原始响应或 transcript。Project Observer 与 Fleet Observer 只比较 projection 并维护自己的 outbox/dedupe state；Bridge 才负责 Telegram 渲染。Telegram callback 只携带短 `routeId` 和 challenge token，最终仍由 Core option、Harness CLI `decide` 与 ledger CAS 校验。
 
 删除这些边界前必须先盘点真实 ledger、进程参数、配置和 transport 流量，并提供迁移、测试与回滚证据。
 

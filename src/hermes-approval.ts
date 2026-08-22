@@ -14,6 +14,8 @@ import { dirname, isAbsolute, join } from "node:path";
 import { JsonStateStore } from "./adapters/json-store.js";
 import { isBoundedText, type Job } from "./model.js";
 import { operatorActionsFor, type OperatorAction } from "./policy.js";
+import { transportEvent } from "./transport/event-projection.js";
+import { TRANSPORT_PROJECT_ID, TRANSPORT_ROUTE_ID, type EventEnvelope } from "./transport/telegram-protocol.js";
 
 const CHALLENGE_TTL_MS = 10 * 60 * 1_000;
 const MAX_STDIN_BYTES = 1_024;
@@ -33,6 +35,10 @@ type ChallengeKind = OperatorAction["kind"];
 
 type ApprovalConfigFile = {
   laneId?: string;
+  transportVersion?: 2;
+  routeId?: string;
+  projectId?: string;
+  fleetId?: string;
   harnessConfig: string;
   nodeBin: string;
   harnessCliScript: string;
@@ -81,6 +87,7 @@ async function main(argv: string[]): Promise<number> {
       json,
       (optionalFlag(argv, "--kind") ?? "approve_retry") as ChallengeKind,
       optionalFlag(argv, "--reason"),
+      argv.includes("--transport-v2"),
     );
   }
   return decideChallenge(config, command, json, optionalFlag(argv, "--kind") as ChallengeKind | null);
@@ -91,7 +98,11 @@ async function requestChallenge(
   json: boolean,
   kind: ChallengeKind,
   requestedReason: string | null,
+  transportV2: boolean,
 ): Promise<number> {
+  if (transportV2 && (!json || config.transportVersion !== 2)) {
+    throw new Error("--transport-v2 requires --json and a version 2 observer config");
+  }
   const ledger = await new JsonStateStore(config.harnessStateDir).load();
   const job = ledger.activeJob;
   if (!job) throw new Error("当前没有活跃任务");
@@ -151,12 +162,40 @@ async function requestChallenge(
       kind: challenge.kind,
       effect: challenge.effect,
       expiresAt: challenge.expiresAt,
-      card: approvalCard(job, challenge, token, config.laneId),
+      ...(transportV2
+        ? { envelope: approvalTransportEvent(job, challenge, token, config) }
+        : { card: approvalCard(job, challenge, token, config.laneId) }),
     })}\n`);
   } else {
     process.stdout.write(`${humanMessage}\n`);
   }
   return 0;
+}
+
+function approvalTransportEvent(job: Job, challenge: Challenge, token: string, config: ApprovalConfig): EventEnvelope {
+  const option = operatorActionsFor(job).find((candidate) => candidate.id === challenge.optionId);
+  if (!option || !config.routeId || !config.projectId) throw new Error("Transport v2 approval requires a current route-bound option");
+  return transportEvent({
+    routeId: config.routeId,
+    projectId: config.projectId,
+    fleetId: config.fleetId ?? null,
+    occurredAt: challenge.createdAt,
+    severity: "warning",
+    category: "operator.approval",
+    dedupeKey: `operator.approval:${challenge.analysisId}:${challenge.optionId}`,
+    title: "Exact operator approval required",
+    summary: "Harness offers one current Core-owned operator option; confirmation will revalidate every durable binding.",
+    facts: [
+      { label: "Action", value: option.effect },
+      { label: "Issue", value: String(job.task.issueNumber) },
+      { label: "Revision", value: String(job.revision) },
+      { label: "Lane", value: job.incident?.lane ?? "controller" },
+      ...(job.headSha ? [{ label: "HEAD", value: job.headSha.slice(0, 12) }] : []),
+    ],
+    actionRequired: true,
+    operatorActionKinds: [option.kind],
+    approval: { token, approveLabel: actionButtonLabel(option.kind, option.effect), expiresAt: challenge.expiresAt },
+  });
 }
 
 async function decideChallenge(
@@ -379,6 +418,13 @@ function loadConfig(path: string): ApprovalConfig {
   if (parsed.laneId !== undefined && !LANE_ID.test(parsed.laneId)) {
     throw new Error("laneId must be 1-32 lowercase letters, digits, or hyphens");
   }
+  if (parsed.transportVersion !== undefined && parsed.transportVersion !== 2) throw new Error("transportVersion must be 2 when present");
+  if (parsed.transportVersion === 2 && (
+    !TRANSPORT_ROUTE_ID.test(parsed.routeId ?? "")
+    || !TRANSPORT_PROJECT_ID.test(parsed.projectId ?? "")
+    || (parsed.fleetId !== undefined && !TRANSPORT_PROJECT_ID.test(parsed.fleetId))
+    || (parsed.laneId !== undefined && parsed.laneId !== parsed.routeId)
+  )) throw new Error("Transport v2 approval route/project identity is invalid");
   const file = parsed as ApprovalConfigFile;
   const harness = JSON.parse(readFileSync(file.harnessConfig, "utf8")) as { stateDir?: unknown };
   if (typeof harness.stateDir !== "string" || !isAbsolute(harness.stateDir) || !existsSync(harness.stateDir)) {
@@ -388,7 +434,8 @@ function loadConfig(path: string): ApprovalConfig {
 }
 
 function challengeCommand(config: ApprovalConfig, kind: ChallengeKind, token?: string): string {
-  return `/harness${config.laneId ? ` ${config.laneId}` : ""} ${commandForKind(kind)}${token ? ` ${token}` : ""}`;
+  const routeId = config.routeId ?? config.laneId;
+  return `/harness${routeId ? ` ${routeId}` : ""} ${commandForKind(kind)}${token ? ` ${token}` : ""}`;
 }
 
 function loadChallenge(path: string): Challenge {
