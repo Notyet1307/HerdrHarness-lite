@@ -73,10 +73,10 @@ never automatic violations; documented repository standards take precedence:
 
 Skip checks already enforced by tooling.
 
-## 3. Launch each missing axis once, fresh and foreground
+## 3. Launch each missing axis fresh and foreground
 
 Use the `missingAxes`, `reusedAxes`, and `axisConcurrency` returned by
-`review_preflight`. Preserve
+`review_preflight`. Launch each missing axis once initially. Preserve
 reused structured results exactly and never try to recover their old session or
 transcript. When `axisConcurrency=1`, use one Pi `subagent` workflow call per
 missing axis, Standards before Spec. When `axisConcurrency=2`, one call may
@@ -130,6 +130,10 @@ axis to this parent. Missing or non-structured output is incomplete review.
 The Harness review tool rewrites this call onto the Attempt-private project
 registry and gives both children the absolute read-only candidate source root.
 Do not supply `cwd`, child `cwd`, or any alternate agent registry.
+
+When a failed tool result includes `retryAvailable`, relaunch exactly those
+missing axes once with fresh context and the same briefs. This is the only
+in-Attempt retry. A valid axis report or a second failure consumes that axis.
 
 If a child fails, is interrupted, returns no evidence, or does not finish, that
 axis is incomplete. Do not substitute the other axis or the parent's opinion.

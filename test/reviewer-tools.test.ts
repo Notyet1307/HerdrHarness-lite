@@ -926,6 +926,51 @@ test("Reviewer environment preflight blocks review axes but still permits a dura
       findings: [],
     }), /completed Standards and Spec/);
 
+    const malformedDetails = malformedProjection?.details as { retryAvailable?: string[] };
+    assert.deepEqual(malformedDetails.retryAvailable, ["Standards", "Spec"]);
+    const changedRetryCall = {
+      ...reviewCall,
+      workflowScript: reviewWorkflowScript([
+        { ...reviewTasks[0]!, task: `${reviewTasks[0]!.task}\nChanged brief.` },
+        reviewTasks[1]!,
+      ]),
+    };
+    assert.match((await malformedToolCallHook({
+      toolCallId: "changed-retry",
+      toolName: "subagent",
+      input: changedRetryCall,
+    }))?.reason ?? "", /preserve the exact initial brief/);
+    const retryCall = { ...reviewCall };
+    assert.equal(await malformedToolCallHook({ toolCallId: "retry-axes", toolName: "subagent", input: retryCall }), undefined);
+    const duplicateCall = { ...reviewCall };
+    assert.equal((await malformedToolCallHook({ toolCallId: "duplicate-retry", toolName: "subagent", input: duplicateCall }))?.block, true);
+    const retryTasks = workflowEntries(retryCall.workflowScript).map((entry) => entry.task);
+    const retryProjection = await malformedToolResultHook({
+      toolCallId: "retry-axes",
+      toolName: "subagent",
+      input: retryCall,
+      content: [{ type: "text", text: "workflow complete" }],
+      isError: false,
+      details: {
+        mode: "workflow",
+        results: retryTasks.map((task, index) => ({
+          agent: "herdr-harness-review-axis",
+          task,
+          exitCode: 0,
+          finalOutput: JSON.stringify({
+            status: "pass",
+            summary: index === 0 ? "Standards satisfied after retry" : "Spec satisfied after retry",
+            findings: [],
+            evidenceRefs: [],
+          }),
+        })),
+      },
+    });
+    assert.equal(retryProjection?.isError, undefined);
+    assert.equal(((retryProjection?.details as Record<string, unknown>).reviewerFinal as { status?: string }).status, "pass");
+    const exhaustedCall = { ...reviewCall };
+    assert.equal((await malformedToolCallHook({ toolCallId: "retry-exhausted", toolName: "subagent", input: exhaustedCall }))?.block, true);
+
     const budgetDescriptor = withValidationReceipt(root, {
       ...malformedDescriptor,
       attemptId: "reviewer-budget",
