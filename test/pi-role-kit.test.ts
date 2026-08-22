@@ -55,6 +55,7 @@ test("Pi review adapter uses fresh foreground Attempt-private project reviewers"
   assert.match(skill, /stdout and stderr content is replaced by a fixed redaction marker/);
   assert.match(skill, /`missingAxes`, `reusedAxes`, and `axisConcurrency`/);
   assert.match(skill, /When `axisConcurrency=1`, use one Pi `subagent` workflow call per\s+missing axis/);
+  assert.match(skill, /failed tool result includes `retryAvailable`/);
   assert.match(skill, /atomically creates the\s+Attempt-private axis checkpoint/);
   assert.match(skill, /only the fresh\s+Attempt's successful `review_submit` is authoritative/);
   for (const forbidden of ["docs/agents/issue-tracker.md", "gh issue", "fetch the issue"]) {

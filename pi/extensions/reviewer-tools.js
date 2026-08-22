@@ -45,7 +45,9 @@ export default function reviewerTools(pi) {
   let submitted = false;
   const axisFailures = new Map();
   const axesCalls = new Map();
-  const launchedAxes = new Set();
+  const axisTasks = new Map();
+  const axisLaunchCounts = new Map();
+  const retryAvailableAxes = new Set();
   const axisResults = {
     Standards: checkpointInputs.get("standards-axis")?.result ?? null,
     Spec: checkpointInputs.get("spec-axis")?.result ?? null,
@@ -79,13 +81,21 @@ export default function reviewerTools(pi) {
     if (!reviewerAxisStartupAllowed(descriptor.axisConcurrency, Boolean(axisResults.Standards), axes)) {
       return { block: true, reason: `Reviewer axis startup policy requires concurrency=${descriptor.axisConcurrency} and Standards before Spec` };
     }
-    if (axes.some((axis) => !axis || axisResults[axis] || launchedAxes.has(axis))) {
-      return { block: true, reason: "Reviewer may launch each missing review axis only once" };
+    if (axes.some((axis) => !axis || axisResults[axis]
+      || ((axisLaunchCounts.get(axis) ?? 0) > 0 && !retryAvailableAxes.has(axis)))) {
+      return { block: true, reason: "Reviewer may launch each missing review axis once plus one Harness-authorized retry" };
+    }
+    if (tasks.some((task, index) => axisTasks.has(axes[index]) && axisTasks.get(axes[index]) !== task)) {
+      return { block: true, reason: "Reviewer axis retry must preserve the exact initial brief" };
     }
     event.input.workflowScript = reviewCall.workflowScript;
     event.input.cwd = descriptor.runtimePath;
     event.input.foregroundOnly = true;
-    axes.forEach((axis) => launchedAxes.add(axis));
+    axes.forEach((axis, index) => {
+      if (!axisTasks.has(axis)) axisTasks.set(axis, tasks[index]);
+      retryAvailableAxes.delete(axis);
+      axisLaunchCounts.set(axis, (axisLaunchCounts.get(axis) ?? 0) + 1);
+    });
     axesCalls.set(event.toolCallId, tasks);
     return undefined;
   });
@@ -97,13 +107,20 @@ export default function reviewerTools(pi) {
       try {
         projected = projectReviewAxes(event, expectedTasks, descriptor);
       } catch {
-        projected = { completed: false, results: {}, details: { error: "Attempt-private Review Axis evidence capture failed" } };
+        projected = {
+          completed: false,
+          results: {},
+          details: { error: "Attempt-private Review Axis evidence capture failed" },
+          retryableAxes: new Set(),
+        };
       }
       for (const [axis, axisResult] of Object.entries(projected.results)) {
         if (axisResult.status === "blocked") {
           if (axisResult.failure) axisFailures.set(axis, axisResult.failure);
+          if (projected.retryableAxes.has(axis) && axisLaunchCounts.get(axis) === 1) retryAvailableAxes.add(axis);
           continue;
         }
+        axisFailures.delete(axis);
         publishReviewerCheckpoint(descriptor, axis === "Standards" ? "standards-axis" : "spec-axis", axisResult);
         axisResults[axis] = axisResult;
       }
@@ -114,6 +131,9 @@ export default function reviewerTools(pi) {
         publishReviewerCheckpoint(descriptor, "reviewer-final", finalProposal);
         projected.details = { ...projected.details, reviewerFinal: finalProposal };
         environmentPreflight.reviewerFinal = finalProposal;
+      }
+      if (retryAvailableAxes.size > 0) {
+        projected.details = { ...projected.details, retryAvailable: [...retryAvailableAxes] };
       }
       const result = respond(projected.details, { isError: !projected.completed });
       if (contextBudget.exceeded) axesCompleted = false;
@@ -452,6 +472,7 @@ function projectReviewAxes(event, expectedTasks, descriptor) {
     ? details.results
     : [];
   const results = {};
+  const retryableAxes = new Set();
   let completed = rawResults.length === expectedTasks.length;
   for (const [index, task] of expectedTasks.entries()) {
     const axis = reviewAxis(task) ?? (index === 0 ? "Standards" : "Spec");
@@ -464,18 +485,23 @@ function projectReviewAxes(event, expectedTasks, descriptor) {
       || typeof result.finalOutput !== "string" || !result.finalOutput.trim()) {
       completed = false;
       const raw = typeof result?.finalOutput === "string" ? Buffer.from(result.finalOutput, "utf8") : Buffer.alloc(0);
+      const failure = reviewAxisFailureProjection(result);
       results[axis] = invalidAxisProjection(
         "Review axis did not return one successful structured result",
         raw,
-        reviewAxisFailureProjection(result),
+        failure,
       );
+      if (failure.retryable) retryableAxes.add(axis);
       continue;
     }
     const projected = projectAxisOutput(axis, result.finalOutput, descriptor);
-    if (!projected.valid) completed = false;
+    if (!projected.valid) {
+      completed = false;
+      if (projected.retryable) retryableAxes.add(axis);
+    }
     results[axis] = projected.value;
   }
-  return { completed, results, details: results };
+  return { completed, results, details: results, retryableAxes };
 }
 
 function projectAxisOutput(axis, output, descriptor) {
@@ -484,11 +510,11 @@ function projectAxisOutput(axis, output, descriptor) {
   persistPrivateEvidence(descriptor, `axis-${axis.toLowerCase()}-${digest.slice(0, 16)}.json`, raw);
   const parsed = parseReviewAxisJson(output);
   if (parsed === undefined) {
-    return { valid: false, value: invalidAxisProjection("Review axis output is not JSON or one unique JSON fence", raw) };
+    return { valid: false, retryable: true, value: invalidAxisProjection("Review axis output is not JSON or one unique JSON fence", raw) };
   }
   const normalized = normalizeReviewAxisResult(parsed);
   if (!validAxisResult(normalized)) {
-    return { valid: false, value: invalidAxisProjection("Review axis output does not match the structured contract", raw) };
+    return { valid: false, retryable: true, value: invalidAxisProjection("Review axis output does not match the structured contract", raw) };
   }
   const summary = boundedHeadTail(normalized.summary, AXIS_SUMMARY_LIMIT);
   const value = {
@@ -501,9 +527,9 @@ function projectAxisOutput(axis, output, descriptor) {
     truncated: summary.truncated,
   };
   if (Buffer.byteLength(JSON.stringify(value), "utf8") > AXIS_OUTPUT_LIMIT) {
-    return { valid: false, value: invalidAxisProjection("Review axis structured projection exceeds 12 KiB", raw) };
+    return { valid: false, retryable: true, value: invalidAxisProjection("Review axis structured projection exceeds 12 KiB", raw) };
   }
-  return { valid: normalized.status !== "blocked", value };
+  return { valid: normalized.status !== "blocked", retryable: false, value };
 }
 
 function normalizeReviewAxisResult(value) {
