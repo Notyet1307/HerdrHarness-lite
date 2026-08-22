@@ -19,6 +19,8 @@ const SAFE_SUBAGENT_CONFIG = {
   forceTopLevelAsync: false,
   fleetView: false,
   intercomBridge: { mode: "off" },
+  turnBudget: { maxTurns: 10, graceTurns: 2 },
+  toolBudget: { soft: 16, hard: 24, block: ["read", "grep", "find", "ls"] },
 };
 const CHECKPOINT_IDENTITY_KEYS = [
   "baseSha",
@@ -159,6 +161,11 @@ export default function reviewerTools(pi) {
           missingAxes: ["Standards", "Spec"].filter((axis) => !axisResults[axis]),
           reusedAxes: Object.fromEntries(Object.entries(axisResults).filter(([, value]) => value)),
           axisConcurrency: descriptor.axisConcurrency,
+          axisTurnBudget: { ...SAFE_SUBAGENT_CONFIG.turnBudget },
+          axisToolBudget: {
+            ...SAFE_SUBAGENT_CONFIG.toolBudget,
+            block: [...SAFE_SUBAGENT_CONFIG.toolBudget.block],
+          },
         };
         if (axesCompleted) {
           const aggregated = aggregateFinalResult(axisResults, validationReceipt, descriptor);
@@ -443,7 +450,7 @@ function projectReviewAxes(event, expectedTasks, descriptor) {
       results[axis] = invalidAxisProjection(
         "Review axis did not return one successful structured result",
         raw,
-        reviewAxisFailure(result, raw),
+        reviewAxisFailureProjection(result),
       );
       continue;
     }
@@ -554,26 +561,39 @@ function invalidAxisProjection(summary, raw, failureDetails) {
   };
 }
 
-function reviewAxisFailure(result, raw) {
+export function reviewAxisFailureProjection(result) {
+  const raw = typeof result?.finalOutput === "string" ? Buffer.from(result.finalOutput, "utf8") : Buffer.alloc(0);
   const providerNetwork = childProviderNetworkFailure(result?.messages);
   const emptyResponse = result?.error === "Subagent produced no output (possible model cold-start or empty response).";
   const code = providerNetwork
     ? "review_axis_provider_network"
     : result?.timedOut === true
       ? "review_axis_timeout"
-      : result?.interrupted === true
-        ? "review_axis_interrupted"
-        : result?.stopped === true
-          ? "review_axis_stopped"
-          : result?.detached === true
-            ? "review_axis_detached"
-            : emptyResponse
-              ? "review_axis_empty_response"
-              : result
-                ? "review_axis_execution_failed"
-                : "review_axis_result_missing";
+      : result?.turnBudgetExceeded === true
+        ? "review_axis_turn_budget"
+        : result?.toolBudgetBlocked === true
+          ? "review_axis_tool_budget"
+          : result?.interrupted === true
+            ? "review_axis_interrupted"
+            : result?.stopped === true
+              ? "review_axis_stopped"
+              : result?.detached === true
+                ? "review_axis_detached"
+                : emptyResponse
+                  ? "review_axis_empty_response"
+                  : result
+                    ? "review_axis_execution_failed"
+                    : "review_axis_result_missing";
   const exitCode = Number.isInteger(result?.exitCode) && result.exitCode >= -2 && result.exitCode <= 255
     ? result.exitCode
+    : null;
+  const toolCount = Number.isSafeInteger(result?.progressSummary?.toolCount)
+    && result.progressSummary.toolCount >= 0 && result.progressSummary.toolCount <= 1_000_000
+    ? result.progressSummary.toolCount
+    : null;
+  const durationMs = Number.isSafeInteger(result?.progressSummary?.durationMs)
+    && result.progressSummary.durationMs >= 0 && result.progressSummary.durationMs <= 86_400_000
+    ? result.progressSummary.durationMs
     : null;
   return {
     domain: "execution",
@@ -586,6 +606,10 @@ function reviewAxisFailure(result, raw) {
     timedOut: result?.timedOut === true,
     stopped: result?.stopped === true,
     detached: result?.detached === true,
+    turnBudgetExceeded: result?.turnBudgetExceeded === true,
+    toolBudgetBlocked: result?.toolBudgetBlocked === true,
+    toolCount,
+    durationMs,
     outputByteCount: raw.length,
     outputDigest: sha256(raw),
   };
@@ -609,7 +633,7 @@ function childProviderNetworkFailure(messages) {
 function blockedReviewerSummary(summary, axisFailures) {
   if (axisFailures.size === 0) return summary;
   const audit = [...axisFailures].map(([axis, details]) => (
-    `axis=${axis} code=${details.code} exit=${details.exitCode ?? "unknown"} timedOut=${details.timedOut} interrupted=${details.interrupted} stopped=${details.stopped} detached=${details.detached} outputBytes=${details.outputByteCount}`
+    `axis=${axis} code=${details.code} exit=${details.exitCode ?? "unknown"} timedOut=${details.timedOut} interrupted=${details.interrupted} stopped=${details.stopped} detached=${details.detached} turnBudgetExceeded=${details.turnBudgetExceeded} toolBudgetBlocked=${details.toolBudgetBlocked} tools=${details.toolCount ?? "unknown"} durationMs=${details.durationMs ?? "unknown"} outputBytes=${details.outputByteCount}`
   )).join("; ");
   const record = `Harness Review Axis failure: ${audit}`;
   const prefix = summary.slice(0, Math.max(0, 4_000 - record.length - 1));

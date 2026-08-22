@@ -48,12 +48,46 @@ const reviewCall = {
 test("Reviewer axis startup policy serializes OAuth and preserves custom Provider fan-out", async () => {
   const extension = await import(pathToFileURL(resolve("pi/extensions/reviewer-tools.js")).href) as {
     reviewerAxisStartupAllowed(concurrency: number, standardsComplete: boolean, axes: Array<string | null>): boolean;
+    reviewAxisFailureProjection(result: unknown): Record<string, unknown>;
   };
   assert.equal(extension.reviewerAxisStartupAllowed(1, false, ["Standards", "Spec"]), false);
   assert.equal(extension.reviewerAxisStartupAllowed(1, false, ["Spec"]), false);
   assert.equal(extension.reviewerAxisStartupAllowed(1, false, ["Standards"]), true);
   assert.equal(extension.reviewerAxisStartupAllowed(1, true, ["Spec"]), true);
   assert.equal(extension.reviewerAxisStartupAllowed(2, false, ["Standards", "Spec"]), true);
+
+  const sentinel = "access_token_AXIS_BUDGET_SENTINEL";
+  const provider = extension.reviewAxisFailureProjection({
+    exitCode: 1,
+    error: sentinel,
+    finalOutput: sentinel,
+    progressSummary: { toolCount: 4, durationMs: 5_000 },
+    messages: [{
+      role: "assistant",
+      diagnostics: [{
+        type: "provider_transport_failure",
+        error: { message: sentinel, stack: sentinel },
+        details: { eventsEmitted: true, phase: "after_message_stream_start" },
+      }],
+    }],
+  });
+  assert.equal(provider.code, "review_axis_provider_network");
+  assert.equal(provider.toolCount, 4);
+  assert.equal(provider.durationMs, 5_000);
+  assert.equal(JSON.stringify(provider).includes(sentinel), false);
+
+  const budget = extension.reviewAxisFailureProjection({
+    exitCode: 1,
+    error: sentinel,
+    finalOutput: sentinel,
+    turnBudgetExceeded: true,
+    progressSummary: { toolCount: 24, durationMs: 240_000 },
+  });
+  assert.equal(budget.code, "review_axis_turn_budget");
+  assert.equal(budget.retryable, false);
+  assert.equal(budget.turnBudgetExceeded, true);
+  assert.equal(budget.toolCount, 24);
+  assert.equal(JSON.stringify(budget).includes(sentinel), false);
 });
 
 test("axisConcurrency=1 descriptor blocks dual launch and admits Standards then Spec checkpoints", async () => {
@@ -118,8 +152,12 @@ test("axisConcurrency=1 descriptor blocks dual launch and admits Standards then 
     });
     const preflight = JSON.parse((await tools.get("review_preflight")!.execute("preflight", {})).content[0]!.text) as {
       axisConcurrency: number;
+      axisTurnBudget: { maxTurns: number; graceTurns: number };
+      axisToolBudget: { soft: number; hard: number; block: string[] };
     };
     assert.equal(preflight.axisConcurrency, 1);
+    assert.deepEqual(preflight.axisTurnBudget, { maxTurns: 10, graceTurns: 2 });
+    assert.deepEqual(preflight.axisToolBudget, { soft: 16, hard: 24, block: ["read", "grep", "find", "ls"] });
     assert.equal((await toolCallHook!({ toolCallId: "dual", toolName: "subagent", input: { ...reviewCall } }))?.block, true);
     const specFirst = { ...reviewCall, workflowScript: reviewWorkflowScript([reviewTasks[1]!]) };
     assert.equal((await toolCallHook!({ toolCallId: "spec-first", toolName: "subagent", input: specFirst }))?.block, true);
@@ -184,6 +222,10 @@ test("axisConcurrency=1 descriptor blocks dual launch and admits Standards then 
       timedOut: false,
       stopped: false,
       detached: false,
+      turnBudgetExceeded: false,
+      toolBudgetBlocked: false,
+      toolCount: null,
+      durationMs: null,
       outputByteCount: Buffer.byteLength(sentinel, "utf8"),
       outputDigest: sha256(sentinel),
     });
@@ -1080,6 +1122,8 @@ function prepareReviewRuntime(root: string, reviewPath: string): {
     forceTopLevelAsync: false,
     fleetView: false,
     intercomBridge: { mode: "off" },
+    turnBudget: { maxTurns: 10, graceTurns: 2 },
+    toolBudget: { soft: 16, hard: 24, block: ["read", "grep", "find", "ls"] },
   }, null, 2)}\n`;
   mkdirSync(join(runtimePath, ".agents"), { recursive: true });
   mkdirSync(join(subagentConfigDir, "extensions", "subagent"), { recursive: true });
