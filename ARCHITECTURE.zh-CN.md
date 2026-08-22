@@ -248,7 +248,7 @@ canonical OAuth 仍只存在于原 canonical `auth.json`。Harness 以其 realpa
 
 SDK host 构造主 Pi Session 时使用独立的 Attempt-private `pi-agent`，并显式绑定 canonical `ModelRuntime`、in-memory settings 与 session；该目录继续禁止 `auth.json`、`models.json` 和 `settings.json`。Session 构造完成后，工具子进程继承的 `PI_CODING_AGENT_DIR` 切换到同一 runtime root 下独立的 `tool-agent`，避免 bash 中启动的嵌套 Pi 把默认 store 写回主目录。`tool-agent` 只接受 mode `0600`、单链接且内容严格为 `{}` 的 `auth.json` / `models-store.json` 初始化壳；任何非空 credential、`models.json`、`settings.json`、symlink 或 hardlink 仍 fail closed。两类目录都不读取或复制 canonical credential。
 
-Reviewer 的固定 Review Axis wrapper 不从可变的 `PI_CODING_AGENT_DIR` 推断凭据位置；Reviewer extensions 在完成 subagent config 隔离后恢复并保留 `HERDR_HARNESS_REVIEW_CANONICAL_PI_AGENT_DIR`，wrapper 只把该专用 Attempt-bound 路径交给 credential startup launcher。主 Reviewer 的工具子进程仍使用 `tool-agent`，Review Axis 仍通过 canonical OAuth startup lease 读取原 canonical store，两条路径不得互换。
+Reviewer 的固定 Review Axis wrapper 不从可变的 `PI_CODING_AGENT_DIR` 推断凭据位置；Reviewer extensions 在完成 subagent config 隔离后恢复并保留 `HERDR_HARNESS_REVIEW_CANONICAL_PI_AGENT_DIR`。canonical OAuth wrapper 把该专用 Attempt-bound 路径交给 credential startup launcher；canonical model-config wrapper 只对子 Pi 进程把 `PI_CODING_AGENT_DIR` 指向同一路径，使其读取绑定的 private `models.json`，缺失该 env 即 fail closed。主 Reviewer 的工具子进程仍使用 `tool-agent`，Review Axis 才读取原 canonical store，两条路径不得互换或复制配置。
 
 Review Axis wrapper 还只对 launcher/child 进程把 `PI_CODING_AGENT_DIR` 收紧为上述 canonical 路径，确保 launcher 取得 lease 后启动的普通 Pi CLI 从同一 store 读取 OAuth；该覆盖不回写主 Reviewer 进程环境。人工批准 Analyst 建议时，bounded approval reason 作为显式标注的 untrusted operator statement 进入 `approved_recovery` TypedHandoff obligations；它给 fresh Attempt 提供诊断事实，不新增执行或审批 authority。
 
