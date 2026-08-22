@@ -978,7 +978,7 @@ function piSubagentWrapper(
   if (credential) {
     return `#!/bin/sh\nPI_CODING_AGENT_DIR="$HERDR_HARNESS_REVIEW_CANONICAL_PI_AGENT_DIR" exec ${shellQuote(process.execPath)} ${shellQuote(credential.launcherPath)} --provider ${shellQuote(credential.provider)} --model ${shellQuote(credential.model)} --credential-agent-dir "$HERDR_HARNESS_REVIEW_CANONICAL_PI_AGENT_DIR" --credential-domain-id ${shellQuote(credential.credentialDomainId)} --pi-executable ${shellQuote(executable)} --expected-version ${shellQuote(runtimeVersion)} -- --append-system-prompt ${shellQuote(emptyAppendSystemPromptPath)} "$@"\n`;
   }
-  return `#!/bin/sh\nactual_version=$(${shellQuote(executable)} --version) || exit $?\nif [ "$actual_version" != ${shellQuote(runtimeVersion)} ]; then\n  printf 'Pi runtime version changed: expected %s, got %s\\n' ${shellQuote(runtimeVersion)} "$actual_version" >&2\n  exit 70\nfi\nexec ${shellQuote(executable)} --append-system-prompt ${shellQuote(emptyAppendSystemPromptPath)} "$@"\n`;
+  return `#!/bin/sh\nif [ -z "$HERDR_HARNESS_REVIEW_CANONICAL_PI_AGENT_DIR" ]; then\n  printf 'Reviewer canonical Pi agent directory is missing\\n' >&2\n  exit 71\nfi\nactual_version=$(${shellQuote(executable)} --version) || exit $?\nif [ "$actual_version" != ${shellQuote(runtimeVersion)} ]; then\n  printf 'Pi runtime version changed: expected %s, got %s\\n' ${shellQuote(runtimeVersion)} "$actual_version" >&2\n  exit 70\nfi\nPI_CODING_AGENT_DIR="$HERDR_HARNESS_REVIEW_CANONICAL_PI_AGENT_DIR" exec ${shellQuote(executable)} --append-system-prompt ${shellQuote(emptyAppendSystemPromptPath)} "$@"\n`;
 }
 
 function shellQuote(value: string): string {

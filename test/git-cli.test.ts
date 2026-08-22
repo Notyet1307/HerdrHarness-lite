@@ -181,7 +181,7 @@ test("Reviewer preparation exports a read-only exact-HEAD snapshot and writable 
     git("commit", "--quiet", "-m", "head");
     const expectedHeadSha = git("rev-parse", "HEAD").trim();
     writeFileSync(reviewAxisAgentPath, "---\nname: herdr-harness-review-axis\ndescription: test\n---\nread only\n");
-    writeFileSync(fakePiPath, "#!/bin/sh\nif [ \"$1\" = --version ]; then printf '0.84.0\\n'; exit 0; fi\n: > \"$FAKE_PI_ARGS\"\nfor arg in \"$@\"; do printf '%s\\n' \"$arg\" >> \"$FAKE_PI_ARGS\"; done\n", { mode: 0o500 });
+    writeFileSync(fakePiPath, "#!/bin/sh\nif [ \"$1\" = --version ]; then printf '0.84.0\\n'; exit 0; fi\nif [ -n \"$FAKE_PI_ENV\" ]; then printf '%s\\n' \"$PI_CODING_AGENT_DIR\" > \"$FAKE_PI_ENV\"; fi\n: > \"$FAKE_PI_ARGS\"\nfor arg in \"$@\"; do printf '%s\\n' \"$arg\" >> \"$FAKE_PI_ARGS\"; done\n", { mode: 0o500 });
     chmodSync(fakePiPath, 0o500);
     mkdirSync(dockerConfig);
     mkdirSync(attemptRoot, { recursive: true });
@@ -418,17 +418,33 @@ test("Reviewer preparation exports a read-only exact-HEAD snapshot and writable 
     assert.equal(lstatSync(descriptor.piSubagentWrapperPath).mode & 0o222, 0);
     assert.equal(Boolean(lstatSync(descriptor.piSubagentWrapperPath).mode & 0o111), true);
     const childArgsPath = join(root, "child-args.txt");
+    const childEnvPath = join(root, "child-env.txt");
+    const customToolAgentDir = join(root, "custom-tool-agent");
+    mkdirSync(customToolAgentDir);
     const wrapped = spawnSync(descriptor.piSubagentWrapperPath, ["--mode", "json"], {
-      env: { ...process.env, FAKE_PI_ARGS: childArgsPath },
+      env: {
+        ...process.env,
+        PI_CODING_AGENT_DIR: customToolAgentDir,
+        HERDR_HARNESS_REVIEW_CANONICAL_PI_AGENT_DIR: input.piAgentDir,
+        FAKE_PI_ARGS: childArgsPath,
+        FAKE_PI_ENV: childEnvPath,
+      },
       encoding: "utf8",
     });
     assert.equal(wrapped.status, 0);
+    assert.equal(readFileSync(childEnvPath, "utf8").trim(), input.piAgentDir);
     assert.deepEqual(readFileSync(childArgsPath, "utf8").trim().split("\n"), [
       "--append-system-prompt",
       descriptor.emptyAppendSystemPromptPath,
       "--mode",
       "json",
     ]);
+    const missingCustomAgentDir = spawnSync(descriptor.piSubagentWrapperPath, [], {
+      env: { ...process.env, HERDR_HARNESS_REVIEW_CANONICAL_PI_AGENT_DIR: "", FAKE_PI_ARGS: childArgsPath },
+      encoding: "utf8",
+    });
+    assert.equal(missingCustomAgentDir.status, 71);
+    assert.match(missingCustomAgentDir.stderr, /canonical Pi agent directory is missing/);
 
     const credentialRuntimeRoot = join(root, "credential-runtime");
     const credentialLauncherPath = join(credentialRuntimeRoot, "credential-startup.js");
@@ -482,7 +498,10 @@ test("Reviewer preparation exports a read-only exact-HEAD snapshot and writable 
     chmodSync(fakePiPath, 0o700);
     writeFileSync(fakePiPath, "#!/bin/sh\nif [ \"$1\" = --version ]; then printf '0.85.0\\n'; exit 0; fi\nexit 0\n", { mode: 0o500 });
     chmodSync(fakePiPath, 0o500);
-    const drifted = spawnSync(descriptor.piSubagentWrapperPath, [], { encoding: "utf8" });
+    const drifted = spawnSync(descriptor.piSubagentWrapperPath, [], {
+      env: { ...process.env, HERDR_HARNESS_REVIEW_CANONICAL_PI_AGENT_DIR: input.piAgentDir },
+      encoding: "utf8",
+    });
     assert.equal(drifted.status, 70);
     assert.match(drifted.stderr, /Pi runtime version changed/);
     await assert.rejects(() => new GitCli(runner).prepareReviewer({
