@@ -2,7 +2,7 @@ import { chmodSync, closeSync, existsSync, fsyncSync, linkSync, lstatSync, mkdir
 import { createHash, randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { basename, dirname, isAbsolute, join, relative } from "node:path";
-import { ORIGINAL_AGENT_DIR_ENV, PI_PACKAGE_ROOT_ENV } from "./reviewer-subagent-config.js";
+import { CANONICAL_AGENT_DIR_ENV, ORIGINAL_AGENT_DIR_ENV, PI_PACKAGE_ROOT_ENV } from "./reviewer-subagent-config.js";
 
 const DESCRIPTOR_ENV = "HERDR_HARNESS_REVIEW_DESCRIPTOR";
 const AXIS_OUTPUT_LIMIT = 12 * 1024;
@@ -382,6 +382,7 @@ function restorePiAgentDirectory(descriptor) {
     throw new Error("Reviewer extensions did not load through the isolated subagent config directory");
   }
   process.env.PI_CODING_AGENT_DIR = original;
+  process.env[CANONICAL_AGENT_DIR_ENV] = original;
   delete process.env[ORIGINAL_AGENT_DIR_ENV];
 }
 

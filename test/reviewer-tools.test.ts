@@ -232,6 +232,7 @@ test("Reviewer tools read one bound validation receipt and write one identity-bo
       },
     });
     assert.equal(process.env.PI_CODING_AGENT_DIR, originalAgentDir);
+    assert.equal(process.env.HERDR_HARNESS_REVIEW_CANONICAL_PI_AGENT_DIR, originalAgentDir);
     assert.equal(process.env.PI_SUBAGENT_PI_BINARY, realpathSync(runtime.piSubagentWrapperPath));
     const preflight = tools.get("review_preflight");
     const validate = tools.get("review_validate");

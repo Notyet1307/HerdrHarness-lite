@@ -57,6 +57,8 @@ Worker 启用 Ponytail 时，extension 顺序必须严格为 bundled `worker-too
 
 Worker 的主 `pi-agent` 与 bash/工具子进程使用不同的 Attempt-private agent directory。子进程若启动默认 Pi，允许在 `tool-agent` 创建严格空的 `{}` store；非空 `auth.json`、`models.json`、`settings.json` 或文件身份异常仍属于 credential integrity failure。不要通过删除现场文件或放宽主 `pi-agent` postflight 来恢复；应先核对两处目录的安全元数据，再按当前 operator action 使用 fresh Attempt。
 
+Reviewer Review Axis 的 credential wrapper 使用 `HERDR_HARNESS_REVIEW_CANONICAL_PI_AGENT_DIR`，不得改回继承工具进程的 `PI_CODING_AGENT_DIR`。若 axis 在一秒左右以 `oauth_missing` 退出且 `tool-agent` 没有 canonical auth，先核对 wrapper 与该专用 env；不要把升级 `pi-subagents` 当作此故障的修复，也不要复制 auth 或把 tool-agent 当作 credential store。
+
 `reviewer.axisConcurrency` 只接受 1 或 2。custom Provider 默认 2 并可显式改为 1；`credentialMode=canonical-oauth + provider=openai-codex` 无条件收紧为 1，Standards 完成并释放 axis startup lease 后才启动 Spec。
 
 配置要求 Docker 时，preflight 只接受本地 Unix socket，并验证 daemon 与 Compose。不要把远端 Docker credential boundary 隐式带入 Attempt。

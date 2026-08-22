@@ -248,6 +248,8 @@ canonical OAuth 仍只存在于原 canonical `auth.json`。Harness 以其 realpa
 
 SDK host 构造主 Pi Session 时使用独立的 Attempt-private `pi-agent`，并显式绑定 canonical `ModelRuntime`、in-memory settings 与 session；该目录继续禁止 `auth.json`、`models.json` 和 `settings.json`。Session 构造完成后，工具子进程继承的 `PI_CODING_AGENT_DIR` 切换到同一 runtime root 下独立的 `tool-agent`，避免 bash 中启动的嵌套 Pi 把默认 store 写回主目录。`tool-agent` 只接受 mode `0600`、单链接且内容严格为 `{}` 的 `auth.json` / `models-store.json` 初始化壳；任何非空 credential、`models.json`、`settings.json`、symlink 或 hardlink 仍 fail closed。两类目录都不读取或复制 canonical credential。
 
+Reviewer 的固定 Review Axis wrapper 不从可变的 `PI_CODING_AGENT_DIR` 推断凭据位置；Reviewer extensions 在完成 subagent config 隔离后恢复并保留 `HERDR_HARNESS_REVIEW_CANONICAL_PI_AGENT_DIR`，wrapper 只把该专用 Attempt-bound 路径交给 credential startup launcher。主 Reviewer 的工具子进程仍使用 `tool-agent`，Review Axis 仍通过 canonical OAuth startup lease 读取原 canonical store，两条路径不得互换。
+
 Worker 工具文本结果在进入后续模型上下文前还有 24 KiB 总上限，超限时保留头尾并给出原始字节数和 digest。Pi 内建分页/完整输出路径仍是重新读取事实的入口；截断结果和 compaction summary 都不是 workflow truth。
 
 ## 9. 上下文信任模型

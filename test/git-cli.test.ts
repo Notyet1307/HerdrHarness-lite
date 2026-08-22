@@ -429,6 +429,48 @@ test("Reviewer preparation exports a read-only exact-HEAD snapshot and writable 
       "--mode",
       "json",
     ]);
+
+    const credentialRuntimeRoot = join(root, "credential-runtime");
+    const credentialLauncherPath = join(credentialRuntimeRoot, "credential-startup.js");
+    const credentialArgsPath = join(root, "credential-args.json");
+    mkdirSync(credentialRuntimeRoot);
+    writeFileSync(credentialLauncherPath, [
+      'const { writeFileSync } = require("node:fs");',
+      'writeFileSync(process.env.FAKE_CREDENTIAL_ARGS, JSON.stringify(process.argv.slice(2)));',
+    ].join("\n"), { mode: 0o500 });
+    const canonicalRoot = join(root, "state", "attempt-canonical");
+    const canonicalWorkspace = await cli.prepareReviewer({
+      ...preparedInput,
+      rootPath: canonicalRoot,
+      resultPath: join(canonicalRoot, "result.json"),
+      provider: "openai-codex",
+      model: "gpt-test",
+      axisConcurrency: 1,
+      credentialDomainId: "a".repeat(64),
+      credentialLauncher: {
+        kind: "runtime" as const,
+        path: credentialLauncherPath,
+        digest: executionResourceDigest(credentialRuntimeRoot),
+      },
+    });
+    const canonicalDescriptor = JSON.parse(readFileSync(join(canonicalRoot, "workspace", "descriptor.json"), "utf8")) as {
+      piSubagentWrapperPath: string;
+    };
+    const toolAgentDir = join(root, "tool-agent");
+    mkdirSync(toolAgentDir);
+    const canonicalWrapped = spawnSync(canonicalDescriptor.piSubagentWrapperPath, ["--mode", "json"], {
+      env: {
+        ...process.env,
+        PI_CODING_AGENT_DIR: toolAgentDir,
+        HERDR_HARNESS_REVIEW_CANONICAL_PI_AGENT_DIR: input.piAgentDir,
+        FAKE_CREDENTIAL_ARGS: credentialArgsPath,
+      },
+      encoding: "utf8",
+    });
+    assert.equal(canonicalWrapped.status, 0, canonicalWrapped.stderr);
+    const credentialArgs = JSON.parse(readFileSync(credentialArgsPath, "utf8")) as string[];
+    assert.equal(credentialArgs[credentialArgs.indexOf("--credential-agent-dir") + 1], input.piAgentDir);
+    assert.ok(canonicalWorkspace.reviewPath);
     assert.equal(readFileSync(join(attemptRoot, "trusted-context.md"), "utf8"), "preserve me\n");
     assert.deepEqual(await new GitCli(runner).prepareReviewer(preparedInput), workspace);
     await assert.rejects(() => new GitCli(runner).prepareReviewer({

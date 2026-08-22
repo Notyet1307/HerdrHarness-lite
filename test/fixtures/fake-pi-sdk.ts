@@ -57,6 +57,7 @@ export async function createAgentSessionFromServices() {
         writeFileSync(join(agentDir, "auth.json"), process.env.FAKE_PI_SDK_DEFAULT_AUTH_CONTENT ?? "{}", { mode: 0o600 });
         writeFileSync(join(agentDir, "models-store.json"), "{}", { mode: 0o600 });
         state.defaultStoreAgentDir = agentDir;
+        state.canonicalAgentDir = process.env.HERDR_HARNESS_REVIEW_CANONICAL_PI_AGENT_DIR;
       }
       if (process.env.FAKE_PI_SDK_PROBE_FAIL) throw new Error("probe failed access_token_SENTINEL");
       session.state.messages.push({ role: "assistant", stopReason: "stop", content: [{ type: "text", text: "HERDR_HARNESS_PROVIDER_OK" }] });
@@ -66,6 +67,10 @@ export async function createAgentSessionFromServices() {
 }
 export async function createAgentSessionRuntime(factory, options) {
   const runtime = await factory(options);
+  if (process.env.FAKE_PI_SDK_RESTORE_PARENT_AGENT_DIR) {
+    process.env.PI_CODING_AGENT_DIR = process.env.FAKE_PI_SDK_RESTORE_PARENT_AGENT_DIR;
+    process.env.HERDR_HARNESS_REVIEW_CANONICAL_PI_AGENT_DIR = process.env.FAKE_PI_SDK_RESTORE_PARENT_AGENT_DIR;
+  }
   return {
     ...runtime,
     async dispose() { writeFileSync(process.env.FAKE_PI_SDK_CAPTURE, JSON.stringify(state)); },
