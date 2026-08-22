@@ -177,6 +177,8 @@ same-HEAD Reviewer fresh retry 可能携带 `reviewerCheckpointInputs`。只读�
 
 Review Axis 失败时，durable blocked summary 中的 `Harness Review Axis failure` 行是 Harness 生成的安全投影。使用 axis、固定 code、exit、timeout/interrupted/stopped/detached、turn/tool budget、tool count、duration 与 output byte count 判断失败形状；它不包含 child error、stderr、stack 或输出原文。固定预算是 10 turns + 2 grace，read/grep/find/ls 合计 16 soft / 24 hard；soft limit 要求从已有证据收尾，hard limit 只阻止新的只读检索。`retryable` 仍只是诊断属性，必须消费当前 operator option 才能恢复。缺少该行的旧 Attempt 不能靠猜测补写，应在修复投影后通过 fresh Reviewer 重新取证。
 
+若备用模型不能生成完整 `runs.all` 参数，Reviewer gate 还接受一个 exact `herdr-harness-review-axis` + `Axis: Standards|Spec` task 简写，并由 Harness 补齐固定 workflow 字段。该兼容只减少格式负担，不提供 agent discovery、management action、任意 scope/async、非 fresh context 或额外工具；这些调用仍应被拒绝。
+
 Short provider probe、Herdr `done`、Reviewer child completed 或 validation pass 均不足以宣告恢复。至少等新的 durable role result 和对应 Git gate。
 
 ## 9. 失败诊断与 Fleet 聚合

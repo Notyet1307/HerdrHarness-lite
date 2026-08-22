@@ -161,10 +161,40 @@ test("axisConcurrency=1 descriptor blocks dual launch and admits Standards then 
     assert.equal((await toolCallHook!({ toolCallId: "dual", toolName: "subagent", input: { ...reviewCall } }))?.block, true);
     const specFirst = { ...reviewCall, workflowScript: reviewWorkflowScript([reviewTasks[1]!]) };
     assert.equal((await toolCallHook!({ toolCallId: "spec-first", toolName: "subagent", input: specFirst }))?.block, true);
+    assert.equal((await toolCallHook!({
+      toolCallId: "wrong-direct-agent",
+      toolName: "subagent",
+      input: { agent: "worker", task: reviewTasks[0]!.task },
+    }))?.block, true);
+    assert.equal((await toolCallHook!({
+      toolCallId: "missing-direct-axis",
+      toolName: "subagent",
+      input: { agent: "herdr-harness-review-axis", task: "Review repository standards." },
+    }))?.block, true);
 
-    const standards = { ...reviewCall, workflowScript: reviewWorkflowScript([reviewTasks[0]!]) };
+    const standards: Record<string, unknown> = {
+      agent: "herdr-harness-review-axis",
+      task: reviewTasks[0]!.task,
+    };
     assert.equal(await toolCallHook!({ toolCallId: "standards", toolName: "subagent", input: standards }), undefined);
-    const standardsTask = workflowEntries(standards.workflowScript)[0]!.task;
+    assert.deepEqual({
+      artifacts: standards.artifacts,
+      agentScope: standards.agentScope,
+      context: standards.context,
+      async: standards.async,
+      chatProgress: standards.chatProgress,
+      foregroundOnly: standards.foregroundOnly,
+    }, {
+      artifacts: false,
+      agentScope: "project",
+      context: "fresh",
+      async: false,
+      chatProgress: "off",
+      foregroundOnly: true,
+    });
+    assert.equal(standards.agent, undefined);
+    assert.equal(standards.task, undefined);
+    const standardsTask = workflowEntries(String(standards.workflowScript))[0]!.task;
     await toolResultHook!({
       toolCallId: "standards",
       toolName: "subagent",
@@ -418,19 +448,17 @@ test("Reviewer tools read one bound validation receipt and write one identity-bo
     chmodSync(runtime.piExecutable, 0o700);
     writeFileSync(runtime.piExecutable, boundPi);
     chmodSync(runtime.piExecutable, 0o500);
-    const defaultedScopeReviewCall: Record<string, unknown> = {
-      artifacts: false,
-      context: "fresh",
-      async: false,
-      chatProgress: "off",
-      workflowScript: reviewWorkflowScript(),
-    };
+    const defaultedScopeReviewCall: Record<string, unknown> = { workflowScript: reviewWorkflowScript() };
     assert.equal((await toolCallHook({
       toolCallId: "axes",
       toolName: "subagent",
       input: defaultedScopeReviewCall,
     })), undefined);
     assert.equal(defaultedScopeReviewCall.agentScope, "project");
+    assert.equal(defaultedScopeReviewCall.artifacts, false);
+    assert.equal(defaultedScopeReviewCall.context, "fresh");
+    assert.equal(defaultedScopeReviewCall.async, false);
+    assert.equal(defaultedScopeReviewCall.chatProgress, "off");
     assert.equal(defaultedScopeReviewCall.cwd, runtime.runtimePath);
     assert.equal(defaultedScopeReviewCall.foregroundOnly, true);
     const transformedTasks = workflowEntries(defaultedScopeReviewCall.workflowScript).map((entry) => entry.task);
