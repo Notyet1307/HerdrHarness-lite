@@ -303,7 +303,7 @@ export function reassessmentClassFor(job: Job): BlockClass | null {
     && job.activeAttempt?.lane === "reviewer"
     && job.activeAttempt.expectedHeadSha === job.headSha
     && job.activeAttempt.result?.lane === "reviewer"
-    && job.activeAttempt.result.status === "blocked"
+    && (job.activeAttempt.result.status === "blocked" || job.activeAttempt.result.status === "failed")
     && job.activeAttempt.result.reviewedHeadSha === job.headSha;
   const heldReviewerPreflight = incident.class === "reviewer_preflight_dirty"
     && incident.lane === "reviewer"
