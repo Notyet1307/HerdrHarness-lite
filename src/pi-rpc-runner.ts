@@ -12,6 +12,7 @@ import {
   captureRuntimeSideEffectBaseline,
   observeRuntimeSideEffects,
   preparePiRpcAgentDir,
+  preparePiRpcToolAgentDir,
   sameJson,
   spoolPath,
   type PiRpcPlan,
@@ -467,6 +468,7 @@ async function main(argv: string[]): Promise<void> {
   try {
     sideEffectBaseline = captureRuntimeSideEffectBaseline(plan.cwd, excludedSideEffectPaths);
     const isolatedAgentDir = preparePiRpcAgentDir(plan.snapshot);
+    preparePiRpcToolAgentDir(plan.snapshot);
     const pinnedTaskDataPath = preparePinnedTaskData(plan);
     if (plan.snapshot.credentialMode === "canonical-oauth") {
       const provider = plan.snapshot.provider;
@@ -537,6 +539,7 @@ async function main(argv: string[]): Promise<void> {
     const controlledState = requireResponse(await command("get_state"), "get_state");
     if (object(controlledState.data).autoCompactionEnabled !== false) throw new Error("Pi RPC auto-compaction did not disable");
     preparePiRpcAgentDir(plan.snapshot);
+    preparePiRpcToolAgentDir(plan.snapshot);
     writeAtomicJson(spoolPath(plan.runtimeRoot, "ready.json"), {
       ...identity,
       ok: true,
@@ -573,6 +576,7 @@ async function main(argv: string[]): Promise<void> {
       }
       await stopChild(child, client, timeouts);
       preparePiRpcAgentDir(plan.snapshot);
+      preparePiRpcToolAgentDir(plan.snapshot);
       const diagnostic = makeSafeRuntimeDiagnostic({
         domain: "execution",
         code: "runtime_terminated",
@@ -640,6 +644,7 @@ async function main(argv: string[]): Promise<void> {
     failureStage = "credential-postflight";
     credentialHostArgs(plan);
     preparePiRpcAgentDir(plan.snapshot);
+    preparePiRpcToolAgentDir(plan.snapshot);
     preparePinnedTaskData(plan);
     const assistantTerminalFailure = assistantFailure as AssistantFailure | null;
     const terminalError = deadlineFailure ?? policyViolation ?? assistantTerminalFailure?.error ?? null;
