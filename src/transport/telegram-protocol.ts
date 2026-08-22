@@ -219,6 +219,68 @@ export type EventEnvelope = {
   };
 };
 
+const TRANSPORT_ACTION_KINDS = ["approve_retry", "reassess", "resolve_decision", "cancel"] as const;
+
+export function validateTransportEventEnvelope(value: unknown): EventEnvelope {
+  if (Buffer.byteLength(JSON.stringify(value), "utf8") > TELEGRAM_TRANSPORT_MAX_BYTES) {
+    throw new Error("transport event exceeds its byte budget");
+  }
+  const event = transportRecord(value, [
+    "version", "kind", "generatedAt", "routeId", "projectId", "fleetId", "eventId", "dedupeKey",
+    "occurredAt", "severity", "category", "title", "summary", "facts", "actionRequired", "operatorActionKinds",
+  ], ["approval"]);
+  if (event.version !== TELEGRAM_TRANSPORT_VERSION || event.kind !== "event"
+    || !transportTime(event.generatedAt) || !TRANSPORT_ROUTE_ID.test(String(event.routeId))
+    || !nullableTransportId(event.projectId) || !nullableTransportId(event.fleetId)
+    || !transportText(event.eventId, 256) || !transportText(event.dedupeKey, 512)
+    || !transportTime(event.occurredAt) || !["info", "warning", "critical"].includes(String(event.severity))
+    || !TRANSPORT_EVENT_CATEGORIES.includes(event.category as EventEnvelope["category"])
+    || !transportText(event.title, 160) || !transportText(event.summary, 1_000)
+    || typeof event.actionRequired !== "boolean") throw new Error("invalid transport event");
+  if (!Array.isArray(event.facts) || event.facts.length > 16) throw new Error("invalid transport event facts");
+  for (const value of event.facts) {
+    const fact = transportRecord(value, ["label", "value"]);
+    if (!transportText(fact.label, 80) || !transportText(fact.value, 512)) throw new Error("invalid transport event fact");
+  }
+  if (!Array.isArray(event.operatorActionKinds) || event.operatorActionKinds.length > 4
+    || new Set(event.operatorActionKinds).size !== event.operatorActionKinds.length
+    || event.operatorActionKinds.some((kind) => !TRANSPORT_ACTION_KINDS.includes(kind as typeof TRANSPORT_ACTION_KINDS[number]))) {
+    throw new Error("invalid transport event actions");
+  }
+  if (event.approval !== undefined) {
+    const approval = transportRecord(event.approval, ["token", "approveLabel", "expiresAt"]);
+    if (!/^[0-9A-F]{16}$/.test(String(approval.token)) || !transportText(approval.approveLabel, 64)
+      || !transportTime(approval.expiresAt) || event.category !== "operator.approval" || event.actionRequired !== true) {
+      throw new Error("invalid transport event approval");
+    }
+  }
+  return event as EventEnvelope;
+}
+
+function transportRecord(value: unknown, required: string[], optional: string[] = []): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("invalid transport event object");
+  const record = value as Record<string, unknown>;
+  const allowed = new Set([...required, ...optional]);
+  if (required.some((key) => !Object.hasOwn(record, key)) || Object.keys(record).some((key) => !allowed.has(key))) {
+    throw new Error("invalid transport event fields");
+  }
+  return record;
+}
+
+function transportText(value: unknown, max: number): value is string {
+  return typeof value === "string" && value.length > 0 && Array.from(value).length <= max && !/[\0\r\n]/.test(value);
+}
+
+function transportTime(value: unknown): value is string {
+  return typeof value === "string" && value.length <= 64
+    && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(value)
+    && Number.isFinite(Date.parse(value));
+}
+
+function nullableTransportId(value: unknown): boolean {
+  return value === null || typeof value === "string" && TRANSPORT_PROJECT_ID.test(value);
+}
+
 export type TelegramTransportEnvelope = ProjectViewEnvelope | FleetViewEnvelope | DiagnosticViewEnvelope | EventEnvelope;
 
 export function transportBase<K extends TransportKind, P extends string | null, F extends string | null>(

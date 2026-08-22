@@ -21,6 +21,7 @@ import { isControllerAnalystFailure, operatorActionsFor } from "./policy.js";
 import { controllerHeartbeatPath } from "./controller-heartbeat.js";
 import { formatSafePiRpcDiagnostic } from "./pi-rpc-diagnostics.js";
 import { projectObserverTransportVersion, runProjectObserverV2 } from "./observer/project-observer-v2.js";
+import { validateTransportEventEnvelope, type EventEnvelope } from "./transport/telegram-protocol.js";
 
 const MAX_MESSAGE_LENGTH = 3_900;
 const MAX_OUTBOX = 512;
@@ -86,7 +87,7 @@ type CardOutboxEntry = {
 type TransportOutboxEntry = {
   kind: "transport";
   key: string;
-  payload: unknown;
+  payload: EventEnvelope;
   attempts: number;
   nextAttemptAt: number;
 };
@@ -436,11 +437,7 @@ async function flushOutbox(config: ObserverConfig, state: ObserverState): Promis
         sent = sendCard(config, card);
       }
     } else if (entry.kind === "transport") {
-      if (!config.deliveryCommand) {
-        retryEntry(config, state, entry, "Transport v2 outbox requires deliveryCommand");
-        return;
-      }
-      sent = sendCard(config, entry.payload);
+      sent = sendCard(config, config.deliveryCommand ? entry.payload : legacyTransportCard(entry.payload));
     } else if (entry.kind === "card") {
       sent = sendCard(config, { text: entry.message });
     } else if (config.deliveryCommand) {
@@ -477,6 +474,21 @@ function sendCard(config: ObserverConfig, payload: unknown): ReturnType<typeof s
     timeout: 20_000,
     maxBuffer: 1024 * 1024,
   });
+}
+
+function legacyTransportCard(event: EventEnvelope): Record<string, string> {
+  const text = html([
+    event.title,
+    event.summary,
+    ...event.facts.map((fact) => `${fact.label}: ${fact.value}`),
+    `Action required: ${event.actionRequired ? "yes" : "no"}`,
+  ].join("\n"), MAX_MESSAGE_LENGTH);
+  return event.approval ? {
+    text,
+    approveLabel: event.approval.approveLabel,
+    approveCallback: `hh:a:${event.routeId}:${event.approval.token}`,
+    holdCallback: `hh:h:${event.routeId}:${event.approval.token}`,
+  } : { text };
 }
 
 function retryEntry(config: ObserverConfig, state: ObserverState, entry: OutboxEntry, error: string): void {
@@ -713,10 +725,12 @@ function loadState(path: string): ObserverState {
         ? typeof entry.message !== "string"
         : entry.kind === "approval"
           ? typeof entry.analysisId !== "string"
-          : entry.kind !== "transport" || !entry.payload || typeof entry.payload !== "object"
-            || Buffer.byteLength(JSON.stringify(entry.payload), "utf8") > 32 * 1024))
+          : entry.kind !== "transport"))
   ) {
     throw new Error("invalid observer state");
+  }
+  for (const entry of value.outbox) {
+    if (entry.kind === "transport") validateTransportEventEnvelope(entry.payload);
   }
   return value;
 }
@@ -736,7 +750,7 @@ function migrateV3State(raw: Record<string, unknown>): ObserverState {
       throw new Error("invalid version 3 observer payload");
     }
     const payload = entry.payload as Record<string, unknown>;
-    if (payload.version === 2) return { kind: "transport", ...common, payload };
+    if (payload.version === 2) return { kind: "transport", ...common, payload: validateTransportEventEnvelope(payload) };
     if (typeof payload.text !== "string") throw new Error("invalid legacy payload in version 3 observer state");
     return payload.parseMode === "plain"
       ? { kind: "text", ...common, message: payload.text }
