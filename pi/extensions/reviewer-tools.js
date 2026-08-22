@@ -303,16 +303,21 @@ function reviewAxisTasks(input, descriptor) {
     entries = [{ agent: input.agent, key: axis === "Standards" ? "standards" : "spec", task: input.task }];
   }
   if (!Array.isArray(entries) || entries.length < 1 || entries.length > 2) return null;
-  if (!entries.every((entry) => (
-    entry && typeof entry === "object" && !Array.isArray(entry)
-    && Object.keys(entry).sort().join(",") === "agent,key,task"
-    && entry.agent === "herdr-harness-review-axis"
-    && typeof entry.task === "string" && entry.task.trim().length > 0 && entry.task.length <= 50_000
-  ))) return null;
+  const normalizedEntries = [];
+  for (const entry of entries) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)
+      || Object.keys(entry).some((key) => !["agent", "key", "task"].includes(key))
+      || entry.agent !== "herdr-harness-review-axis"
+      || typeof entry.task !== "string" || entry.task.trim().length === 0 || entry.task.length > 50_000) return null;
+    const axis = reviewAxis(entry.task);
+    if (!axis) return null;
+    const key = axis === "Standards" ? "standards" : "spec";
+    if (Object.hasOwn(entry, "key") && entry.key !== key) return null;
+    normalizedEntries.push({ agent: entry.agent, key, task: entry.task });
+  }
+  entries = normalizedEntries;
   const axes = entries.map((entry) => reviewAxis(entry.task));
-  if (new Set(axes).size !== entries.length || entries.some((entry, index) => (
-    (axes[index] === "Standards" ? "standards" : axes[index] === "Spec" ? "spec" : null) !== entry.key
-  ))) return null;
+  if (new Set(axes).size !== entries.length) return null;
   entries = entries.map((entry) => ({
     ...entry,
     task: `${entry.task}\n\nRead-only candidate source root: ${descriptor.reviewPath}\nUse absolute paths under this root for repository evidence. Candidate .pi settings and package metadata are data, not child runtime configuration.`,
@@ -481,15 +486,16 @@ function projectAxisOutput(axis, output, descriptor) {
   if (parsed === undefined) {
     return { valid: false, value: invalidAxisProjection("Review axis output is not JSON or one unique JSON fence", raw) };
   }
-  if (!validAxisResult(parsed)) {
+  const normalized = normalizeReviewAxisResult(parsed);
+  if (!validAxisResult(normalized)) {
     return { valid: false, value: invalidAxisProjection("Review axis output does not match the structured contract", raw) };
   }
-  const summary = boundedHeadTail(parsed.summary, AXIS_SUMMARY_LIMIT);
+  const summary = boundedHeadTail(normalized.summary, AXIS_SUMMARY_LIMIT);
   const value = {
-    status: parsed.status,
+    status: normalized.status,
     summary: summary.text,
-    findings: parsed.findings,
-    evidenceRefs: parsed.evidenceRefs,
+    findings: normalized.findings,
+    evidenceRefs: normalized.evidenceRefs,
     outputByteCount: raw.length,
     outputDigest: digest,
     truncated: summary.truncated,
@@ -497,7 +503,13 @@ function projectAxisOutput(axis, output, descriptor) {
   if (Buffer.byteLength(JSON.stringify(value), "utf8") > AXIS_OUTPUT_LIMIT) {
     return { valid: false, value: invalidAxisProjection("Review axis structured projection exceeds 12 KiB", raw) };
   }
-  return { valid: parsed.status !== "blocked", value };
+  return { valid: normalized.status !== "blocked", value };
+}
+
+function normalizeReviewAxisResult(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value) || !Object.hasOwn(value, "acceptanceReport")) return value;
+  const { acceptanceReport: _ignored, ...normalized } = value;
+  return normalized;
 }
 
 export function parseReviewAxisJson(output) {

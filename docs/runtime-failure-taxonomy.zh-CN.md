@@ -72,6 +72,7 @@ Reviewer child axis 的失败分类目前是 `reviewer-tools` 的 tool-local 投
 | Reviewer 模型省略固定 subagent workflow 字段 | exact single-axis shorthand or incomplete fixed workflow | Harness 验证 agent/Axis task 后补齐同一 project/fresh/foreground workflow；任意 agent/action/scope/async 仍拒绝 |
 | custom Reviewer axes 启动即 exit 1、0 tools、0 output | top-level tool-agent 与 canonical models store 分离 | custom wrapper只对子 Pi恢复 canonical agent dir；缺失 env fail closed，不复制 models.json、不改变顶层 Reviewer隔离 |
 | Review Axis 返回 prose 包裹的结构化 JSON | whole JSON or one unique labeled JSON fence | 只解析唯一 fence 后执行同一严格 schema；围栏外文本不投影，多 fence/无标签/坏 schema拒绝 |
+| workflow entry缺少key或axis JSON含pi-subagents acceptanceReport | exact Axis task + strict result object | key由Axis身份推导；仅剥离非权威acceptanceReport，其余错误key/额外字段仍拒绝 |
 | durable result 已写但 terminal 缺失 | `FAKE_PI_RESULT_BEFORE_STALL=1` | result 创建刷新一次进展；随后 `runtime_stall`，failure receipt 优先且仍不能验收 |
 | terminal failure 后 durable result 已存在 | `FAKE_PI_TERMINAL_FAILURE_AFTER_RESULT=1` | failure receipt 优先，adapter 拒绝交付 |
 | 单条 event 超过 1 MiB | `FAKE_PI_OVERSIZE_EVENT=1` | `rpc_event_oversize`，spool 不保存大 payload |

@@ -32,7 +32,7 @@ const reviewTasks = [
 ];
 
 function reviewWorkflowScript(tasks = reviewTasks): string {
-  const entries = tasks.map((task) => ({ key: task.task.startsWith("Axis: Standards") ? "standards" : "spec", ...task }));
+  const entries = tasks.map((task) => ({ ...task }));
   return `return await runs.all(${JSON.stringify(entries)});`;
 }
 
@@ -202,7 +202,13 @@ test("axisConcurrency=1 descriptor blocks dual launch and admits Standards then 
     assert.equal(standards.task, undefined);
     const standardsTask = workflowEntries(String(standards.workflowScript))[0]!.task;
     const fencedSentinel = "PRIVATE_AXIS_FENCE_PROSE_SENTINEL";
-    const standardsJson = JSON.stringify({ status: "pass", summary: "Standards passed", findings: [], evidenceRefs: [] });
+    const standardsJson = JSON.stringify({
+      status: "pass",
+      summary: "Standards passed",
+      findings: [],
+      evidenceRefs: [],
+      acceptanceReport: { private: fencedSentinel },
+    });
     const projectedStandards = await toolResultHook!({
       toolCallId: "standards",
       toolName: "subagent",
@@ -219,6 +225,7 @@ test("axisConcurrency=1 descriptor blocks dual launch and admits Standards then 
     assert.equal(projectedStandards?.isError, undefined);
     assert.equal(JSON.stringify(projectedStandards).includes(fencedSentinel), false);
     assert.equal(existsSync(join(root, "standards-axis.json")), true);
+    assert.equal(JSON.parse(readFileSync(join(root, "standards-axis.json"), "utf8")).result.acceptanceReport, undefined);
     const spec = { ...reviewCall, workflowScript: reviewWorkflowScript([reviewTasks[1]!]) };
     assert.equal(await toolCallHook!({ toolCallId: "spec", toolName: "subagent", input: spec }), undefined);
     const specTask = workflowEntries(spec.workflowScript)[0]!.task;
