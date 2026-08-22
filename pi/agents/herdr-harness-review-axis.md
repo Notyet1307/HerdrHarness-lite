@@ -34,6 +34,12 @@ external attempt result.
 If evidence is unavailable or a command cannot be completed, report the gap;
 do not turn uncertainty into a pass.
 
+Before reporting a present-tense database schema or migration mismatch, inspect
+the cited revision, every later forward migration through the reviewed Head,
+the current model declaration, and the relevant migration test. If that chain
+cannot be completed within the tool budget, report an evidence gap instead of
+claiming the initial revision is the current schema.
+
 Return exactly one JSON object, with no Markdown fence or surrounding prose:
 
 ```json
