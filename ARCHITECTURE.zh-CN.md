@@ -369,3 +369,9 @@ Fleet 加载时绑定每个项目配置的 digest，并把该 digest 交给单�
 Fleet 状态位于独立 `fleet-state.json`，项目业务真相仍位于各项目 `state.json`。Supervisor 在启动 child 前要求初始 Fleet checkpoint 成功；运行中的观测 checkpoint 失败只告警并继续隔离监督，避免 Fleet 存储降级扩散成兄弟项目失控。两类状态在原子提交成功后，即使后续 audit append 失败，也不得向调用方伪装成状态未提交。
 
 删除这些边界前必须先盘点真实 ledger、进程参数、配置和 transport 流量，并提供迁移、测试与回滚证据。
+
+## 14. Provider / Runtime Canary
+
+Canary 是独立的本地实验入口，不调用 HarnessController.tick() 或任何 GitHub port。它在专用 state directory 中生成固定 disposable repository，并直接复用模块化 Attempt preparation/driver、Worker/Reviewer runtime adapter、Reviewer validation 和 Git gate。每个 repetition 使用独立 Job、Attempt、branch、worktree 与 terminal unit receipt；恢复时 running Attempt 只能继续 observation，不能重新 dispatch。
+
+主要 A/B 只聚合 serial measured units；stress、deterministic fault simulation 和 unsupported cells 分开报告。Worker custom Provider 与 canonical OAuth Reviewer axis concurrency 2 保持 unsupported，不通过修改 identity、credential 或 Reviewer policy 形成实验格子。Canary 证明本地 durable result、exact HEAD、clean worktree 和 Git fixed point，不创建或声称 GitHub delivery fixed point。

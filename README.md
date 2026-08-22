@@ -142,6 +142,7 @@ The public `HarnessController` constructor and `tick()` contract remain unchange
 - [Controller/Fleet ADR](./docs/adr/0004-modular-controller-and-project-fleet.md): this change's durable boundaries.
 - [Fleet runbook](./docs/fleet.zh-CN.md): multi-project configuration, isolation, supervision, and recovery.
 - [Operator runbook](./docs/runbooks/operator.zh-CN.md): single-project setup, canary, run, recovery, upgrade, and rollback.
+- [Provider/runtime canary](./docs/runbooks/provider-runtime-canary.zh-CN.md): isolated A/B matrix, resume, stress group, and reports.
 - [Telegram integration](./integrations/hermes-telegram/README.md): standalone Bridge and Hermes compatibility configuration.
 - [Telegram cutover](./docs/runbooks/telegram-cutover.md): deployment, canary, and rollback.
 - [Architecture decisions](./docs/adr/): durable reasons behind Attempt integrity, context closure, retry ownership, controlled compaction, and Fleet isolation.
