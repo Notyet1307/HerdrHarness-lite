@@ -72,6 +72,8 @@ pi --version
 npm run build
 node dist/src/cli.js --help
 node dist/src/fleet-cli.js --help
+node dist/src/transport-cli.js project status --config /PRIVATE/PATH/project-observer-v2.json --json v2
+node dist/src/transport-cli.js fleet status --config /PRIVATE/PATH/fleet-observer.json --json v2
 ```
 
 `dist/` 是本地生成物，不得提交。

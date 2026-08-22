@@ -156,6 +156,13 @@ Supervisor 在启动任何 child 前必须成功写入初始 Fleet checkpoint。
 
 项目 stdout/stderr 以带 `projectId` 的 JSON envelope 转发，但不会复制进 `fleet-state.json`，避免未脱敏的 child 输出进入持久状态。一次性 `tick` 报告的输出仍受 `maxLogBytes` 限制。
 
+独立 `fleet-observer` 只读取真实 Fleet status projection，比较 Supervisor down/up、config drift、项目 process phase 与 Controller health。它不会发送项目 workflow incident；该职责仍属于每个 Project Observer。Fleet Observer 的 `routes` 显式把允许大写、点和下划线的 Fleet project ID 映射为 callback-safe 短 route ID，且不会读写项目 ledger。
+
+```bash
+node dist/src/transport-cli.js fleet status --config /PRIVATE/PATH/fleet-observer.json --json v2
+node dist/src/fleet-observer.js run --config /PRIVATE/PATH/fleet-observer.json --once
+```
+
 ## 7. 仍然不提供的能力
 
 - 同一项目多个 Issue 并行；

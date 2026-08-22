@@ -20,6 +20,7 @@ import { type AutomaticRecovery, type HarnessState, type Job, type JobState } fr
 import { isControllerAnalystFailure, operatorActionsFor } from "./policy.js";
 import { controllerHeartbeatPath } from "./controller-heartbeat.js";
 import { formatSafePiRpcDiagnostic } from "./pi-rpc-diagnostics.js";
+import { projectObserverTransportVersion, runProjectObserverV2 } from "./observer/project-observer-v2.js";
 
 const MAX_MESSAGE_LENGTH = 3_900;
 const MAX_OUTBOX = 512;
@@ -107,8 +108,10 @@ type ObserverState = {
 
 async function main(argv: string[]): Promise<number> {
   if (argv[2] !== "run") throw new Error("usage: hermes-observer run --config /absolute/bridge.json [--once]");
-  const config = loadConfig(requiredFlag(argv, "--config"));
+  const configPath = requiredFlag(argv, "--config");
   const once = argv.includes("--once");
+  if (projectObserverTransportVersion(configPath) === 2) return runProjectObserverV2(configPath, once);
+  const config = loadConfig(configPath);
 
   for (;;) {
     await cycle(config);

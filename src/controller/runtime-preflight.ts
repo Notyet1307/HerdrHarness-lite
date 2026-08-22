@@ -3,7 +3,7 @@ import { buildExecutionSnapshot, executionResource } from "../attempt-plan.js";
 import { QUALIFIED_CONTROLLED_COMPACTION_PI_VERSION } from "../compatibility.js";
 import { digest, type Attempt, type ExecutionSnapshot, type HarnessState, type Job } from "../model.js";
 import { piRpcAgentDir } from "../pi-rpc-spool.js";
-import { message, result } from "./helpers.js";
+import { message, preflightFailureResult } from "./helpers.js";
 import { PI_RPC_SDK_ENTRY } from "./resources.js";
 import { rpcEnabled, runtimeRole, snapshotCredentialMode, workerCompactionMode } from "./runtime-contract.js";
 import type { ControllerContext } from "./context.js";
@@ -89,7 +89,7 @@ export async function runRuntimePreflight(
   } catch (error) {
     return {
       ok: false,
-      result: result(false, "preflight_failed", jobId, message(error)),
+      result: preflightFailureResult(jobId, error),
     };
   }
 }

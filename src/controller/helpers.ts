@@ -1,9 +1,24 @@
 import type { Attempt, AttemptResult, EvidenceItem, PullRequestCheck, CiFailure } from "../model.js";
 import { digest } from "../model.js";
 import type { TickAction, TickResult } from "./types.js";
+import { safePiRpcDiagnosticFromError } from "../pi-rpc-diagnostics.js";
 
 export function result(ok: boolean, action: TickAction, jobId: string | null, messageValue: string): TickResult {
   return { ok, action, jobId, message: messageValue };
+}
+
+export function preflightFailureResult(jobId: string | null, error: unknown): TickResult {
+  const base = result(false, "preflight_failed", jobId, message(error));
+  const runtimeDiagnostic = safePiRpcDiagnosticFromError(error);
+  if (runtimeDiagnostic) {
+    return {
+      ...base,
+      failureCode: runtimeDiagnostic.code ?? runtimeDiagnostic.failureCode,
+      retryable: runtimeDiagnostic.retryable,
+      runtimeDiagnostic,
+    };
+  }
+  return base;
 }
 
 export function safeToken(value: string): string {

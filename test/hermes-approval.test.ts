@@ -135,6 +135,47 @@ test("Telegram approval card exposes bounded decisions and hold consumes only th
   }
 });
 
+test("Telegram approval emits a Transport v2 event without HTML or workflow authority", () => {
+  const root = mkdtempSync(join(tmpdir(), "herdr-hermes-transport-card-"));
+  try {
+    const stateDir = join(root, "harness-state");
+    const harnessConfig = join(root, "harness.json");
+    const observerConfig = join(root, "observer.json");
+    const approvalState = join(root, "approval", "state.json");
+    mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+    writeFileSync(harnessConfig, JSON.stringify({ stateDir, herdr: { session: "test" }, analyst: { command: "/usr/bin/false" } }), { encoding: "utf8", mode: 0o600 });
+    writeFileSync(observerConfig, JSON.stringify({
+      transportVersion: 2,
+      routeId: "exposure",
+      projectId: "Exposure-Agent",
+      fleetId: "engineering-fleet",
+      harnessConfig,
+      nodeBin: process.execPath,
+      harnessCliScript: resolve("dist/src/cli.js"),
+      approvalState,
+      telegramAllowedUser: "123456789",
+    }), { encoding: "utf8", mode: 0o600 });
+    writeFileSync(join(stateDir, "state.json"), `${JSON.stringify(blockedState())}\n`, { encoding: "utf8", mode: 0o600 });
+
+    const requested = run("request", observerConfig, undefined, true, ["--transport-v2"]);
+    assert.equal(requested.status, 0, requested.stderr);
+    const payload = JSON.parse(requested.stdout);
+    assert.equal(payload.ok, true);
+    assert.equal("card" in payload, false);
+    assert.equal(payload.envelope.version, 2);
+    assert.equal(payload.envelope.kind, "event");
+    assert.equal(payload.envelope.category, "operator.approval");
+    assert.equal(payload.envelope.routeId, "exposure");
+    assert.equal(payload.envelope.projectId, "Exposure-Agent");
+    assert.match(payload.envelope.approval.token, /^[0-9A-F]{16}$/);
+    assert.equal(JSON.stringify(payload.envelope).includes("<b>"), false);
+    assert.equal(JSON.stringify(payload.envelope).includes("SECRET ISSUE BODY"), false);
+    assert.equal("approveCallback" in payload.envelope.approval, false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("Telegram challenge can consume an exact reassessment option with a bounded operator reason", () => {
   const root = mkdtempSync(join(tmpdir(), "herdr-hermes-reassess-"));
   try {

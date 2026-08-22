@@ -7,7 +7,7 @@ import { digest, evolveJob, type Attempt, type ExecutionSnapshot, type HarnessSt
 import { renderAttemptPrompt } from "../prompts.js";
 import { reviewerCheckpointIdentity } from "../reviewer-checkpoints.js";
 import type { ControllerContext } from "./context.js";
-import { message, result, safeToken, trimSlash } from "./helpers.js";
+import { message, preflightFailureResult, result, safeToken, trimSlash } from "./helpers.js";
 import { BUNDLED_REVIEW_AXIS_AGENT, CREDENTIAL_STARTUP_LAUNCHER, PI_RPC_RUNNER, PI_RPC_SDK_ENTRY } from "./resources.js";
 import { rpcEnabled, runtimeRole, workerCompactionMode } from "./runtime-contract.js";
 import { configuredRuntimeTimeouts, configuredValidationTimeoutMs, snapshotRuntimeTimeouts } from "../runtime-timeouts.js";
@@ -141,7 +141,7 @@ export async function prepareAttempt(ctx: ControllerContext, state: HarnessState
       ],
     });
   } catch (error) {
-    return result(false, "preflight_failed", job.id, message(error));
+    return preflightFailureResult(job.id, error);
   }
   attempt = { ...attempt, executionSnapshot };
   if (lane === "reviewer" && handoff?.kind === "approved_recovery" && handoff.source.attemptId) {
@@ -184,12 +184,12 @@ export async function prepareAttempt(ctx: ControllerContext, state: HarnessState
           : {}),
       };
     } catch (error) {
-      return result(false, "preflight_failed", job.id, message(error));
+      return preflightFailureResult(job.id, error);
     }
   }
   if (lane === "reviewer" && attempt.reviewerValidationReceipt && executionSnapshot.runtimeDeadlineAt === undefined) {
     const activatedAt = Date.parse(ctx.deps.clock.now());
-    if (!Number.isFinite(activatedAt)) return result(false, "preflight_failed", job.id, "Reviewer runtime activation time is invalid");
+    if (!Number.isFinite(activatedAt)) return preflightFailureResult(job.id, new Error("Reviewer runtime activation time is invalid"));
     executionSnapshot = {
       ...executionSnapshot,
       runtimeDeadlineAt: new Date(

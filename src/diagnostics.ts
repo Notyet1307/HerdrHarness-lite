@@ -50,7 +50,7 @@ export type DiagnosticProject = {
   redactIssue: boolean;
 };
 
-export function diagnosticProject(config: HarnessConfig, projectId?: string): DiagnosticProject {
+export function diagnosticProject(config: Pick<HarnessConfig, "repo" | "stateDir" | "diagnostics">, projectId?: string): DiagnosticProject {
   const diagnostics = config.diagnostics;
   if (diagnostics !== undefined && (
     !diagnostics || typeof diagnostics !== "object" || Array.isArray(diagnostics)

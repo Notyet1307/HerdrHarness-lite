@@ -6,16 +6,15 @@ It removes the custom Hermes callback dependency while preserving the existing
 Harness status, incident, and exact-approval CLIs.
 
 ```text
-Harness ledger + Controller log + heartbeat
-  -> one Observer per lane
-  -> deliveryCommand
+Harness / Fleet authority
+  -> versioned read-only Transport projection
+  -> Project Observer / Fleet Observer
+  -> JSON envelope without Telegram HTML
   -> one standalone Bridge per Bot Token
-  -> Telegram
+  -> Telegram HTML and buttons
 
-Telegram /harness and callbacks
-  -> Bridge
-  -> lane status/approval commands
-  -> Harness policy and ledger CAS
+Telegram callback -> Bridge routeId -> Harness challenge CLI
+  -> current Core-owned operator option -> decide + ledger CAS
 ```
 
 The Controller does not import this integration. Observer state, Bridge offset,
@@ -30,6 +29,11 @@ for deployment, canary, and rollback.
 | --- | --- | --- | --- |
 | Standalone Bridge | `bridge.standalone.config.example.json` with `deliveryCommand` | Bridge | Recommended |
 | Hermes compatibility | `bridge.config.example.json` without `deliveryCommand` | Harness-specific Hermes Gateway | Existing deployments only |
+
+Transport v2 uses [`project-observer-v2.config.example.json`](./project-observer-v2.config.example.json)
+and [`fleet-observer.config.example.json`](./fleet-observer.config.example.json).
+Omitting `transportVersion` keeps the existing v1 payload and state path for a
+rolling upgrade.
 
 Never run both consumers with the same Bot Token. An existing dedicated Bot can
 be reused after the old consumer is stopped. Use a second Bot when the migration
@@ -47,9 +51,12 @@ must have no polling interruption.
    Telegram user IDs out of Git, plist arguments, logs, and documentation examples.
 6. Start the Bridge as the only update consumer, then start one Observer per lane.
 
-The Observer sends one card JSON object to `deliveryCommand` on stdin. Plain text
-messages carry `parseMode: "plain"`; approval and hold cards use validated HTML
-and bounded callback data.
+The v1 Observer sends one legacy card JSON object to `deliveryCommand`. The v2
+Observers send a strict `project-view`, `fleet-view`, `diagnostic-view`, or
+`event` envelope. Envelopes contain no Telegram HTML; the Bridge is the only
+renderer. The Project Observer migrates existing Observer state version 2 to
+version 3 while preserving offsets, automatic-recovery count, pending delivery
+retries, and its current baseline. Fleet Observer state is independent.
 
 Configuration files must use absolute paths, must not be symlinks or
 group/other-writable, and should use mode `0600`. Every Harness lane must also
@@ -63,6 +70,9 @@ Setup is complete only when:
 - an invalid or expired approval challenge changes no ledger state;
 - Observer restart does not replay historical normal progress;
 - Controller, Observer, and Bridge restart independently.
+- Fleet Observer can restart without replaying its current process phases.
+- the parent-directory contract check reports identical schema and fixture
+  digests in both repositories.
 
 ## Commands and notification policy
 
@@ -82,25 +92,34 @@ Single lane:
 /harness cancel bounded cancellation reason
 ```
 
-Multiple lanes:
+Multiple routes:
 
 ```text
 /harness
 /harness exposure status
-/harness exposure incident
 /harness exposure why
 /harness exposure actions
+/harness exposure health
+/harness exposure diagnose 7
 /harness exposure retry
+/harness_health exposure
+/harness_diagnose exposure 30
 ```
 
-`/harness` returns one compact line per lane when more than one lane exists.
-Callbacks carry the lane ID; the Bridge rejects an unknown lane and never edits
-the ledger directly.
+With Fleet configured, `/harness` renders the real Supervisor lease, heartbeat,
+config drift and project process phases. It does not synthesize Fleet health by
+joining project status strings. `blocked` remains a workflow state, not a process
+health failure. Callbacks carry only the short lowercase `routeId`; the actual
+Fleet `projectId` may contain uppercase letters, dots, or underscores and never
+enters callback data.
 
-Observer proactively sends only task start, terminal state, incidents, Analyst
-decisions, exact approval cards, and automation health changes. Normal
-Worker/Reviewer/publish/merge-wait progress remains available through
-`/harness`, avoiding notification noise.
+Project Observer proactively sends only task start, terminal state, new
+incidents/decisions, exact approval, automatic recovery, Controller/ledger
+health transitions and quota exhaustion. Fleet Observer sends only Supervisor
+down/up, config drift, process backoff/tripped/error/adopted/recovery, and
+Controller health transitions. Normal Worker/Reviewer phases, validation ready,
+checkpoint persistence, PR/CI waiting, heartbeat updates and diagnostic count
+changes remain pull-only.
 
 Operator cards are ten-minute, single-use challenges bound to the exact option,
 job, revision, incident, analysis, Attempt, lane, and HEAD. The Bridge accepts
@@ -110,11 +129,41 @@ Harness ledger CAS. The standalone Bridge supports the expanded command set;
 the Hermes compatibility plugin intentionally retains its legacy
 `status|incident|approve` vocabulary.
 
-## Multi-repository lanes
+## Transport v2 read-only CLI
 
-The standalone Bridge owns its lane map in its own `config.json`; do not use
-`fleet.config.example.json` for standalone mode. Each lane maps to one Observer
-config and one pair of Harness status/approval commands.
+```bash
+node dist/src/transport-cli.js project status --config /absolute/project-observer-v2.json --json v2
+node dist/src/transport-cli.js project health --config /absolute/project-observer-v2.json --json v2
+node dist/src/transport-cli.js project diagnose --config /absolute/project-observer-v2.json --days 7 --json v2
+node dist/src/transport-cli.js fleet status --config /absolute/fleet-observer.json --json v2
+node dist/src/transport-cli.js fleet diagnose --config /absolute/fleet-observer.json --days 30 --json v2
+```
+
+Project/Fleet projections omit task bodies, raw evidence, result summaries,
+absolute private paths, raw Provider output, auth paths, tokens and transcripts.
+Provider/model display values are stable SHA-256 IDs. Diagnostic views contain
+aggregates only and preserve `partial`, `corrupt`, and `unknown` explicitly.
+
+The committed schema and seven golden fixtures live under `schemas/` and
+`test/fixtures/telegram-transport-v2/`. From the parent directory:
+
+```bash
+node HerdrHarness-lite/scripts/check-telegram-transport-contract.mjs harness-telegram-bridge
+cd HerdrHarness-lite && npm run canary:telegram-transport -- ../harness-telegram-bridge
+```
+
+## Multi-repository routes
+
+The standalone Bridge owns its route map in its own `config.json`. Each route
+maps to one actual Fleet project ID, one Project Observer config, and fixed
+view/approval/diagnose argv. Fleet Observer repeats the projectId-to-routeId map
+so its envelopes are callback-safe; Bridge startup reads the real fleet-view and
+rejects any configured projectId missing from that view.
+
+Bridge Fleet config keeps the Fleet Observer `configPath` separate from the
+fixed `transport-cli.js fleet` / `fleet-diagnose` argv prefixes, matching the
+Project command convention; Bridge appends only allowlisted view/day and
+`--json v2` arguments.
 
 `fleet.config.example.json` belongs only to the legacy Hermes plugin. In that
 mode, set `HERDR_HARNESS_FLEET_CONFIG` for the Hermes Gateway and every Observer.

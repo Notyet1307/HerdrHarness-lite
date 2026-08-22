@@ -1,0 +1,338 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Notyet1307/HerdrHarness-lite/schemas/telegram-transport-v2.schema.json",
+  "title": "Herdr Harness Telegram Transport v2",
+  "oneOf": [
+    { "$ref": "#/$defs/projectView" },
+    { "$ref": "#/$defs/fleetView" },
+    { "$ref": "#/$defs/diagnosticView" },
+    { "$ref": "#/$defs/event" }
+  ],
+  "$defs": {
+    "routeId": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,31}$" },
+    "projectId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$" },
+    "nullableProjectId": { "oneOf": [{ "$ref": "#/$defs/projectId" }, { "type": "null" }] },
+    "time": { "type": "string", "format": "date-time", "maxLength": 64 },
+    "nullableTime": { "oneOf": [{ "$ref": "#/$defs/time" }, { "type": "null" }] },
+    "nullableString": { "type": ["string", "null"], "maxLength": 512 },
+    "nullableCode": { "type": ["string", "null"], "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$" },
+    "jobState": { "enum": ["claimed", "worker_ready", "worker_running", "reviewer_ready", "reviewer_running", "publish_ready", "awaiting_merge", "blocked", "recovery_approved", "done", "cancelled", null] },
+    "fleetWorkflowState": { "enum": ["idle", "claimed", "worker_ready", "worker_running", "reviewer_ready", "reviewer_running", "publish_ready", "awaiting_merge", "blocked", "recovery_approved", "done", "cancelled", null] },
+    "attemptPhase": { "enum": ["prepared", "pane_ready", "agent_ready", "running", "settled", null] },
+    "incidentClass": { "enum": ["agent_decision", "agent_blocked", "review_uncertain", "reviewer_preflight_dirty", "validation_infrastructure", "infrastructure_exhausted", "integrity_violation", "stale_task", "ci_failure", "ci_rework_exhausted", "analyst_unavailable", null] },
+    "outputBucket": { "enum": ["lt64k", "64k_256k", "256k_1m", "gte1m", "unknown", null] },
+    "nullableInteger": { "type": ["integer", "null"], "minimum": 0 },
+    "nullableBoolean": { "type": ["boolean", "null"] },
+    "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "nullableDigest": { "oneOf": [{ "$ref": "#/$defs/digest" }, { "type": "null" }] },
+    "runtimeId": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "nullableRuntimeId": { "oneOf": [{ "$ref": "#/$defs/runtimeId" }, { "type": "null" }] },
+    "controller": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["health", "lease", "heartbeat", "heartbeatAgeMs", "pidAlive"],
+      "properties": {
+        "health": { "enum": ["healthy", "degraded", "down", "unknown"] },
+        "lease": { "enum": ["alive", "stale", "absent", "malformed"] },
+        "heartbeat": { "enum": ["fresh", "stale", "absent", "malformed"] },
+        "heartbeatAgeMs": { "$ref": "#/$defs/nullableInteger" },
+        "pidAlive": { "$ref": "#/$defs/nullableBoolean" }
+      }
+    },
+    "action": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "effect"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "kind": { "enum": ["approve_retry", "reassess", "resolve_decision", "cancel"] },
+        "effect": { "enum": ["retry_fresh_worker", "retry_fresh_reviewer", "rerun_analysis", "cancel_and_requeue"] }
+      }
+    },
+    "keyCount": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key", "count"],
+      "properties": {
+        "key": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "count": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "projectView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "kind", "generatedAt", "routeId", "projectId", "fleetId", "project", "workflow", "runtime", "reviewer", "failure", "recovery", "actions"],
+      "properties": {
+        "version": { "const": 2 },
+        "kind": { "const": "project-view" },
+        "generatedAt": { "$ref": "#/$defs/time" },
+        "routeId": { "$ref": "#/$defs/routeId" },
+        "projectId": { "$ref": "#/$defs/projectId" },
+        "fleetId": { "$ref": "#/$defs/nullableProjectId" },
+        "project": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["repo", "controller"],
+          "properties": {
+            "repo": { "type": "string", "minLength": 1, "maxLength": 256 },
+            "controller": { "$ref": "#/$defs/controller" }
+          }
+        },
+        "workflow": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode", "state", "jobId", "issueNumber", "revision", "reviewRound", "maxReviewRounds", "lane", "phase", "attemptId", "headSha", "pullRequest", "incidentClass", "incidentLane"],
+          "properties": {
+            "mode": { "enum": ["idle", "running", "waiting", "needs_decision", "terminal"] },
+            "state": { "$ref": "#/$defs/jobState" },
+            "jobId": { "type": ["string", "null"], "maxLength": 256 },
+            "issueNumber": { "$ref": "#/$defs/nullableInteger" },
+            "revision": { "$ref": "#/$defs/nullableInteger" },
+            "reviewRound": { "$ref": "#/$defs/nullableInteger" },
+            "maxReviewRounds": { "$ref": "#/$defs/nullableInteger" },
+            "lane": { "enum": ["worker", "reviewer", null] },
+            "phase": { "$ref": "#/$defs/attemptPhase" },
+            "attemptId": { "type": ["string", "null"], "maxLength": 256 },
+            "headSha": { "type": ["string", "null"], "pattern": "^[0-9a-f]{40}$" },
+            "pullRequest": {
+              "oneOf": [
+                { "type": "null" },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["number", "url"],
+                  "properties": {
+                    "number": { "type": "integer", "minimum": 1 },
+                    "url": { "type": "string", "minLength": 1, "maxLength": 512 }
+                  }
+                }
+              ]
+            },
+            "incidentClass": { "$ref": "#/$defs/incidentClass" },
+            "incidentLane": { "enum": ["worker", "reviewer", "controller", null] }
+          }
+        },
+        "runtime": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["adapter", "provider", "model", "runtimeVersion", "credentialMode", "axisConcurrency", "compactionMode", "lastProgressType", "lastProgressAt", "elapsedMs", "runtimeDeadlineAt", "remainingBucket", "resultPresent"],
+          "properties": {
+            "adapter": { "enum": ["herdr-pi-cli", "pi-rpc", null] },
+            "provider": { "$ref": "#/$defs/nullableRuntimeId" },
+            "model": { "$ref": "#/$defs/nullableRuntimeId" },
+            "runtimeVersion": { "type": ["string", "null"], "maxLength": 64 },
+            "credentialMode": { "enum": ["runtime-default", "canonical-oauth", "canonical-model-config", null] },
+            "axisConcurrency": { "enum": [1, 2, null] },
+            "compactionMode": { "enum": ["runtime-default", "disabled", "controlled-threshold", null] },
+            "lastProgressType": { "type": ["string", "null"], "maxLength": 128 },
+            "lastProgressAt": { "$ref": "#/$defs/nullableTime" },
+            "elapsedMs": { "$ref": "#/$defs/nullableInteger" },
+            "runtimeDeadlineAt": { "$ref": "#/$defs/nullableTime" },
+            "remainingBucket": { "enum": ["expired", "lt5m", "5m_15m", "15m_60m", "gte60m", "unknown"] },
+            "resultPresent": { "$ref": "#/$defs/nullableBoolean" }
+          }
+        },
+        "reviewer": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["validationStatus", "validationDurationMs", "validationOutputByteBuckets", "validationOutputDigests", "reusedCheckpointStages", "missingAxisStages"],
+          "properties": {
+            "validationStatus": { "enum": ["passed", "failed-checks", "infrastructure-error", null] },
+            "validationDurationMs": { "$ref": "#/$defs/nullableInteger" },
+            "validationOutputByteBuckets": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["stdout", "stderr"],
+              "properties": {
+                "stdout": { "$ref": "#/$defs/outputBucket" },
+                "stderr": { "$ref": "#/$defs/outputBucket" }
+              }
+            },
+            "validationOutputDigests": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["stdout", "stderr"],
+              "properties": {
+                "stdout": { "$ref": "#/$defs/nullableDigest" },
+                "stderr": { "$ref": "#/$defs/nullableDigest" }
+              }
+            },
+            "reusedCheckpointStages": { "type": "array", "maxItems": 5, "uniqueItems": true, "items": { "enum": ["reviewer-preflight", "standards-axis", "spec-axis", "validation", "reviewer-final"] } },
+            "missingAxisStages": { "type": "array", "maxItems": 2, "uniqueItems": true, "items": { "enum": ["standards-axis", "spec-axis"] } }
+          }
+        },
+        "failure": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["taxonomyDomain", "failureDomain", "failureCode", "failureDetailCode", "retryable", "partial", "corrupt", "unknown"],
+          "properties": {
+            "taxonomyDomain": { "enum": ["execution", "observation", "acceptance", "deterministic", null] },
+            "failureDomain": { "$ref": "#/$defs/nullableCode" },
+            "failureCode": { "$ref": "#/$defs/nullableCode" },
+            "failureDetailCode": { "$ref": "#/$defs/nullableCode" },
+            "retryable": { "$ref": "#/$defs/nullableBoolean" },
+            "partial": { "type": "boolean" },
+            "corrupt": { "type": "boolean" },
+            "unknown": { "type": "boolean" }
+          }
+        },
+        "recovery": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["automaticRule", "action", "notBefore", "quotaConsumed", "humanActionRequired"],
+          "properties": {
+            "automaticRule": { "enum": ["worker_pre_dispatch_infrastructure", "reviewer_same_head_infrastructure", "provider_pre_side_effect_transient", null] },
+            "action": { "enum": ["retry_fresh_worker", "retry_fresh_reviewer", null] },
+            "notBefore": { "$ref": "#/$defs/nullableTime" },
+            "quotaConsumed": { "type": "boolean" },
+            "humanActionRequired": { "type": "boolean" }
+          }
+        },
+        "actions": { "type": "array", "maxItems": 4, "items": { "$ref": "#/$defs/action" } }
+      }
+    },
+    "fleetProject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["routeId", "projectId", "enabled", "phase", "owned", "pidPresent", "pidAlive", "nextStartAt", "restartCount", "restartWindowMs", "lastExitCategory", "controller", "workflow"],
+      "properties": {
+        "routeId": { "$ref": "#/$defs/routeId" },
+        "projectId": { "$ref": "#/$defs/projectId" },
+        "enabled": { "type": "boolean" },
+        "phase": { "enum": ["pending", "starting", "running", "adopted", "backoff", "tripped", "stopping", "stopped", "disabled", "unselected", "error"] },
+        "owned": { "type": "boolean" },
+        "pidPresent": { "type": "boolean" },
+        "pidAlive": { "$ref": "#/$defs/nullableBoolean" },
+        "nextStartAt": { "$ref": "#/$defs/nullableTime" },
+        "restartCount": { "type": "integer", "minimum": 0 },
+        "restartWindowMs": { "type": "integer", "minimum": 1 },
+        "lastExitCategory": { "enum": ["clean", "error", "signal", "unknown", null] },
+        "controller": { "$ref": "#/$defs/controller" },
+        "workflow": {
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["state", "issueNumber", "revision", "incidentClass"],
+              "properties": {
+                "state": { "$ref": "#/$defs/fleetWorkflowState" },
+                "issueNumber": { "$ref": "#/$defs/nullableInteger" },
+                "revision": { "$ref": "#/$defs/nullableInteger" },
+                "incidentClass": { "$ref": "#/$defs/incidentClass" }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "fleetView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "kind", "generatedAt", "routeId", "projectId", "fleetId", "fleet", "projects"],
+      "properties": {
+        "version": { "const": 2 },
+        "kind": { "const": "fleet-view" },
+        "generatedAt": { "$ref": "#/$defs/time" },
+        "routeId": { "$ref": "#/$defs/routeId" },
+        "projectId": { "type": "null" },
+        "fleetId": { "$ref": "#/$defs/projectId" },
+        "fleet": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["health", "lease", "heartbeat", "heartbeatAgeMs", "runtimeError", "configDrift", "supervisorPidAlive", "stopping"],
+          "properties": {
+            "health": { "enum": ["healthy", "degraded", "down", "config-drift"] },
+            "lease": { "enum": ["alive", "stale", "absent", "malformed"] },
+            "heartbeat": { "enum": ["fresh", "stale", "absent", "malformed"] },
+            "heartbeatAgeMs": { "$ref": "#/$defs/nullableInteger" },
+            "runtimeError": { "type": "boolean" },
+            "configDrift": { "type": "boolean" },
+            "supervisorPidAlive": { "$ref": "#/$defs/nullableBoolean" },
+            "stopping": { "type": "boolean" }
+          }
+        },
+        "projects": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/fleetProject" } }
+      }
+    },
+    "diagnostic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["days", "partial", "corruptProjects", "corruptAttempts", "corruptArtifacts", "totalAttempts", "partialAttempts", "unknownAttempts", "resultPresentButTerminalMissing", "runtimeStallsAndDeadlines", "credentialFailures", "validationInfrastructure", "automaticRecoveryCount", "topFailureCodes", "byLane", "byProviderModel"],
+      "properties": {
+        "days": { "enum": [7, 30] },
+        "partial": { "type": "boolean" },
+        "corruptProjects": { "type": "integer", "minimum": 0 },
+        "corruptAttempts": { "type": "integer", "minimum": 0 },
+        "corruptArtifacts": { "type": "integer", "minimum": 0 },
+        "totalAttempts": { "type": "integer", "minimum": 0 },
+        "partialAttempts": { "type": "integer", "minimum": 0 },
+        "unknownAttempts": { "type": "integer", "minimum": 0 },
+        "resultPresentButTerminalMissing": { "type": "integer", "minimum": 0 },
+        "runtimeStallsAndDeadlines": { "type": "integer", "minimum": 0 },
+        "credentialFailures": { "type": "integer", "minimum": 0 },
+        "validationInfrastructure": { "type": "integer", "minimum": 0 },
+        "automaticRecoveryCount": { "type": "integer", "minimum": 0 },
+        "topFailureCodes": { "type": "array", "maxItems": 8, "items": { "$ref": "#/$defs/keyCount" } },
+        "byLane": { "type": "array", "maxItems": 3, "items": { "$ref": "#/$defs/keyCount" } },
+        "byProviderModel": { "type": "array", "maxItems": 8, "items": { "$ref": "#/$defs/keyCount" } }
+      }
+    },
+    "diagnosticView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "kind", "generatedAt", "routeId", "projectId", "fleetId", "diagnostic"],
+      "properties": {
+        "version": { "const": 2 },
+        "kind": { "const": "diagnostic-view" },
+        "generatedAt": { "$ref": "#/$defs/time" },
+        "routeId": { "$ref": "#/$defs/routeId" },
+        "projectId": { "$ref": "#/$defs/nullableProjectId" },
+        "fleetId": { "$ref": "#/$defs/nullableProjectId" },
+        "diagnostic": { "$ref": "#/$defs/diagnostic" }
+      }
+    },
+    "fact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["label", "value"],
+      "properties": {
+        "label": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "value": { "type": "string", "minLength": 1, "maxLength": 512 }
+      }
+    },
+    "event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "kind", "generatedAt", "routeId", "projectId", "fleetId", "eventId", "dedupeKey", "occurredAt", "severity", "category", "title", "summary", "facts", "actionRequired", "operatorActionKinds"],
+      "properties": {
+        "version": { "const": 2 },
+        "kind": { "const": "event" },
+        "generatedAt": { "$ref": "#/$defs/time" },
+        "routeId": { "$ref": "#/$defs/routeId" },
+        "projectId": { "$ref": "#/$defs/nullableProjectId" },
+        "fleetId": { "$ref": "#/$defs/nullableProjectId" },
+        "eventId": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "dedupeKey": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "occurredAt": { "$ref": "#/$defs/time" },
+        "severity": { "enum": ["info", "warning", "critical"] },
+        "category": { "enum": ["project.started", "project.done", "project.cancelled", "incident.new", "analyst.decision", "operator.approval", "recovery.automatic", "recovery.exhausted", "controller.down", "controller.up", "fleet.down", "fleet.up", "fleet.config-drift", "project.backoff", "project.tripped", "project.error", "project.adopted", "project.running", "ledger.unavailable", "ledger.restored", "state.unavailable", "state.restored", "preflight.failed", "runtime.stall", "runtime.deadline"] },
+        "title": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "summary": { "type": "string", "minLength": 1, "maxLength": 1000 },
+        "facts": { "type": "array", "maxItems": 16, "items": { "$ref": "#/$defs/fact" } },
+        "actionRequired": { "type": "boolean" },
+        "operatorActionKinds": { "type": "array", "maxItems": 4, "uniqueItems": true, "items": { "enum": ["approve_retry", "reassess", "resolve_decision", "cancel"] } },
+        "approval": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["token", "approveLabel", "expiresAt"],
+          "properties": {
+            "token": { "type": "string", "pattern": "^[0-9A-F]{16}$" },
+            "approveLabel": { "type": "string", "minLength": 1, "maxLength": 64 },
+            "expiresAt": { "$ref": "#/$defs/time" }
+          }
+        }
+      }
+    }
+  }
+}
