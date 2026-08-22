@@ -520,7 +520,14 @@ function replaceStaleLease(payloadText: string): void {
     throw new CredentialStartupError("credential_lock_stale");
   }
   const replacement = payload.replacement as Partial<LeaseRecord>;
-  const observed = readLease(payload.leasePath, payload.provider, payload.credentialDomainId);
+  let observed: LeaseRecord;
+  try {
+    observed = readLease(payload.leasePath, payload.provider, payload.credentialDomainId);
+  } catch (error) {
+    if (errorCode(error) !== "ENOENT") throw error;
+    process.stdout.write("changed\n");
+    return;
+  }
   if (observed.instanceId !== payload.observedInstanceId
     || observed.heartbeat !== payload.observedHeartbeat
     || processIsAlive(observed.pid)

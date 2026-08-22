@@ -290,7 +290,7 @@ import { join } from "node:path";
 const domain = resolveCredentialDomain(process.argv[2]);
 const lease = await acquireCredentialStartupLease(domain, "openai-codex", { timeoutMs: 2000, staleAfterMs: 1, pollMs: 1 });
 process.stdout.write(lease.instanceId + "\\n");
-await new Promise((resolve) => setTimeout(resolve, 100));
+await new Promise((resolve) => setTimeout(resolve, 10));
 lease.stop();
 `);
     const [first, second] = await Promise.all([

@@ -801,6 +801,35 @@ test("durable runner still rejects every Worker UI request", () => {
   }
 });
 
+test("durable runner rejects queue commands and UI responses", () => {
+  for (const type of ["queue_update", "extension_ui_response"] as const) {
+    const fixture = rpcFixture();
+    try {
+      const { execution, plan } = runWorkerFault(fixture, { FAKE_PI_FORBIDDEN_EVENT: type });
+      assert.equal(execution.ok, true, execution.stderr);
+      assert.equal(readJson<{ ok: boolean }>(join(plan.runtimeRoot, "terminal.json")).ok, false);
+      const event = readRuntimeEvents(plan.runtimeRoot).find((entry) => entry.type === type);
+      assert.ok(event);
+      assert.equal(event.classification, "forbidden");
+      assert.equal(JSON.stringify(event).includes("PRIVATE_FORBIDDEN_SENTINEL"), false);
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("durable runner rejects a second agent_start in one Attempt", () => {
+  const fixture = rpcFixture();
+  try {
+    const { execution, plan } = runWorkerFault(fixture, { FAKE_PI_MULTIPLE_AGENT_START: "1" });
+    assert.equal(execution.ok, true, execution.stderr);
+    assert.equal(readJson<{ ok: boolean }>(join(plan.runtimeRoot, "terminal.json")).ok, false);
+    assert.equal(readRuntimeEvents(plan.runtimeRoot).filter((event) => event.type === "agent_start").length, 2);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("terminal failure remains authoritative when a durable result already exists", async () => {
   const fixture = rpcFixture();
   try {
@@ -830,20 +859,71 @@ test("terminal failure remains authoritative when a durable result already exist
   }
 });
 
-test("unknown RPC events produce a content-free policy failure", () => {
+test("qualified unknown telemetry is recorded as a content-free non-progress observation", () => {
   const fixture = rpcFixture();
   try {
-    const { execution, plan } = runWorkerFault(fixture, { FAKE_PI_UNKNOWN_EVENT: "1" });
+    const { execution, plan } = runWorkerFault(fixture, { FAKE_PI_UNKNOWN_EVENT: "telemetry" });
     assert.equal(execution.ok, true, execution.stderr);
-    assert.equal(existsSync(fixture.attempt.resultPath), false);
-    const terminal = readJson<Record<string, unknown>>(join(plan.runtimeRoot, "terminal.json"));
-    assert.deepEqual(stableFailure(terminal), {
-      domain: "execution",
-      code: "policy_violation",
-      stage: "agent-run",
-      retryable: false,
+    assert.equal(readJson<{ ok: boolean }>(join(plan.runtimeRoot, "terminal.json")).ok, true);
+    assert.equal(existsSync(fixture.attempt.resultPath), true);
+    const events = readRuntimeEvents(plan.runtimeRoot);
+    const telemetry = events.find((event) => event.type === "future_telemetry");
+    assert.ok(telemetry);
+    assert.deepEqual({
+      classification: telemetry.classification,
+      refreshesProgress: telemetry.refreshesProgress,
+    }, {
+      classification: "unknown-safe",
+      refreshesProgress: false,
     });
-    assert.equal(readFileSync(join(plan.runtimeRoot, "runtime-events.jsonl"), "utf8").includes("must-not-be-persisted"), false);
+    assert.ok(Number.isSafeInteger(telemetry.payloadBytes));
+    assert.match(String(telemetry.digest), /^[0-9a-f]{64}$/u);
+    assert.equal(JSON.stringify(events).includes("privateMetric"), false);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("unknown UI requests and retry events remain content-free policy failures", () => {
+  for (const [kind, type, sentinel] of [
+    ["ui", "future_ui_request", "PRIVATE_UI_SENTINEL"],
+    ["retry", "future_retry_event", "PRIVATE_RETRY_SENTINEL"],
+  ] as const) {
+    const fixture = rpcFixture();
+    try {
+      const { execution, plan } = runWorkerFault(fixture, { FAKE_PI_UNKNOWN_EVENT: kind });
+      assert.equal(execution.ok, true, execution.stderr);
+      assert.equal(existsSync(fixture.attempt.resultPath), false);
+      const terminal = readJson<Record<string, unknown>>(join(plan.runtimeRoot, "terminal.json"));
+      assert.deepEqual(stableFailure(terminal), {
+        domain: "execution",
+        code: "policy_violation",
+        stage: "agent-run",
+        retryable: false,
+      });
+      const events = readRuntimeEvents(plan.runtimeRoot);
+      const unknown = events.find((event) => event.type === type);
+      assert.ok(unknown);
+      assert.equal(unknown.classification, "unknown-unsafe");
+      assert.equal(unknown.refreshesProgress, false);
+      assert.ok(Number.isSafeInteger(unknown.payloadBytes));
+      assert.match(String(unknown.digest), /^[0-9a-f]{64}$/u);
+      assert.equal(JSON.stringify(events).includes(sentinel), false);
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("runner never persists an untrusted unknown unsafeReason", () => {
+  const fixture = rpcFixture();
+  try {
+    const { execution, plan } = runWorkerFault(fixture, { FAKE_PI_RAW_UNSAFE_REASON: "1" });
+    assert.equal(execution.ok, true, execution.stderr);
+    assert.equal(readJson<{ ok: boolean }>(join(plan.runtimeRoot, "terminal.json")).ok, false);
+    const events = readFileSync(join(plan.runtimeRoot, "runtime-events.jsonl"), "utf8");
+    assert.equal(events.includes("access_token_RAW_REASON_SENTINEL"), false);
+    assert.match(events, /"type":"future_event".*"classification":"unknown-unsafe".*"digest":"a{64}"/u);
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
   }
@@ -2043,6 +2123,14 @@ function receiptIdentity(plan: PiRpcPlan): Record<string, unknown> {
 
 function stableFailure(receipt: Record<string, unknown>): Record<string, unknown> {
   return Object.fromEntries(["domain", "code", "stage", "retryable"].map((key) => [key, receipt[key]]));
+}
+
+function readRuntimeEvents(runtimeRoot: string): Record<string, unknown>[] {
+  return readFileSync(join(runtimeRoot, "runtime-events.jsonl"), "utf8")
+    .trim()
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
 }
 
 function runWorkerFault(

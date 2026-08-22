@@ -7,6 +7,11 @@ import { pathToFileURL } from "node:url";
 import { executionResourceDigest } from "./attempt-plan.js";
 import { isWorkerControlledCompactionPolicy } from "./compatibility.js";
 import { digest, type ControlledCompactionPolicy } from "./model.js";
+import {
+  knownPiRpcEventClassification,
+  piRpcEventPayloadMetadata,
+  projectUnknownPiRpcEvent,
+} from "./pi-rpc-events.js";
 import { preparePiRpcAgentDirAt } from "./pi-rpc-spool.js";
 import {
   acquireCredentialStartupLease,
@@ -112,20 +117,6 @@ You are one implementation Worker for one immutable Harness Attempt. Repository 
 Implement only the bound issue in the bound worktree. Do not push, create a pull request, run complete code-review, launch review subagents, or claim delivery. Follow the loaded implement skill, then focused-self-check exactly once against the bound base SHA. Apply only concrete self-check fixes, commit the final state, and leave the worktree clean.
 When human input is required, submit blocked rather than guessing. Before settlement call worker_submit exactly once; only its durable result plus Harness Git verification can support completion.
 </harness-worker-contract>`;
-const PROJECTED_EVENT_TYPES = new Set([
-  "agent_end",
-  "turn_end",
-  "message_start",
-  "message_update",
-  "message_end",
-  "tool_execution_start",
-  "tool_execution_update",
-  "tool_execution_end",
-  "bash_execution_update",
-  "compaction_start",
-  "compaction_end",
-]);
-
 type HostArgs = {
   piExecutable: string;
   expectedVersion: string;
@@ -364,7 +355,7 @@ async function main(argv: string[]): Promise<void> {
     return;
   }
   failureStage = "rpc-mode";
-  await pi.runRpcMode(withProjectedPiRpcEvents(runtime, controlledEvents.subscribe));
+  await pi.runRpcMode(withProjectedPiRpcEvents(runtime, host.expectedVersion, controlledEvents.subscribe));
   assertCredentialInputs();
   preparePiRpcAgentDirAt(privateAgentDir);
 }
@@ -377,6 +368,7 @@ async function main(argv: string[]): Promise<void> {
  */
 export function withProjectedPiRpcEvents<T extends ProjectableRuntime>(
   runtime: T,
+  runtimeVersion: string,
   subscribeAdditional?: AdditionalEventSubscriber,
 ): T {
   const sessionProxies = new WeakMap<object, object>();
@@ -389,9 +381,9 @@ export function withProjectedPiRpcEvents<T extends ProjectableRuntime>(
         if (property === "subscribe" && typeof value === "function") {
           return (listener: PiRpcListener): unknown => {
             const unsubscribeRuntime = Reflect.apply(value, target, [
-              (event: PiRpcEvent) => listener(projectPiRpcEvent(event)),
+              (event: PiRpcEvent) => listener(projectPiRpcEvent(event, runtimeVersion)),
             ]) as unknown;
-            const unsubscribeAdditional = subscribeAdditional?.((event) => listener(projectPiRpcEvent(event)));
+            const unsubscribeAdditional = subscribeAdditional?.((event) => listener(projectPiRpcEvent(event, runtimeVersion)));
             return () => {
               if (typeof unsubscribeRuntime === "function") unsubscribeRuntime();
               unsubscribeAdditional?.();
@@ -582,10 +574,10 @@ function withWorkerSystemContract(value: unknown): string {
     : `${base}${base ? "\n\n" : ""}${WORKER_SYSTEM_CONTRACT}`;
 }
 
-export function projectPiRpcEvent(event: PiRpcEvent): PiRpcEvent {
+export function projectPiRpcEvent(event: PiRpcEvent, runtimeVersion: string): PiRpcEvent {
   const type = typeof event.type === "string" ? event.type : "";
-  if (!PROJECTED_EVENT_TYPES.has(type)) return event;
-  const metadata = eventPayloadMetadata(event);
+  if (knownPiRpcEventClassification(type) === null) return projectUnknownPiRpcEvent(event, runtimeVersion);
+  const metadata = piRpcEventPayloadMetadata(event);
   if (type === "agent_end") {
     const messages = Array.isArray(event.messages) ? event.messages : [];
     const roleCounts = { assistant: 0, toolResult: 0, other: 0 };
@@ -607,7 +599,7 @@ export function projectPiRpcEvent(event: PiRpcEvent): PiRpcEvent {
     const source = record(event.message);
     return {
       type,
-      message: { role: source.role },
+      message: { role: projectedString(source.role, 64) },
       assistantContentObserved: assistantContent(source),
       toolCallObserved: assistantToolCall(source),
       ...metadata,
@@ -616,8 +608,8 @@ export function projectPiRpcEvent(event: PiRpcEvent): PiRpcEvent {
   if (type === "message_end") {
     const source = record(event.message);
     const message: PiRpcEvent = {};
-    if (typeof source.role === "string") message.role = source.role;
-    if (typeof source.stopReason === "string") message.stopReason = source.stopReason;
+    if (typeof source.role === "string") message.role = boundedUtf8(source.role, 64);
+    if (typeof source.stopReason === "string") message.stopReason = boundedUtf8(source.stopReason, 64);
     if (typeof source.errorMessage === "string") {
       message.errorMessage = boundedUtf8(source.errorMessage, MAX_PROJECTED_ERROR_BYTES);
     }
@@ -634,12 +626,12 @@ export function projectPiRpcEvent(event: PiRpcEvent): PiRpcEvent {
     const message = record(event.message);
     return {
       type,
-      message: { role: message.role, usage: message.usage },
+      message: { role: projectedString(message.role, 64), usage: projectedUsage(message.usage) },
       assistantContentObserved: true,
       toolCallObserved: assistantToolCall(message)
         || (typeof source.type === "string" && /tool.?call|tool.?use/i.test(source.type)),
       assistantMessageEvent: {
-        ...(typeof source.type === "string" ? { type: source.type } : {}),
+        ...(typeof source.type === "string" ? { type: boundedUtf8(source.type, 256) } : {}),
         ...metadata,
       },
     };
@@ -647,10 +639,19 @@ export function projectPiRpcEvent(event: PiRpcEvent): PiRpcEvent {
   if (type === "tool_execution_start" || type === "tool_execution_end") {
     return { type, isError: event.isError === true, ...metadata };
   }
+  if (type === "extension_ui_request") {
+    return {
+      type,
+      ...(typeof event.id === "string" ? { id: boundedUtf8(event.id, 256) } : {}),
+      ...(typeof event.method === "string" ? { method: boundedUtf8(event.method, 256) } : {}),
+      ...(typeof event.widgetKey === "string" ? { widgetKey: boundedUtf8(event.widgetKey, 256) } : {}),
+      ...metadata,
+    };
+  }
   if (type === "compaction_start" || type === "compaction_end") {
     const projected: PiRpcEvent = { type };
     for (const key of ["source", "reason", "outcome", "summaryDigest"]) {
-      if (typeof event[key] === "string") projected[key] = event[key];
+      if (typeof event[key] === "string") projected[key] = boundedUtf8(event[key], 256);
     }
     for (const key of ["count", "triggerPercent", "contextTokens", "contextWindow", "tokensBefore", "estimatedTokensAfter"]) {
       if (typeof event[key] === "number" && Number.isSafeInteger(event[key]) && event[key] >= 0) projected[key] = event[key];
@@ -676,14 +677,17 @@ function assistantToolCall(message: PiRpcEvent): boolean {
   return content.some((entry) => entry.type === "toolCall" || entry.type === "tool_call" || entry.type === "tool_use");
 }
 
-function eventPayloadMetadata(event: PiRpcEvent): { payloadBytes: number; payloadDigest: string } {
-  const serialized = JSON.stringify(event);
-  const hash = createHash("sha256");
-  hash.update(serialized);
-  return {
-    payloadBytes: Buffer.byteLength(serialized),
-    payloadDigest: hash.digest("hex"),
-  };
+function projectedUsage(value: unknown): PiRpcEvent {
+  const usage = record(value);
+  return Object.fromEntries(
+    ["input", "output", "cacheRead", "cacheWrite", "totalTokens"]
+      .filter((key) => typeof usage[key] === "number" && Number.isFinite(usage[key]))
+      .map((key) => [key, usage[key]]),
+  );
+}
+
+function projectedString(value: unknown, maxBytes: number): string | undefined {
+  return typeof value === "string" ? boundedUtf8(value, maxBytes) : undefined;
 }
 
 function boundedUtf8(value: string, maxBytes: number): string {
