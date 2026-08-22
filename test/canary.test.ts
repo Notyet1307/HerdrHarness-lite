@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { Buffer } from "node:buffer";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -249,7 +250,11 @@ test("live canary creates and reopens a fixed disposable Git repository", async 
     new LiveCanaryExecutor(config);
     const fixture = join(canaryState, "fixture", "source");
     assert.equal(existsSync(join(fixture, ".git")), true);
-    assert.equal(existsSync(join(fixture, "context", "part-47.txt")), true);
+    assert.equal(existsSync(join(fixture, "scripts", "context-probe.js")), true);
+    const probe = spawnSync(process.execPath, [join(fixture, "scripts", "context-probe.js"), "0"], { encoding: "utf8" });
+    assert.equal(probe.status, 0, probe.stderr);
+    assert.equal(Buffer.byteLength(probe.stdout), 24 * 1024);
+    assert.equal(probe.stdout.startsWith("probe=0\n"), true);
     const first = spawnSync("git", ["-C", fixture, "rev-parse", "HEAD"], { encoding: "utf8" });
     assert.equal(first.status, 0, first.stderr);
     assert.match(first.stdout.trim(), /^[0-9a-f]{40}$/);

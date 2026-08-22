@@ -134,8 +134,8 @@ const CANARY_CONFIG_KEYS = new Set([
   "validationOutputBytes",
 ]);
 const MAX_CONFIG_BYTES = 1024 * 1024;
-const FIXTURE_CONTEXT_FILES = 48;
-const FIXTURE_CONTEXT_LINES = 1024;
+const LONG_TASK_PROBES = 96;
+const LONG_TASK_PROBE_BYTES = 24 * 1024;
 
 export function loadCanaryConfig(path: string): ResolvedCanaryConfig {
   const absolute = resolve(path);
@@ -416,7 +416,7 @@ function verifyFixture(fixture: Fixture, runner: SyncCommandRunner): void {
 }
 
 function writeFixtureFiles(source: string): void {
-  for (const directory of ["src", "test", "context"]) mkdirSync(join(source, directory), { recursive: true });
+  for (const directory of ["src", "test", "scripts"]) mkdirSync(join(source, directory), { recursive: true });
   writeFileSync(join(source, "AGENTS.md"), "# Canary repository\n\nOnly implement the fixed task. Never push or change remotes.\n");
   writeFileSync(join(source, "package.json"), JSON.stringify({
     name: "herdr-runtime-canary",
@@ -440,12 +440,17 @@ function writeFixtureFiles(source: string): void {
     'test("add", () => assert.equal(add(2, 3), 5));',
     "",
   ].join("\n"));
-  for (let file = 0; file < FIXTURE_CONTEXT_FILES; file += 1) {
-    const lines = Array.from({ length: FIXTURE_CONTEXT_LINES }, (_, line) => (
-      `${String(file).padStart(2, "0")}:${String(line).padStart(4, "0")}:${digest({ file, line })}`
-    ));
-    writeFileSync(join(source, "context", `part-${String(file).padStart(2, "0")}.txt`), `${lines.join("\n")}\n`);
-  }
+  writeFileSync(join(source, "scripts", "context-probe.js"), [
+    'import { createHash } from "node:crypto";',
+    'const probe = Number(process.argv[2]);',
+    `if (!Number.isInteger(probe) || probe < 0 || probe >= ${LONG_TASK_PROBES}) process.exit(2);`,
+    'let output = `probe=${probe}\\n`;',
+    `for (let line = 0; Buffer.byteLength(output) < ${LONG_TASK_PROBE_BYTES}; line += 1) {`,
+    '  output += `${probe}:${line}:${createHash("sha256").update(`${probe}:${line}`).digest("hex")}\\n`;',
+    '}',
+    `process.stdout.write(output.slice(0, ${LONG_TASK_PROBE_BYTES}));`,
+    "",
+  ].join("\n"));
 }
 
 function prepareReviewedCommit(path: string, runner: SyncCommandRunner): string {
@@ -520,7 +525,7 @@ function objective(task: CanaryUnit["task"]): string {
     return "Add multiply(a,b) in src/math.js, add a formatGreeting(name) export in src/greeting.js, update both test files, run npm test, commit, then call worker_submit.";
   }
   if (task === "long-tools") {
-    return `Read all ${FIXTURE_CONTEXT_FILES} context/part-*.txt files, verify their line format, add src/context-summary.js exporting fileCount=${FIXTURE_CONTEXT_FILES} and lineCount=${FIXTURE_CONTEXT_FILES * FIXTURE_CONTEXT_LINES}, add a test, run npm test, commit, then call worker_submit. Re-read Git and tests after any compaction.`;
+    return `Run node scripts/context-probe.js separately for probe indexes 0 through ${LONG_TASK_PROBES - 1}, verify each bounded output starts with its exact probe index, add src/context-summary.js exporting probeCount=${LONG_TASK_PROBES} and probeBytes=${LONG_TASK_PROBE_BYTES}, add a test, run npm test, commit, then call worker_submit. Re-read Git and tests after any compaction.`;
   }
   return "Review the fixed candidate HEAD independently. Run review_preflight, complete Standards and Spec axes, then call review_submit. Do not modify the source.";
 }
