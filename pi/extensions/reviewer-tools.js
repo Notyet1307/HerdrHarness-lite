@@ -477,11 +477,9 @@ function projectAxisOutput(axis, output, descriptor) {
   const raw = Buffer.from(output, "utf8");
   const digest = sha256(raw);
   persistPrivateEvidence(descriptor, `axis-${axis.toLowerCase()}-${digest.slice(0, 16)}.json`, raw);
-  let parsed;
-  try {
-    parsed = JSON.parse(output);
-  } catch {
-    return { valid: false, value: invalidAxisProjection("Review axis output is not JSON", raw) };
+  const parsed = parseReviewAxisJson(output);
+  if (parsed === undefined) {
+    return { valid: false, value: invalidAxisProjection("Review axis output is not JSON or one unique JSON fence", raw) };
   }
   if (!validAxisResult(parsed)) {
     return { valid: false, value: invalidAxisProjection("Review axis output does not match the structured contract", raw) };
@@ -500,6 +498,21 @@ function projectAxisOutput(axis, output, descriptor) {
     return { valid: false, value: invalidAxisProjection("Review axis structured projection exceeds 12 KiB", raw) };
   }
   return { valid: parsed.status !== "blocked", value };
+}
+
+export function parseReviewAxisJson(output) {
+  if (typeof output !== "string") return undefined;
+  try {
+    return JSON.parse(output);
+  } catch {
+    const fences = [...output.matchAll(/```json[ \t]*\r?\n([\s\S]*?)\r?\n```/giu)];
+    if (fences.length !== 1) return undefined;
+    try {
+      return JSON.parse(fences[0][1]);
+    } catch {
+      return undefined;
+    }
+  }
 }
 
 function validAxisResult(value) {
