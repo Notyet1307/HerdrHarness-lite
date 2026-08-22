@@ -75,6 +75,8 @@ test("Pi child reviewer has a strict non-writing, non-recursive tool list", () =
   assert.match(agent, /^defaultContext:\s*fresh$/m);
   assert.match(agent, /^extensions:\s*$/m);
   assert.match(agent, /Do not run\s+project\s+validation commands/);
+  assert.match(agent, /every later forward migration through the reviewed Head/);
+  assert.match(agent, /report an evidence gap instead of\s+claiming the initial revision is the current schema/);
   assert.match(agent, /Return exactly one JSON object/);
   assert.match(agent, /"status":"pass\|changes\|blocked"/);
   assert.match(agent, /Never return\s+transcript, assistant-message/);
