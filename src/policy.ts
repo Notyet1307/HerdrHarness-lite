@@ -69,7 +69,7 @@ export function automaticRecoveryCandidateForAttempt(
   return { rule, fingerprint: digest({ rule, baseSha: attempt.baseSha, headSha: job.headSha }) };
 }
 
-export function automaticRecoveryFor(job: Job, advice: AnalystAdvice, now?: string): (AutomaticRecoveryCandidate & {
+export function automaticRecoveryFor(job: Job, advice: AnalystAdvice | null, now?: string): (AutomaticRecoveryCandidate & {
   action: Exclude<RecoveryAction, "hold">;
   attemptId: string;
 }) | null {
@@ -93,13 +93,15 @@ export function automaticRecoveryFor(job: Job, advice: AnalystAdvice, now?: stri
     || incident.lane !== attempt?.lane
     || attempt.phase !== "settled"
     || attempt.result !== null
-    || advice.incidentId !== incident.id
-    || advice.action !== action
-    || !advice.resolutionBrief.trim()
-    || (candidate.rule === "worker_pre_dispatch_infrastructure" && advice.unknowns.length !== 0)
+    || (candidate.rule !== "provider_pre_side_effect_transient" && (
+      !advice
+      || advice.incidentId !== incident.id
+      || advice.action !== action
+      || !advice.resolutionBrief.trim()
+      || (candidate.rule === "worker_pre_dispatch_infrastructure" && advice.unknowns.length !== 0)
+    ))
     || (candidate.rule === "provider_pre_side_effect_transient" && (
-      advice.unknowns.length !== 0
-      || !now
+      !now
       || !Number.isFinite(Date.parse(now))
       || Date.parse(now) < Date.parse(candidate.notBefore)
       || attempt.lane !== candidate.lane
@@ -121,7 +123,7 @@ export function automaticRecoveryFor(job: Job, advice: AnalystAdvice, now?: stri
   return { ...candidate, action, attemptId: attempt.id };
 }
 
-export function automaticRecoveryBackoffPending(job: Job, advice: AnalystAdvice, now: string): boolean {
+export function automaticRecoveryBackoffPending(job: Job, advice: AnalystAdvice | null, now: string): boolean {
   const candidate = job.incident?.automaticRecovery;
   return candidate?.rule === "provider_pre_side_effect_transient"
     && Number.isFinite(Date.parse(now))

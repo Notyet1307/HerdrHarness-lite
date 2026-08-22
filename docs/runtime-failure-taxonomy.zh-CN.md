@@ -7,7 +7,7 @@
 - 一个 Attempt 只有一个 durable `dispatch.json`，Controller 在 dispatch 前先持久化 `running`；结果不确定时只重观察同一 Attempt，不重发 prompt。
 - workflow retry 只创建 fresh Worker/Reviewer Attempt。`retryable` 是诊断属性，不是执行授权。
 - 交付仍要求身份绑定的 durable result、exact HEAD、clean worktree，以及 Git/GitHub fixed point。Runtime terminal、Herdr/Pi settled、validation pass 都不能单独证明完成。
-- Analyst 只能建议。自动 fresh retry 只来自既有 pre-dispatch rule，或 `provider_pre_side_effect_transient`：后者要求完整无副作用 receipt、固定短退避、fresh Attempt，并按 job/lane/HEAD 限一次。
+- Analyst 只能建议。既有 pre-dispatch rule 仍要求匹配的 Analyst advice；`provider_pre_side_effect_transient` 则只由确定性 policy 授权，不调用或等待 Analyst，并要求完整无副作用 receipt、固定短退避、fresh Attempt，且按 job/lane/HEAD 限一次。
 - 新写入的 runner/controller safe failure receipt 至少包含稳定的 `domain`、`code`、`stage`、`retryable`。兼容字段 `failureDomain`、`failureCode`、`failureStage` 保留细粒度 runtime 信息和旧 ledger 读能力。Reviewer validation 的分类目前只存在于 tool-local `failure` 对象，尚未进入 durable Reviewer result。
 
 ## 2. 稳定字段

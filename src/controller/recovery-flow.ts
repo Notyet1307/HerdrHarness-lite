@@ -14,14 +14,19 @@ export async function diagnoseOrWait(ctx: ControllerContext, state: HarnessState
   const recovered = await reconcileBlockedCi(ctx, state, job);
   if (recovered) return recovered;
   if (!job.incident) throw new Error("blocked job has no incident");
+  const now = ctx.deps.clock.now();
+  const deterministic = automaticRecoveryFor(job, null, now);
+  if (deterministic?.rule === "provider_pre_side_effect_transient") {
+    return authorizeAutomaticRecovery(ctx, state, job, null, deterministic, now);
+  }
+  const candidate = job.incident.automaticRecovery;
+  if (candidate?.rule === "provider_pre_side_effect_transient"
+    && automaticRecoveryBackoffPending(job, null, now)) {
+    return result(true, "automatic_recovery_backoff", job.id, `automatic Provider recovery is waiting until ${candidate.notBefore}`);
+  }
   if (job.analysis) {
-    const now = ctx.deps.clock.now();
     const automatic = automaticRecoveryFor(job, job.analysis, now);
     if (automatic) return authorizeAutomaticRecovery(ctx, state, job, job.analysis, automatic, now);
-    const candidate = job.incident.automaticRecovery;
-    if (candidate?.rule === "provider_pre_side_effect_transient" && automaticRecoveryBackoffPending(job, job.analysis, now)) {
-      return result(true, "automatic_recovery_backoff", job.id, `automatic Provider recovery is waiting until ${candidate.notBefore}`);
-    }
     return result(true, "waiting_for_approval", job.id, `analysis ${job.analysis.id} is ready; human approval is required`);
   }
   if (!job.analyst) {
@@ -43,10 +48,10 @@ export async function diagnoseOrWait(ctx: ControllerContext, state: HarnessState
       createdAt: ctx.deps.clock.now(),
     };
   }
-  const now = ctx.deps.clock.now();
-  const automatic = automaticRecoveryFor(job, advice, now);
-  if (automatic) return authorizeAutomaticRecovery(ctx, state, job, advice, automatic, now);
-  const next = evolveJob(job, now, { analysis: advice });
+  const diagnosedAt = ctx.deps.clock.now();
+  const automatic = automaticRecoveryFor(job, advice, diagnosedAt);
+  if (automatic) return authorizeAutomaticRecovery(ctx, state, job, advice, automatic, diagnosedAt);
+  const next = evolveJob(job, diagnosedAt, { analysis: advice });
   await ctx.saveJob(state, job, next);
   return result(true, "analysis_recorded", job.id, `Analyst advice ${advice.id} recorded with action=${advice.action}`);
 }
@@ -248,7 +253,10 @@ export async function applyRecovery(ctx: ControllerContext, state: HarnessState,
   const approval = job.approval;
   const analysis = job.analysis;
   const incident = job.incident;
-  if (!approval || !analysis || !incident) {
+  const providerPolicyDecision = approval?.basis === "policy_rule"
+    && approval.policyRule === "provider_pre_side_effect_transient";
+  const analysisFreePolicy = providerPolicyDecision && approval?.analysisId === null;
+  if (!approval || !incident || (!analysis && !analysisFreePolicy)) {
     return ctx.block(state, job, {
       class: "integrity_violation",
       lane: "controller",
@@ -261,9 +269,12 @@ export async function applyRecovery(ctx: ControllerContext, state: HarnessState,
   if (
     approval.jobRevision >= job.revision ||
     approval.incidentId !== incident.id ||
-    approval.analysisId !== analysis.id ||
     !isRetryAction(approval.action) ||
-    (humanDecision ? !isDecisionResolutionEligible(job) : approval.action !== analysis.action) ||
+    (analysisFreePolicy ? analysis !== null : (
+      !analysis
+      || approval.analysisId !== analysis.id
+      || (humanDecision ? !isDecisionResolutionEligible(job) : approval.action !== analysis.action)
+    )) ||
     (policyDecision && !isAutomaticRecoveryApproval(job, approval)) ||
     !incident.allowedActions.includes(approval.action) ||
     !allowedActionsFor(incident.class, incident.lane).includes(approval.action)
@@ -352,7 +363,7 @@ export async function applyRecovery(ctx: ControllerContext, state: HarnessState,
   const pendingHandoff = approvedRecoveryHandoff({
     job,
     incident,
-    analysis,
+    analysis: analysisFreePolicy ? null : analysis,
     approval,
     createdAt: now,
   });

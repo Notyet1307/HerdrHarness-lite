@@ -256,7 +256,7 @@ function assertChallengeCurrent(job: Job | null, challenge: Challenge): void {
 }
 
 function assertEffectRecorded(job: Job | null, challenge: Challenge, actor: string): void {
-  const common = (record: { jobRevision: number; incidentId: string; analysisId: string; actor: string; reason: string } | null | undefined): boolean => (
+  const common = (record: { jobRevision: number; incidentId: string; analysisId: string | null; actor: string; reason: string } | null | undefined): boolean => (
     record?.jobRevision === challenge.revision
     && record.incidentId === challenge.incidentId
     && record.analysisId === challenge.analysisId

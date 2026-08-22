@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { dirname } from "node:path";
 import { HarnessController } from "../src/controller.js";
 import { LocalEvidence } from "../src/adapters/local-evidence.js";
-import { assertJobInvariant } from "../src/model.js";
+import { assertJobInvariant, digest, type Job } from "../src/model.js";
 import { reviewerCheckpointIdentity } from "../src/reviewer-checkpoints.js";
 import { classifyProviderContinuationLost, classifyProviderFailure, PiRpcRuntimeFailure, withRuntimeSideEffectBoundary } from "../src/pi-rpc-diagnostics.js";
 import { automaticRecoveryCandidateForAttempt, automaticRecoveryFor, operatorActionsFor, projectOperatorState } from "../src/policy.js";
@@ -101,6 +101,7 @@ test("pre-side-effect transient Provider failure retries one fresh Attempt per j
     evidenceRefs: ["task"],
     unknowns: [],
   };
+  const analyst = new FakeAnalyst([advice]);
   const controller = new HarnessController({
     config: {
       ...config,
@@ -112,7 +113,7 @@ test("pre-side-effect transient Provider failure retries one fresh Attempt per j
     git,
     herdr,
     piRpc: herdr,
-    analyst: new FakeAnalyst([advice, advice]),
+    analyst,
     evidence: new FakeEvidence(),
     clock,
     ids,
@@ -184,6 +185,12 @@ test("pre-side-effect transient Provider failure retries one fresh Attempt per j
   assert.equal((await controller.tick()).action, "blocked");
   const firstCandidate = store.state.activeJob!.incident!.automaticRecovery!;
   assert.equal(firstCandidate.rule, "provider_pre_side_effect_transient");
+  assert.equal(analyst.turns.length, 1);
+  assert.equal(automaticRecoveryFor(
+    store.state.activeJob!,
+    null,
+    firstCandidate.rule === "provider_pre_side_effect_transient" ? firstCandidate.notBefore : undefined,
+  )?.rule, "provider_pre_side_effect_transient");
 
   const authorizationActions: string[] = [];
   for (let index = 0; index < 10 && store.state.activeJob?.state !== "recovery_approved"; index += 1) {
@@ -192,13 +199,64 @@ test("pre-side-effect transient Provider failure retries one fresh Attempt per j
   const approved = store.state.activeJob!;
   assert.equal(approved.state, "recovery_approved");
   assert.equal(approved.approval?.basis, "policy_rule");
+  assert.equal(approved.approval?.analysisId, null);
+  assert.equal(approved.analysis, null);
   assert.equal(approved.automaticRecoveries?.length, 1);
+  assert.equal(approved.automaticRecoveries?.[0]?.analysisId, null);
+  assert.equal(analyst.turns.length, 1);
+  assertJobInvariant(approved);
+  assert.throws(() => assertJobInvariant({
+    ...approved,
+    approval: { ...approved.approval!, basis: "analyst_advice", analysisId: null },
+  }), /invalid analysis binding/);
+  assertJobInvariant({
+    ...approved,
+    approval: { ...approved.approval!, analysisId: "legacy-policy-analysis" },
+    automaticRecoveries: approved.automaticRecoveries!.map((entry) => ({
+      ...entry,
+      analysisId: "legacy-policy-analysis",
+    })),
+  });
+  const mismatched = JSON.parse(JSON.stringify(approved)) as Job;
+  const mismatchedCandidate = mismatched.incident?.automaticRecovery;
+  if (mismatchedCandidate?.rule !== "provider_pre_side_effect_transient") {
+    throw new Error("expected Provider recovery candidate");
+  }
+  const mismatchedProvider = "different-provider";
+  const mismatchedFingerprint = digest({
+    rule: mismatchedCandidate.rule,
+    provider: mismatchedProvider,
+    failureCode: mismatchedCandidate.failureCode,
+    attemptId: mismatched.activeAttempt!.id,
+    headSha: mismatchedCandidate.headSha,
+  });
+  mismatched.incident!.automaticRecovery = {
+    ...mismatchedCandidate,
+    provider: mismatchedProvider,
+    fingerprint: mismatchedFingerprint,
+  };
+  mismatched.approval = {
+    ...mismatched.approval!,
+    fingerprint: mismatchedFingerprint,
+  };
+  mismatched.automaticRecoveries = mismatched.automaticRecoveries!.map((entry) => ({
+    ...entry,
+    provider: mismatchedProvider,
+    fingerprint: mismatchedFingerprint,
+  }));
+  assertJobInvariant(mismatched);
+  store.state.activeJob = mismatched;
+  assert.equal((await controller.tick()).action, "blocked");
+  assert.equal(store.state.activeJob?.incident?.class, "integrity_violation");
+  store.state.activeJob = JSON.parse(JSON.stringify(approved)) as Job;
   assert.ok(authorizationActions.includes("auto_recovery_authorized"));
   assert.ok(Date.parse(approved.automaticRecoveries![0]!.createdAt) >= Date.parse(approved.automaticRecoveries![0]!.notBefore!));
 
   assert.equal((await controller.tick()).action, "recovery_applied");
   assert.equal(git.attemptSideEffectInspections.at(-1), firstAttempt.baseSha);
   assert.equal(herdr.closed.length, 1);
+  assert.equal(store.state.activeJob?.pendingHandoff?.source.analysisId, null);
+  assert.equal(store.state.activeJob?.pendingHandoff?.summary, "provider_pre_side_effect_transient");
   assert.equal(store.state.activeJob!.attempts.at(-1)?.id, firstAttempt.id);
   assert.equal(store.state.activeJob!.attempts.at(-1)?.phase, "settled");
 
@@ -224,6 +282,7 @@ test("pre-side-effect transient Provider failure retries one fresh Attempt per j
   assert.ok(repeatedCandidate.fingerprint !== firstCandidate.fingerprint);
   assert.equal(repeatedCandidate.scopeFingerprint, firstCandidate.scopeFingerprint);
   assert.equal((await controller.tick()).action, "analysis_recorded");
+  assert.equal(analyst.turns.length, 0);
   assert.equal(store.state.activeJob!.state, "blocked");
   assert.equal(store.state.activeJob!.approval, null);
   assert.equal(store.state.activeJob!.automaticRecoveries?.length, 1);

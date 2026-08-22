@@ -10,10 +10,13 @@ export async function authorizeAutomaticRecovery(
   ctx: ControllerContext,
   state: HarnessState,
   job: Job,
-  advice: AnalystAdvice,
+  advice: AnalystAdvice | null,
   automatic: NonNullable<ReturnType<typeof automaticRecoveryFor>>,
   now: string,
 ): Promise<TickResult> {
+  if (advice === null && automatic.rule !== "provider_pre_side_effect_transient") {
+    throw new Error("only deterministic pre-side-effect Provider recovery may omit Analyst advice");
+  }
   const providerAudit = automatic.rule === "provider_pre_side_effect_transient"
     ? {
         scopeFingerprint: automatic.scopeFingerprint,
@@ -28,7 +31,7 @@ export async function authorizeAutomaticRecovery(
     id: ctx.deps.ids.next("approval"),
     jobRevision: job.revision,
     incidentId: job.incident!.id,
-    analysisId: advice.id,
+    analysisId: advice?.id ?? null,
     action: automatic.action,
     basis: "policy_rule",
     policyRule: automatic.rule,
@@ -68,6 +71,12 @@ export async function verifyProviderRecoveryBoundary(
     || !attempt
     || !job.worktree
     || !boundary
+    || job.incident?.attemptId !== attempt.id
+    || job.incident.lane !== attempt.lane
+    || candidate.lane !== attempt.lane
+    || candidate.headSha !== (attempt.expectedHeadSha ?? attempt.baseSha)
+    || candidate.provider !== attempt.executionSnapshot?.provider
+    || candidate.failureCode !== job.incident.runtimeDiagnostic?.failureCode
     || boundary.toolExecutionStarted
     || boundary.durableResultPresent
     || boundary.worktreeChanged

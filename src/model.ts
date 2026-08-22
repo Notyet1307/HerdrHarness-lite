@@ -574,7 +574,8 @@ export type Approval = {
   id: string;
   jobRevision: number;
   incidentId: string;
-  analysisId: string;
+  /** Null only for new deterministic policy authorization; legacy policy records retain their Analyst binding. */
+  analysisId: string | null;
   action: Exclude<RecoveryAction, "hold">;
   /** Optional because V1 ledgers created before decision resolution have no basis field. */
   basis?: "analyst_advice" | "human_decision" | "policy_rule";
@@ -870,6 +871,13 @@ export function assertJobInvariant(job: Job): void {
   ) {
     throw new Error("approval has an invalid basis");
   }
+  if (job.approval && (job.approval.basis === "policy_rule"
+    ? (job.approval.analysisId === null
+        ? job.approval.policyRule !== "provider_pre_side_effect_transient"
+        : !isBoundedText(job.approval.analysisId, 512))
+    : !isBoundedText(job.approval.analysisId, 512))) {
+    throw new Error("approval has an invalid analysis binding");
+  }
   if (
     job.approval?.basis === "human_decision" &&
     (!isBoundedText(job.approval.actor, 512) ||
@@ -919,7 +927,8 @@ export function assertJobInvariant(job: Job): void {
       || !/^[0-9a-f]{64}$/i.test(entry.fingerprint)
       || !isBoundedText(entry.id, 512)
       || !isBoundedText(entry.incidentId, 512)
-      || !isBoundedText(entry.analysisId, 512)
+      || (entry.analysisId === null && entry.policyRule !== "provider_pre_side_effect_transient")
+      || (entry.analysisId !== null && !isBoundedText(entry.analysisId, 512))
       || !isBoundedText(entry.attemptId, 512)
       || !isBoundedText(entry.actor, 512)
       || !isBoundedText(entry.reason, 2_000)

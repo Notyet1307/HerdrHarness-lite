@@ -294,7 +294,7 @@ required check 失败时，Controller 记录 HEAD-bound CI evidence、取消 aut
 
 ### Blocked recovery
 
-runtime 外部结果短暂迟到时，同一 Attempt 只做一次 bounded reconciliation，且不重放 prompt。窄范围 pre-dispatch Worker/same-HEAD Reviewer infrastructure incident 保留原有一次性 policy；dispatch 后只有明确 transient Provider code 且 `toolExecutionStarted`、durable result、worktree change、commit 全为 false 时，`provider_pre_side_effect_transient` 才能在固定短退避后授权一次 fresh retry。该规则按 job/lane/HEAD 限一次，并把 provider、failure code、Attempt 与 HEAD 绑定到 fingerprint；恢复执行前还会重新检查 result path、Git HEAD 与 clean worktree。Analyst 只能提供建议，不能创建 candidate、Approval 或执行恢复；第二次同 scope 失败、`validation_infrastructure`、auth/tool/result/Git/policy/compaction 错误以及任何已开始工具的失败都保持 blocked。恢复会确认关闭旧 pane/runner，并创建 fresh Worker 或 Reviewer；Reviewer 可带入一次性、plan-bound 的有效阶段 checkpoint，但不带入旧 session 或 transcript。
+runtime 外部结果短暂迟到时，同一 Attempt 只做一次 bounded reconciliation，且不重放 prompt。窄范围 pre-dispatch Worker/same-HEAD Reviewer infrastructure incident 保留原有一次性 policy 与 Analyst advice 条件；dispatch 后只有明确 transient Provider code 且 `toolExecutionStarted`、durable result、worktree change、commit 全为 false 时，`provider_pre_side_effect_transient` 才能由确定性 policy 在固定短退避后直接授权一次 fresh retry，不调用或等待 Analyst。该规则按 job/lane/HEAD 限一次，并把 provider、failure code、Attempt 与 HEAD 绑定到 fingerprint；恢复执行前还会重新检查 result path、Git HEAD 与 clean worktree。Analyst 只能提供建议，不能创建 candidate、Approval 或执行恢复；第二次同 scope 失败、`validation_infrastructure`、auth/tool/result/Git/policy/compaction 错误以及任何已开始工具的失败都保持 blocked。恢复会确认关闭旧 pane/runner，并创建 fresh Worker 或 Reviewer；Reviewer 可带入一次性、plan-bound 的有效阶段 checkpoint，但不带入旧 session 或 transcript。
 
 Analyst `hold` 不授权 retry。`reassess` 只创建新的可审计 Incident/Analysis cycle，也不直接授权执行。
 

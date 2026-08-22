@@ -55,9 +55,9 @@
     "dockerRequired": false
   },
   "reviewerValidationArgv": [
-    "npm",
-    "run",
-    "verify"
+    "/bin/sh",
+    "-ec",
+    "git init --quiet && git add --all && git -c core.hooksPath=/dev/null -c user.name=herdr-validation -c user.email=herdr-validation@invalid commit --quiet --no-gpg-sign -m validation-snapshot && npm ci --ignore-scripts --no-audit --no-fund && npm run verify"
   ],
   "workerArgv": [
     "--no-approve",

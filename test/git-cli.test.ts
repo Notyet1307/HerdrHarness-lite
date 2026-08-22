@@ -293,6 +293,20 @@ test("Reviewer preparation exports a read-only exact-HEAD snapshot and writable 
     const missingReceipt = requireValidationCheckpoint(missing.receipt);
     assert.equal(missingReceipt.result.status, "infrastructure-error");
     assert.match(missingReceipt.result.error ?? "", /executable is unavailable/);
+    const silentRoot = join(root, "state", "attempt-silent");
+    const silent = await cli.runReviewerValidation({
+      ...input,
+      rootPath: silentRoot,
+      resultPath: join(silentRoot, "result.json"),
+      attemptId: "reviewer-silent",
+      checkpointIdentity: { ...input.checkpointIdentity, sourceAttemptId: "reviewer-silent" },
+      validationArgv: [process.execPath, resolve("test/fixtures/reviewer-validation.js"), "--sleep-ms", "75"],
+      totalTimeoutMs: 500,
+      noProgressTimeoutMs: 20,
+    });
+    const silentReceipt = requireValidationCheckpoint(silent.receipt);
+    assert.equal(silentReceipt.result.status, "passed");
+    assert.equal(silentReceipt.result.timeout, false);
     const timeoutRoot = join(root, "state", "attempt-timeout");
     const timedOut = await new GitCli(runner).runReviewerValidation({
       ...input,

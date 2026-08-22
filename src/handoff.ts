@@ -41,7 +41,7 @@ export function reviewChangesHandoff(input: {
 export function approvedRecoveryHandoff(input: {
   job: Job;
   incident: Incident;
-  analysis: AnalystAdvice;
+  analysis: AnalystAdvice | null;
   approval: Approval;
   createdAt: string;
 }): TypedHandoff {
@@ -52,7 +52,7 @@ export function approvedRecoveryHandoff(input: {
     if (input.job.activeAttempt?.result?.lane === "reviewer") {
       obligations.push(...input.job.activeAttempt.result.findings.map((finding) => ({ ...finding })));
     }
-  } else if (input.analysis.resolutionBrief.trim()) {
+  } else if (input.analysis?.resolutionBrief.trim()) {
     obligations.push({ severity: null, summary: input.analysis.resolutionBrief, evidence: null });
   }
   if (input.incident.class === "ci_failure") {
@@ -72,7 +72,7 @@ export function approvedRecoveryHandoff(input: {
       resultDigest: input.job.activeAttempt?.result ? digest(input.job.activeAttempt.result) : null,
       incidentId: input.incident.id,
       evidenceDigest: input.incident.evidenceDigest,
-      analysisId: input.analysis.id,
+      analysisId: input.approval.analysisId,
       approvalId: input.approval.id,
       headSha: input.job.headSha,
     },
@@ -82,13 +82,15 @@ export function approvedRecoveryHandoff(input: {
       expectedHeadSha: targetLane === "reviewer" ? input.job.headSha : null,
       expectedRemoteHeadSha: targetLane === "worker" ? (input.job.pullRequest?.headSha ?? null) : null,
     },
-    summary: input.approval.basis === "human_decision" ? input.approval.reason : input.analysis.summary,
+    summary: input.approval.basis === "policy_rule" && input.analysis === null
+      ? input.approval.reason
+      : input.approval.basis === "human_decision" ? input.approval.reason : input.analysis!.summary,
     obligations,
     evidenceRefs: [...new Set([
-      ...input.analysis.evidenceRefs,
+      ...(input.analysis?.evidenceRefs ?? []),
       ...(input.incident.class === "ci_failure" ? (input.job.ciFailure?.checks ?? []).map((check) => check.link).filter(Boolean) : []),
     ])],
-    unknowns: [...input.analysis.unknowns],
+    unknowns: [...(input.analysis?.unknowns ?? [])],
     createdAt: input.createdAt,
   };
   return identify(body);

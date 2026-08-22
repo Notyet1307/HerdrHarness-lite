@@ -10,7 +10,7 @@ import type { ControllerContext } from "./context.js";
 import { message, result, safeToken, trimSlash } from "./helpers.js";
 import { BUNDLED_REVIEW_AXIS_AGENT, CREDENTIAL_STARTUP_LAUNCHER, PI_RPC_RUNNER, PI_RPC_SDK_ENTRY } from "./resources.js";
 import { rpcEnabled, runtimeRole, workerCompactionMode } from "./runtime-contract.js";
-import { configuredRuntimeTimeouts, configuredValidationTimeoutMs } from "../runtime-timeouts.js";
+import { configuredRuntimeTimeouts, configuredValidationTimeoutMs, snapshotRuntimeTimeouts } from "../runtime-timeouts.js";
 import { reviewerAxisConcurrency } from "../reviewer-provider-profile.js";
 import type { TickResult } from "./types.js";
 
@@ -121,7 +121,9 @@ export async function prepareAttempt(ctx: ControllerContext, state: HarnessState
       ...(credentialDomainId ? { credentialDomainId } : {}),
       ...(axisConcurrency ? { axisConcurrency } : {}),
       runtimeTimeouts,
-      runtimeDeadlineAt: new Date(Date.parse(now) + runtimeTimeouts.totalTimeoutMs).toISOString(),
+      ...(lane === "worker"
+        ? { runtimeDeadlineAt: new Date(Date.parse(now) + runtimeTimeouts.totalTimeoutMs).toISOString() }
+        : {}),
       ...(lane === "reviewer" ? { validationTimeoutMs: configuredValidationTimeoutMs(ctx.deps.config) } : {}),
       dockerHost,
       extraResources: [
@@ -184,6 +186,17 @@ export async function prepareAttempt(ctx: ControllerContext, state: HarnessState
     } catch (error) {
       return result(false, "preflight_failed", job.id, message(error));
     }
+  }
+  if (lane === "reviewer" && attempt.reviewerValidationReceipt && executionSnapshot.runtimeDeadlineAt === undefined) {
+    const activatedAt = Date.parse(ctx.deps.clock.now());
+    if (!Number.isFinite(activatedAt)) return result(false, "preflight_failed", job.id, "Reviewer runtime activation time is invalid");
+    executionSnapshot = {
+      ...executionSnapshot,
+      runtimeDeadlineAt: new Date(
+        activatedAt + snapshotRuntimeTimeouts(executionSnapshot, "reviewer").totalTimeoutMs,
+      ).toISOString(),
+    };
+    attempt = { ...attempt, executionSnapshot };
   }
   const contextEnvelope = buildAttemptContextEnvelope({ job, attempt, executionSnapshot, handoff });
   attempt = { ...attempt, contextEnvelope, contextEnvelopeDigest: digest(contextEnvelope) };

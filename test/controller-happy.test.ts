@@ -5,9 +5,11 @@ import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } f
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { HarnessController } from "../src/controller.js";
+import { executionPlanMatches } from "../src/attempt-plan.js";
 import { digest } from "../src/model.js";
 import type { HarnessConfig } from "../src/ports.js";
 import { ReviewerContextBudgetExceededError } from "../src/reviewer-context-budget.js";
+import { reviewerOwnValidationInput } from "../src/controller/reviewer-validation.js";
 import {
   FakeAnalyst,
   FakeClock,
@@ -847,6 +849,8 @@ test("simulated 20-minute validation finishes before Reviewer Provider or pane s
   const git = new FakeGit();
   const herdr = new FakeHerdr([{ lane: "worker", status: "completed", headSha: "b".repeat(40) }]);
   const preflight = new FakeRuntimePreflight();
+  let nowMs = Date.UTC(2026, 7, 3, 0, 0, 0);
+  const clock = { now: () => new Date(nowMs).toISOString() };
   let releaseValidation!: () => void;
   git.reviewerValidationGate = new Promise<void>((resolveGate) => { releaseValidation = resolveGate; });
   const controller = new HarnessController({
@@ -857,11 +861,17 @@ test("simulated 20-minute validation finishes before Reviewer Provider or pane s
     herdr,
     analyst: new FakeAnalyst(),
     evidence: new FakeEvidence(),
-    clock: new FakeClock(),
+    clock,
     ids: new SequenceIds(),
     preflight,
   });
   for (let index = 0; index < 9; index += 1) await controller.tick();
+  const prepared = store.state.activeJob?.activeAttempt;
+  assert.equal(prepared?.lane, "reviewer");
+  assert.equal(prepared?.executionSnapshot?.runtimeDeadlineAt, undefined);
+  assert.equal(prepared?.contextEnvelope?.runtime.runtimeDeadlineAt, undefined);
+  const preparedAt = Date.parse(prepared?.startedAt ?? "");
+  const preparedPlanDigest = prepared?.planDigest;
   const reviewerProbesBefore = preflight.providerCalls.filter((call) => call.lane === "reviewer").length;
   const pending = controller.tick();
   while (!git.reviewerValidationStarted) await Promise.resolve();
@@ -871,10 +881,27 @@ test("simulated 20-minute validation finishes before Reviewer Provider or pane s
   assert.equal(herdr.started.some((name) => name.includes("reviewer")), false);
   assert.equal(herdr.prompts.some((prompt) => prompt.skill === "code-review"), false);
 
+  nowMs += 20 * 60 * 1_000;
   releaseValidation();
   assert.equal((await pending).action, "reviewer_validation_ready");
-  assert.equal(store.state.activeJob?.activeAttempt?.phase, "prepared");
-  assert.equal(store.state.activeJob?.activeAttempt?.reviewerValidationReceipt?.status, "passed");
+  const activated = store.state.activeJob?.activeAttempt;
+  assert.equal(activated?.phase, "prepared");
+  assert.equal(activated?.reviewerValidationReceipt?.status, "passed");
+  const reviewerTotalTimeoutMs = activated?.executionSnapshot?.runtimeTimeouts?.totalTimeoutMs;
+  assert.ok(reviewerTotalTimeoutMs);
+  assert.equal(
+    Date.parse(activated?.executionSnapshot?.runtimeDeadlineAt ?? "") - nowMs,
+    reviewerTotalTimeoutMs,
+  );
+  assert.equal(
+    Date.parse(activated?.executionSnapshot?.runtimeDeadlineAt ?? "") - preparedAt,
+    20 * 60 * 1_000 + reviewerTotalTimeoutMs,
+  );
+  assert.equal(activated?.contextEnvelope?.runtime.runtimeDeadlineAt, activated?.executionSnapshot?.runtimeDeadlineAt);
+  assert.equal(activated?.contextEnvelope?.runtime.snapshotDigest, digest(activated?.executionSnapshot));
+  assert.equal(activated?.contextEnvelopeDigest, digest(activated?.contextEnvelope));
+  assert.equal(executionPlanMatches(activated!), true);
+  assert.ok(activated?.planDigest !== preparedPlanDigest);
   assert.equal(herdr.prepared.some((entry) => entry.lane === "reviewer"), false);
   assert.equal(preflight.providerCalls.filter((call) => call.lane === "reviewer").length, reviewerProbesBefore);
   assert.equal((await controller.tick()).action, "attempt_pane_ready");
@@ -901,15 +928,20 @@ test("a persisted Reviewer validation receipt survives a pre-pane restart withou
   };
   const controller = new HarnessController(dependencies);
   for (let index = 0; index < 9; index += 1) await controller.tick();
-  assert.equal((await controller.tick()).action, "reviewer_validation_ready");
+  const interruptedJob = store.state.activeJob!;
+  const interruptedAttempt = interruptedJob.activeAttempt!;
+  await git.runReviewerValidation(reviewerOwnValidationInput(interruptedJob, interruptedAttempt));
   assert.equal(git.reviewerValidationExecutions, 1);
-  assert.equal(store.state.activeJob?.activeAttempt?.phase, "prepared");
+  assert.equal(store.state.activeJob?.activeAttempt?.reviewerValidationReceipt, undefined);
+  assert.equal(store.state.activeJob?.activeAttempt?.executionSnapshot?.runtimeDeadlineAt, undefined);
   assert.equal(herdr.prepared.some((entry) => entry.lane === "reviewer"), false);
 
   const restarted = new HarnessController(dependencies);
   preflight.providerFailure = new Error("Provider unavailable after validation");
-  assert.equal((await restarted.tick()).action, "preflight_failed");
+  assert.equal((await restarted.tick()).action, "reviewer_validation_ready");
   assert.equal(git.reviewerValidationExecutions, 1);
+  assert.ok(store.state.activeJob?.activeAttempt?.executionSnapshot?.runtimeDeadlineAt);
+  assert.equal((await restarted.tick()).action, "preflight_failed");
   preflight.providerFailure = null;
   assert.equal((await restarted.tick()).action, "attempt_pane_ready");
   assert.equal(git.reviewerValidationExecutions, 1);
