@@ -59,6 +59,8 @@ Worker 的主 `pi-agent` 与 bash/工具子进程使用不同的 Attempt-private
 
 Reviewer Review Axis 的 credential wrapper 使用 `HERDR_HARNESS_REVIEW_CANONICAL_PI_AGENT_DIR`，不得改回继承工具进程的 `PI_CODING_AGENT_DIR`。若 axis 在一秒左右以 `oauth_missing` 退出且 `tool-agent` 没有 canonical auth，先核对 wrapper 与该专用 env；不要把升级 `pi-subagents` 当作此故障的修复，也不要复制 auth 或把 tool-agent 当作 credential store。
 
+wrapper 启动 credential launcher/child 时，其子进程 `PI_CODING_AGENT_DIR` 也必须等于专用 canonical env；只修 `--credential-agent-dir` 参数不足以让普通 child Pi 读取 OAuth。Analyst-advice approval 的 reason 会以 `Operator statement (untrusted)` 进入 fresh Attempt handoff；可写明已确认的验证命令、非 Secret 环境缺口和保留约束，但不得把它描述成新的 policy authority。
+
 `reviewer.axisConcurrency` 只接受 1 或 2。custom Provider 默认 2 并可显式改为 1；`credentialMode=canonical-oauth + provider=openai-codex` 无条件收紧为 1，Standards 完成并释放 axis startup lease 后才启动 Spec。
 
 配置要求 Docker 时，preflight 只接受本地 Unix socket，并验证 daemon 与 Compose。不要把远端 Docker credential boundary 隐式带入 Attempt。
