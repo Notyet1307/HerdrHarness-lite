@@ -50,6 +50,8 @@ export async function runReviewerValidationProcess(
       || !validTimeoutMs(input.sigkillGraceMs)) {
       throw new Error("Reviewer validation timeout policy is invalid");
     }
+    // ponytail: black-box argv has no trustworthy progress signal; keep the
+    // v3 plan field for compatibility and add a protocol only when a runner can prove progress.
     if (environment.error) throw new Error(environment.error);
     for (const command of validationExecutables(input.validationArgv)) {
       resolveExecutable(command, input.validationPath, environment.env.PATH ?? "");
@@ -98,21 +100,18 @@ export async function runReviewerValidationProcess(
     let runtimeError: Error | null = null;
     let captureFailed = false;
     let timedOut = false;
-    let timeoutReason: "runtime_stall" | "attempt_deadline" | null = null;
+    let timeoutReason: "attempt_deadline" | null = null;
     let interruptedBy: "SIGTERM" | "SIGINT" | null = null;
     let finished = false;
     let heartbeatCount = 0;
-    let lastProgressMs = startedMs;
     let forceTimer: ReturnType<typeof setTimeout> | null = null;
     let confirmationTimer: ReturnType<typeof setTimeout> | null = null;
     let heartbeatTimer: ReturnType<typeof setTimeout> | null = null;
-    let noProgressTimer: ReturnType<typeof setTimeout> | null = null;
     const receiptRoot = dirname(input.progressPath);
     const identity = { version: 1, attemptId: input.attemptId, runnerPid: process.pid, childPid: child.pid ?? null };
     const persistHeartbeat = (): void => {
       heartbeatCount += 1;
       const now = Date.now();
-      lastProgressMs = now;
       const body = {
         ...identity,
         lastProgressAt: new Date(now).toISOString(),
@@ -133,7 +132,7 @@ export async function runReviewerValidationProcess(
       }
     };
     const scheduleHeartbeat = (): void => {
-      const interval = Math.min(1_000, Math.max(10, Math.floor(input.timeoutMs / 4)), Math.max(10, Math.floor(input.noProgressTimeoutMs / 2)));
+      const interval = Math.min(1_000, Math.max(10, Math.floor(input.timeoutMs / 4)));
       heartbeatTimer = setTimeout(() => {
         if (finished) return;
         if (!tryPersistHeartbeat()) {
@@ -142,14 +141,6 @@ export async function runReviewerValidationProcess(
         }
         scheduleHeartbeat();
       }, interval);
-    };
-    const scheduleNoProgress = (): void => {
-      const remaining = Math.max(1, input.noProgressTimeoutMs - (Date.now() - lastProgressMs));
-      noProgressTimer = setTimeout(() => {
-        if (finished) return;
-        if (Date.now() - lastProgressMs >= input.noProgressTimeoutMs) stop("runtime_stall");
-        else scheduleNoProgress();
-      }, remaining);
     };
     const finish = async (exitCode: number | null, signal: string | null, forcedError: string | null = null): Promise<void> => {
       if (finished) return;
@@ -162,7 +153,6 @@ export async function runReviewerValidationProcess(
       if (forceTimer) clearTimeout(forceTimer);
       if (confirmationTimer) clearTimeout(confirmationTimer);
       if (heartbeatTimer) clearTimeout(heartbeatTimer);
-      if (noProgressTimer) clearTimeout(noProgressTimer);
       process.off("SIGTERM", onSigterm);
       process.off("SIGINT", onSigint);
       if (!await stopRemainingProcessGroup(child, input.sigtermGraceMs, input.sigkillGraceMs)) {
@@ -209,12 +199,10 @@ export async function runReviewerValidationProcess(
         relevantEnvironmentDigest: environmentDigest,
       });
     };
-    const stop = (requestedReason: "runtime_stall" | "attempt_deadline" | "SIGTERM" | "SIGINT"): void => {
+    const stop = (requestedReason: "attempt_deadline" | "SIGTERM" | "SIGINT"): void => {
       if (timedOut || interruptedBy) return;
-      const reason = requestedReason === "runtime_stall" && Date.now() - startedMs >= input.timeoutMs
-        ? "attempt_deadline"
-        : requestedReason;
-      if (reason === "runtime_stall" || reason === "attempt_deadline") {
+      const reason = requestedReason;
+      if (reason === "attempt_deadline") {
         timedOut = true;
         timeoutReason = reason;
       }
@@ -242,7 +230,6 @@ export async function runReviewerValidationProcess(
     const timeout = setTimeout(() => stop("attempt_deadline"), input.timeoutMs);
     if (!tryPersistHeartbeat()) stop("SIGTERM");
     scheduleHeartbeat();
-    scheduleNoProgress();
     const capture = (target: ReturnType<typeof openOutputCapture>, chunk: Uint8Array): void => {
       if (captureFailed || finished) return;
       try {

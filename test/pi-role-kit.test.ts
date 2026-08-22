@@ -1,12 +1,16 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const packageJson = JSON.parse(readFileSync("package.json", "utf8")) as {
   pi?: { skills?: string[]; subagents?: { agents?: string[] } };
 };
 const exampleConfig = JSON.parse(readFileSync("harness.config.example.json", "utf8")) as {
   reviewerRuntime: string;
+  reviewerValidationArgv: string[];
   workerArgv: string[];
   reviewerArgv: string[];
   reviewerProviderProfiles: {
@@ -102,6 +106,11 @@ test("example config pins the Worker and Reviewer Pi role contracts", () => {
   assert.equal(exampleConfig.reviewerRuntime, "pi-rpc");
   assert.equal(exampleConfig.reviewer.axisConcurrency, 2);
   assert.equal(exampleConfig.reviewerProviderProfiles.active, "openai-subscription");
+  assert.deepEqual(exampleConfig.reviewerValidationArgv, [
+    "/bin/sh",
+    "-ec",
+    "git init --quiet && git add --all && git -c core.hooksPath=/dev/null -c user.name=herdr-validation -c user.email=herdr-validation@invalid commit --quiet --no-gpg-sign -m validation-snapshot && npm ci --ignore-scripts --no-audit --no-fund && npm run verify",
+  ]);
   assert.deepEqual(exampleConfig.reviewerProviderProfiles.profiles["openai-subscription"], {
     credentialMode: "canonical-oauth",
     provider: "openai-codex",
@@ -116,6 +125,46 @@ test("example config pins the Worker and Reviewer Pi role contracts", () => {
   assert.deepEqual(flagValues(exampleConfig.reviewerArgv, "--provider"), [active.provider]);
   assert.deepEqual(flagValues(exampleConfig.reviewerArgv, "--model"), [active.model]);
   assert.match(readFileSync("pi/skills/code-review/SKILL.md", "utf8"), /candidate Head is review subject\s+data/);
+});
+
+test("example Reviewer validation bootstraps a tracked-only disposable copy", () => {
+  const root = mkdtempSync(join(tmpdir(), "herdr-example-validation-"));
+  const validation = join(root, "validation");
+  const bin = join(root, "bin");
+  const scratchHome = join(root, "home");
+  mkdirSync(validation);
+  mkdirSync(bin);
+  mkdirSync(scratchHome);
+  writeFileSync(join(validation, "tracked.txt"), "tracked\n");
+  writeFileSync(join(bin, "npm"), [
+    "#!/bin/sh",
+    "printf '%s\\n' \"$*\" >> \"$HOME/npm-calls\"",
+    "case \"$*\" in",
+    "  'ci --ignore-scripts --no-audit --no-fund') exit 0 ;;",
+    "  'run verify') test \"$(git rev-parse --is-inside-work-tree)\" = true && test -z \"$(git remote)\" ;;",
+    "  *) exit 12 ;;",
+    "esac",
+  ].join("\n"), { mode: 0o700 });
+  chmodSync(join(bin, "npm"), 0o700);
+  try {
+    const [command, ...args] = exampleConfig.reviewerValidationArgv;
+    const result = spawnSync(command!, args, {
+      cwd: validation,
+      env: { PATH: `${bin}:${process.env.PATH ?? ""}`, HOME: scratchHome },
+      encoding: "utf8",
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(readFileSync(join(scratchHome, "npm-calls"), "utf8"), [
+      "ci --ignore-scripts --no-audit --no-fund",
+      "run verify",
+      "",
+    ].join("\n"));
+    const remotes = spawnSync("git", ["-C", validation, "remote"], { encoding: "utf8" });
+    assert.equal(remotes.status, 0, remotes.stderr);
+    assert.equal(remotes.stdout, "");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 function flagValues(argv: string[], flag: string): string[] {

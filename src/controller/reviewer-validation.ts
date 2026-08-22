@@ -1,6 +1,8 @@
 import { dirname } from "node:path";
-import { type Attempt, type HarnessState, type Job } from "../model.js";
+import { attemptPlanDigest, executionPlanMatches } from "../attempt-plan.js";
+import { digest, type Attempt, type HarnessState, type Job } from "../model.js";
 import type { ReviewerValidationInput } from "../ports.js";
+import { renderAttemptPrompt } from "../prompts.js";
 import { ReviewerValidationIntegrityError, reviewerValidationResult } from "../reviewer-validation.js";
 import { reviewerCheckpointIdentity } from "../reviewer-checkpoints.js";
 import type { ControllerContext } from "./context.js";
@@ -63,7 +65,7 @@ export async function ensureReviewerValidation(
       null,
     );
     if (postValidationIntegrity) return { ok: false, result: postValidationIntegrity };
-    return { ok: true, attempt: boundAttempt };
+    return { ok: true, attempt: activateReviewerRuntime(boundAttempt, ctx.deps.clock.now()) };
   } catch (error) {
     const integrity = error instanceof ReviewerValidationIntegrityError;
     return {
@@ -76,6 +78,38 @@ export async function ensureReviewerValidation(
       }),
     };
   }
+}
+
+function activateReviewerRuntime(attempt: Attempt, now: string): Attempt {
+  if (attempt.executionSnapshot?.runtimeDeadlineAt !== undefined) return attempt;
+  if (attempt.lane !== "reviewer" || attempt.phase !== "prepared" || !attempt.reviewerValidationReceipt
+    || !attempt.executionSnapshot || !attempt.contextEnvelope || !attempt.contextEnvelopeDigest
+    || !executionPlanMatches(attempt) || attempt.contextEnvelopeDigest !== digest(attempt.contextEnvelope)
+    || attempt.contextEnvelope.runtime.snapshotDigest !== digest(attempt.executionSnapshot)) {
+    throw new ReviewerValidationIntegrityError("Reviewer runtime cannot be activated from an unbound validation Attempt");
+  }
+  const activatedAt = Date.parse(now);
+  if (!Number.isFinite(activatedAt)) throw new ReviewerValidationIntegrityError("Reviewer runtime activation time is invalid");
+  const runtimeDeadlineAt = new Date(
+    activatedAt + snapshotRuntimeTimeouts(attempt.executionSnapshot, "reviewer").totalTimeoutMs,
+  ).toISOString();
+  const executionSnapshot = { ...attempt.executionSnapshot, runtimeDeadlineAt };
+  const contextEnvelope = {
+    ...attempt.contextEnvelope,
+    runtime: {
+      ...attempt.contextEnvelope.runtime,
+      snapshotDigest: digest(executionSnapshot),
+      runtimeDeadlineAt,
+    },
+  };
+  let activated: Attempt = {
+    ...attempt,
+    executionSnapshot,
+    contextEnvelope,
+    contextEnvelopeDigest: digest(contextEnvelope),
+  };
+  activated = { ...activated, promptDigest: digest(renderAttemptPrompt(activated)) };
+  return { ...activated, planDigest: attemptPlanDigest(activated) };
 }
 
 export async function verifyBoundReviewerValidation(

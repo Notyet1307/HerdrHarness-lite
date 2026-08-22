@@ -71,12 +71,17 @@ export async function driveAttempt(ctx: ControllerContext, state: HarnessState, 
     const checkpointBlock = await verifyBoundReviewerCheckpoints(ctx, state, job, attempt);
     if (checkpointBlock) return checkpointBlock;
   }
-  if (lane === "reviewer" && (attempt.phase !== "prepared" || attempt.reviewerValidationReceipt !== undefined)) {
+  const reviewerNeedsRuntimeActivation = lane === "reviewer"
+    && attempt.phase === "prepared"
+    && attempt.executionSnapshot?.runtimeDeadlineAt === undefined;
+  if (lane === "reviewer" && (attempt.phase !== "prepared"
+    || (attempt.reviewerValidationReceipt !== undefined && !reviewerNeedsRuntimeActivation))) {
     const validationBlock = await verifyBoundReviewerValidation(ctx, state, job, attempt);
     if (validationBlock) return validationBlock;
   }
 
-  if (attempt.phase === "prepared" && lane === "reviewer" && !attempt.reviewerValidationReceipt) {
+  if (attempt.phase === "prepared" && lane === "reviewer"
+    && (!attempt.reviewerValidationReceipt || reviewerNeedsRuntimeActivation)) {
     const validation = await ensureReviewerValidation(ctx, state, job, attempt);
     if (!validation.ok) return validation.result;
     const postValidationIntegrity = await verifyExecutionSnapshot(

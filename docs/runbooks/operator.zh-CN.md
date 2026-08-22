@@ -47,6 +47,8 @@ codex --version
 
 保持 example 中 ambient-discovery hardening flags、tools、thinking、extension 顺序和 role contract 完整。启用 `reviewerProviderProfiles` 时，裸 `reviewerArgv` selector 应与 active profile 可见值一致；Controller 会在 future Attempt preparation 时绑定 active selection。
 
+Reviewer validation 只收到 exact-HEAD 的 Git tracked files；不会继承 source worktree 的 `.git`、`node_modules`、虚拟环境或构建缓存。`reviewerValidationArgv` 必须是项目显式配置的自包含命令。example 的 Node.js 命令先在 disposable validation copy 内创建无 remote、禁用 hooks/GPG 的临时 Git snapshot，再按 tracked lockfile 执行 `npm ci --ignore-scripts --no-audit --no-fund` 和 `npm run verify`。需要真实 Git 历史、lifecycle script、private registry 或其他包管理器的项目必须替换整条固定 argv，不得复制 source `.git`、依赖 ambient 全局工具或继承 source worktree 的未跟踪依赖。
+
 `workerCompaction.mode` 只接受 `disabled | controlled-threshold`。example、缺省值以及省略该字段的旧配置都安全解析为 `disabled`，迁移不会自动开启。只有明确的长任务 canary 才改为 `controlled-threshold`；变更只影响之后创建的 fresh Worker Attempt。
 
 Worker 启用 Ponytail 时，extension 顺序必须严格为 bundled `worker-tools.js` 后接 `@dietrichgebert/ponytail` `4.9.0` 的 manifest entry。Harness 会强制 `PONYTAIL_DEFAULT_MODE=full`、`PONYTAIL_HIDE_STATUS=1`、`PONYTAIL_QUIET_STARTUP=1`；不要为 Ponytail 放宽 Worker UI allowlist。
@@ -57,9 +59,9 @@ Worker 启用 Ponytail 时，extension 顺序必须严格为 bundled `worker-too
 
 配置要求 Docker 时，preflight 只接受本地 Unix socket，并验证 daemon 与 Compose。不要把远端 Docker credential boundary 隐式带入 Attempt。
 
-运行预算在新 Attempt preparation 时固化，运行中修改配置不会延长旧 Attempt。示例配置写出了当前默认值：Worker total/no-progress 为 90/15 分钟，Reviewer 为 45/10 分钟，validation total 为 30 分钟，SIGTERM/SIGKILL grace 为 10/5 秒；旧配置省略这些块时使用相同默认值。调小前先用 disposable lane 验证目标命令最长静默区间。
+运行预算在新 Attempt 中固化，运行中修改配置不会延长旧 Attempt。Worker absolute deadline 在 preparation 时绑定；Reviewer 先独立受 validation total 约束，只有 exact-HEAD validation receipt 持久化并复核成功后，才在 Provider/pane side effect 前绑定完整 Reviewer runtime total。示例配置写出了当前默认值：Worker total/no-progress 为 90/15 分钟，Reviewer runtime 为 45/10 分钟，validation total 为 30 分钟，SIGTERM/SIGKILL grace 为 10/5 秒；旧配置省略这些块时使用相同默认值。调小前先用 disposable lane 验证目标命令最长静默区间。
 
-Pi RPC 的 no-progress 只由 assistant message、tool execution、controlled compaction、明确 Provider retry、durable result 和 terminal/settled 事件刷新；unknown-safe observation 明确不刷新。`herdr-pi-cli` lane 改用 bounded `agent wait`，只对去除 queue/heartbeat/poll 行后的 terminal text digest 变化刷新进展；原文不落盘。Reviewer validation 使用 Controller-owned validation heartbeat，no-progress 取 Reviewer no-progress 与 validation total 的较小值，total 始终是硬上限。重复读取状态和 Controller/Fleet heartbeat 都不刷新业务进展。`runtime-progress.json`/`validation-progress.json` 只保存时间、类型、计数、PID、result-present 与 digest，不保存 Provider 原文、token 或 transcript。
+Pi RPC 的 no-progress 只由 assistant message、tool execution、controlled compaction、明确 Provider retry、durable result 和 terminal/settled 事件刷新；unknown-safe observation 明确不刷新。`herdr-pi-cli` lane 改用 bounded `agent wait`，只对去除 queue/heartbeat/poll 行后的 terminal text digest 变化刷新进展；原文不落盘。Reviewer validation 是任意黑箱 argv，没有可信业务进展协议，因此只使用 validation total 硬上限；Controller-owned `validation_heartbeat` 仅证明 runner 仍存活，不能刷新或声称业务进展。重复读取状态和 Controller/Fleet heartbeat 都不刷新业务进展。`runtime-progress.json`/`validation-progress.json` 只保存时间、类型、计数、PID、result-present 与 digest，不保存 Provider 原文、token 或 transcript。
 
 `runtime_stall` 表示已 dispatch 后超过 no-progress，`attempt_deadline` 表示无论期间是否持续进展都到达 total。两者都会写 terminate intent，经过 bounded SIGTERM/SIGKILL 收尾并要求 fresh Attempt；不得向旧 Attempt 重发 prompt。若 `terminated.json` 未确认，先核对 owned pane、runner/child PID 与 heartbeat，再按当前 operator option 处理，不能手工伪造 receipt。
 
