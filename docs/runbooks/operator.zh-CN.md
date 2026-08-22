@@ -175,6 +175,8 @@ node dist/src/cli.js decide \
 
 same-HEAD Reviewer fresh retry 可能携带 `reviewerCheckpointInputs`。只读核对 source Attempt、stage、path/digest 和新 Attempt plan；不要手工创建、编辑、复制或改权限来“修复” `reviewer-preflight.json`、`standards-axis.json`、`spec-axis.json`、`validation-receipt.json` 或 `reviewer-final.json`。无效 checkpoint 应由 Controller 拒绝并重跑缺失阶段或 fail closed。即使 `reviewer-final.json` 存在，也必须等待 fresh Reviewer 的 durable `review_submit` result、exact HEAD 与 clean-tree gate。
 
+Review Axis 失败时，durable blocked summary 中的 `Harness Review Axis failure` 行是 Harness 生成的安全投影。使用 axis、固定 code、exit、timeout/interrupted/stopped/detached 与 output byte count 判断失败形状；它不包含 child error、stderr、stack 或输出原文。`retryable` 仍只是诊断属性，必须消费当前 operator option 才能恢复。缺少该行的旧 Attempt 不能靠猜测补写，应在修复投影后通过 fresh Reviewer 重新取证。
+
 Short provider probe、Herdr `done`、Reviewer child completed 或 validation pass 均不足以宣告恢复。至少等新的 durable role result 和对应 Git gate。
 
 ## 9. 失败诊断与 Fleet 聚合
