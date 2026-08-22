@@ -11,7 +11,7 @@ import { JsonStateStore } from "./adapters/json-store.js";
 import { LocalEvidence } from "./adapters/local-evidence.js";
 import { PiRpcRuntime } from "./adapters/pi-rpc-runtime.js";
 import { RuntimePreflightCli } from "./adapters/runtime-preflight.js";
-import { HarnessController } from "./controller.js";
+import { HarnessController, validateHarnessConfig } from "./controller.js";
 import { startControllerHeartbeat } from "./controller-heartbeat.js";
 import { acquireControllerLease } from "./controller-lease.js";
 import { digest } from "./model.js";
@@ -20,12 +20,14 @@ import { aggregateCanaryReport, readCanaryReport } from "./canary.js";
 import { projectOperatorState } from "./policy.js";
 import { approveRecovery, cancelHeldJob, reassessIncident, resolveDecision } from "./recovery.js";
 import { installProcessShutdownSignal } from "./shutdown-signal.js";
+import { configuredRuntimePreflightReport } from "./controller/runtime-preflight.js";
 import type { Clock, HarnessConfig, IdGenerator } from "./ports.js";
 
 const usage = `Usage:
   herdr-harness-lite tick --config /absolute/harness.config.json
   herdr-harness-lite run --config /absolute/harness.config.json [--poll-ms 15000] [--max-cycles N]
   herdr-harness-lite status --config /absolute/harness.config.json [--operator]
+  herdr-harness-lite preflight --config /absolute/harness.config.json --lane worker|reviewer [--json]
   herdr-harness-lite diagnose --config /absolute/harness.config.json [--days 7] [--json]
   herdr-harness-lite diagnose --canary /absolute/canary-report.json [--json]
   herdr-harness-lite decide --config /absolute/harness.config.json --option ID --actor TEXT --reason TEXT
@@ -74,6 +76,22 @@ async function main(argv: string[]): Promise<number> {
   const store = new JsonStateStore(config.stateDir);
   const clock = new SystemClock();
   const ids = new UuidIds();
+
+  if (command === "preflight") {
+    validateHarnessConfig(config);
+    const lane = requiredFlag(argv, "--lane");
+    if (lane !== "worker" && lane !== "reviewer") throw new Error("--lane must be worker or reviewer");
+    const report = await configuredRuntimePreflightReport(
+      config,
+      new RuntimePreflightCli(),
+      [lane],
+      clock.now(),
+    );
+    process.stdout.write(argv.includes("--json")
+      ? `${JSON.stringify(report, null, 2)}\n`
+      : `${formatPreflightReport(report)}\n`);
+    return report.ok ? 0 : 1;
+  }
 
   if (command === "diagnose") {
     const report = diagnoseProjects([diagnosticProject(config)], { days: optionalIntegerFlag(argv, "--days") ?? 7 });
@@ -189,6 +207,14 @@ function loadConfig(path: string): FileConfig {
     throw new Error("invalid Harness config: preflight must contain optional piBin and dockerRequired values");
   }
   return parsed;
+}
+
+function formatPreflightReport(report: Awaited<ReturnType<typeof configuredRuntimePreflightReport>>): string {
+  const lane = report.lanes.join(",");
+  const docker = report.docker.required ? report.docker.available ? "ready" : "failed" : "not-required";
+  return report.ok
+    ? `Preflight PASS · lane=${lane} · docker=${docker} · config=${report.configDigest.slice(0, 12)}`
+    : `Preflight FAIL · lane=${lane} · code=${report.failure?.code ?? "preflight_failed"} · retryable=${report.failure?.retryable ? "yes" : "no"}`;
 }
 
 function flag(argv: string[], name: string): string | null {

@@ -410,12 +410,18 @@ export function classifyProviderFailure(
   stopReason: "error" | "aborted",
   errorMessage: unknown,
   context: ProviderFailureContext,
+  projectedFailureCode?: unknown,
 ): SafeRuntimeDiagnostic {
   const message = typeof errorMessage === "string" ? errorMessage.toLowerCase() : "";
   const httpStatus = extractHttpStatus(message);
+  const textClassification = classifyProviderError(message, httpStatus);
   const classified = stopReason === "aborted"
     ? { failureDomain: "runner_internal" as const, failureCode: "assistant_aborted" as const, retryable: false }
-    : classifyProviderError(message, httpStatus);
+    : textClassification.failureCode === "provider_unknown"
+      && context.providerApi === "openai-codex-responses"
+      && projectedFailureCode === "provider_network"
+      ? { failureDomain: "provider" as const, failureCode: "provider_network" as const, retryable: true }
+      : textClassification;
   const stable = stopReason === "aborted"
     ? { domain: "execution" as const, code: "assistant_aborted" as const, stage: "agent-run" as const }
     : stableProviderFailure(classified.failureCode);

@@ -1146,10 +1146,11 @@ test("durable runner never persists child Provider diagnostics", () => {
 
 test("durable runner rejects a settled assistant failure without persisting Provider diagnostics", () => {
   const cases = [
-    { stopReason: "error", providerError: "HTTP 429 rate limit", tool: undefined, code: "provider_rate_limited", phase: "initial_generation", retryable: true },
-    { stopReason: "error", providerError: "HTTP 529 overloaded_error", tool: "success", code: "provider_overloaded", phase: "tool_continuation", retryable: true },
-    { stopReason: "error", providerError: "HTTP 413 request_too_large", tool: "error", code: "provider_request_too_large", phase: "tool_error_recovery", retryable: false },
-    { stopReason: "aborted", providerError: "cancelled", tool: undefined, code: "assistant_aborted", phase: "initial_generation", retryable: false },
+    { stopReason: "error", providerError: "HTTP 429 rate limit", tool: undefined, hint: undefined, api: "anthropic-messages", code: "provider_rate_limited", phase: "initial_generation", retryable: true },
+    { stopReason: "error", providerError: "HTTP 529 overloaded_error", tool: "success", hint: undefined, api: "anthropic-messages", code: "provider_overloaded", phase: "tool_continuation", retryable: true },
+    { stopReason: "error", providerError: "HTTP 413 request_too_large", tool: "error", hint: undefined, api: "anthropic-messages", code: "provider_request_too_large", phase: "tool_error_recovery", retryable: false },
+    { stopReason: "error", providerError: "opaque transport failure", tool: "error", hint: "provider_network", api: "openai-codex-responses", code: "provider_network", phase: "tool_error_recovery", retryable: true },
+    { stopReason: "aborted", providerError: "cancelled", tool: undefined, hint: undefined, api: "anthropic-messages", code: "assistant_aborted", phase: "initial_generation", retryable: false },
   ] as const;
   for (const scenario of cases) {
     const { stopReason } = scenario;
@@ -1187,8 +1188,9 @@ test("durable runner rejects a settled assistant failure without persisting Prov
           ...process.env,
           FAKE_PI_ASSISTANT_STOP_REASON: stopReason,
           FAKE_PI_ASSISTANT_ERROR: providerError,
-          FAKE_PI_API: "anthropic-messages",
+          FAKE_PI_API: scenario.api,
           ...(scenario.tool ? { FAKE_PI_TOOL_BEFORE_FAILURE: scenario.tool } : {}),
+          ...(scenario.hint ? { FAKE_PI_PROVIDER_FAILURE_CODE: scenario.hint } : {}),
         },
       });
 
@@ -1200,7 +1202,7 @@ test("durable runner rejects a settled assistant failure without persisting Prov
       assert.equal(terminal.failureDomain, stopReason === "error" ? "provider" : "runner_internal");
       assert.equal(terminal.failureCode, scenario.code);
       assert.equal(terminal.retryable, scenario.retryable);
-      assert.equal(terminal.providerApi, "anthropic-messages");
+      assert.equal(terminal.providerApi, scenario.api);
       assert.equal(terminal.phase, scenario.phase);
       assert.equal(terminal.turnCount, 1);
       assert.equal(terminal.assistantMessageCount, 1);

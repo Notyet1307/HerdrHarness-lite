@@ -8,6 +8,54 @@ import { PI_RPC_SDK_ENTRY } from "./resources.js";
 import { rpcEnabled, runtimeRole, snapshotCredentialMode, workerCompactionMode } from "./runtime-contract.js";
 import type { ControllerContext } from "./context.js";
 import type { TickResult } from "./types.js";
+import type { HarnessConfig, RuntimePreflightPort } from "../ports.js";
+
+export type RuntimePreflightReport = {
+  version: 1;
+  generatedAt: string;
+  configDigest: string;
+  lanes: Attempt["lane"][];
+  ok: boolean;
+  docker: { required: boolean; available: boolean | null };
+  failure: { code: string; retryable: boolean } | null;
+};
+
+export async function configuredRuntimePreflightReport(
+  config: HarnessConfig,
+  preflight: RuntimePreflightPort,
+  lanes: Attempt["lane"][],
+  generatedAt: string,
+): Promise<RuntimePreflightReport> {
+  const base = {
+    version: 1 as const,
+    generatedAt,
+    configDigest: digest(config),
+    lanes: [...lanes],
+    docker: { required: config.preflight?.dockerRequired === true, available: null as boolean | null },
+  };
+  try {
+    const result = await probeRuntimePreflight(config, preflight, lanes);
+    return {
+      ...base,
+      ok: true,
+      docker: {
+        ...base.docker,
+        available: base.docker.required ? result.dockerHost !== null : null,
+      },
+      failure: null,
+    };
+  } catch (error) {
+    const failure = preflightFailureResult(null, error);
+    return {
+      ...base,
+      ok: false,
+      failure: {
+        code: failure.failureCode ?? "preflight_failed",
+        retryable: failure.retryable ?? false,
+      },
+    };
+  }
+}
 
 export async function runRuntimePreflight(
   ctx: ControllerContext,
@@ -18,80 +66,86 @@ export async function runRuntimePreflight(
   | { ok: true; dockerHost: string | null }
   | { ok: false; result: TickResult }
 > {
-  let dockerHost: string | null = executionSnapshot?.dockerHost ?? null;
   try {
-    if (!executionSnapshot && ctx.deps.config.preflight?.dockerRequired === true) {
-      dockerHost = (await ctx.deps.preflight.probeDocker({ cwd: ctx.deps.config.localPath })).host;
-    }
-    const preclaimNeedsRpc = !executionSnapshot && lanes.some((lane) => rpcEnabled(ctx.deps.config, lane));
-    const preclaimNeedsCanonicalOAuth = !executionSnapshot && lanes.some((lane) => (
-      runtimeRole(ctx.deps.config, lane).credentialMode === "canonical-oauth"
-    ));
-    const preclaimRuntime = preclaimNeedsRpc
-      ? await ctx.deps.preflight.inspectPi({
-          cwd: ctx.deps.config.localPath,
-          piBin: ctx.deps.config.preflight?.piBin ?? "pi",
-        })
-      : null;
-    if (!executionSnapshot && lanes.includes("worker") && rpcEnabled(ctx.deps.config, "worker")
-      && workerCompactionMode(ctx.deps.config) === "controlled-threshold"
-      && preclaimRuntime?.version !== QUALIFIED_CONTROLLED_COMPACTION_PI_VERSION) {
-      throw new Error(`controlled Worker compaction requires Pi ${QUALIFIED_CONTROLLED_COMPACTION_PI_VERSION}`);
-    }
-    const preclaimCredentialAgentDir = preclaimNeedsRpc || preclaimNeedsCanonicalOAuth
-      ? (await ctx.deps.preflight.assertNoAmbientSystemPrompt({ cwd: ctx.deps.config.localPath })).agentDir
-      : null;
-    const preclaimCredentialDomainId = preclaimNeedsCanonicalOAuth
-      ? (await ctx.deps.preflight.credentialDomain({ credentialAgentDir: preclaimCredentialAgentDir! })).credentialDomainId
-      : null;
-    for (const lane of lanes) {
-      const useRpc = executionSnapshot?.adapter === "pi-rpc" || (!executionSnapshot && rpcEnabled(ctx.deps.config, lane));
-      const role = runtimeRole(ctx.deps.config, lane);
-      const credentialMode = executionSnapshot
-        ? executionSnapshot.credentialDomainId ? "canonical-oauth" : useRpc ? snapshotCredentialMode(executionSnapshot) : undefined
-        : useRpc || role.credentialMode === "canonical-oauth" ? role.credentialMode : undefined;
-      const credentialAgentDir = useRpc || credentialMode === "canonical-oauth"
-        ? executionSnapshot?.context?.agentDir ?? preclaimCredentialAgentDir ?? undefined
-        : undefined;
-      const credentialDomainId = credentialMode === "canonical-oauth"
-        ? executionSnapshot?.credentialDomainId ?? preclaimCredentialDomainId ?? undefined
-        : undefined;
-      const modelConfigs = executionSnapshot?.resources.filter((resource) => resource.kind === "model-config") ?? [];
-      if (credentialMode === "canonical-model-config" && executionSnapshot && modelConfigs.length !== 1) {
-        throw new Error("Reviewer RPC snapshot must bind exactly one models.json");
-      }
-      const modelConfig = useRpc && credentialMode === "canonical-model-config"
-        ? modelConfigs[0] ?? executionResource("model-config", join(credentialAgentDir!, "models.json"))
-        : undefined;
-      const rpcHost = useRpc
-        ? executionSnapshot
-          ? executionSnapshot.resources.find((resource) => resource.kind === "runtime" && basename(resource.path) === "pi-rpc-sdk-entry.js")
-          : executionResource("runtime", PI_RPC_SDK_ENTRY)
-        : undefined;
-      await ctx.deps.preflight.probeProvider({
-        lane,
-        cwd: ctx.deps.config.localPath,
-        roleArgv: executionSnapshot?.argv ?? role.argv,
-        piBin: executionSnapshot?.executable ?? preclaimRuntime?.executable ?? ctx.deps.config.preflight?.piBin ?? "pi",
-        ...(useRpc ? { piVersion: executionSnapshot?.runtimeVersion ?? preclaimRuntime!.version } : {}),
-        ...(useRpc ? { agentDir: executionSnapshot ? piRpcAgentDir(executionSnapshot) : resolve(ctx.deps.config.stateDir, "preflight", `pi-rpc-${lane}-agent`) } : {}),
-        ...(credentialAgentDir ? { credentialAgentDir } : {}),
-        ...(credentialMode ? { credentialMode } : {}),
-        ...(credentialDomainId ? { credentialDomainId } : {}),
-        ...(credentialMode === "canonical-oauth" && (executionSnapshot?.provider ?? role.provider)
-          ? { credentialProvider: executionSnapshot?.provider ?? role.provider! }
-          : {}),
-        ...(modelConfig ? { modelConfig } : {}),
-        ...(rpcHost ? { rpcHost } : {}),
-      });
-    }
-    return { ok: true, dockerHost };
+    return { ok: true, ...(await probeRuntimePreflight(ctx.deps.config, ctx.deps.preflight, lanes, executionSnapshot)) };
   } catch (error) {
     return {
       ok: false,
       result: preflightFailureResult(jobId, error),
     };
   }
+}
+
+export async function probeRuntimePreflight(
+  config: HarnessConfig,
+  preflight: RuntimePreflightPort,
+  lanes: Attempt["lane"][],
+  executionSnapshot?: ExecutionSnapshot,
+): Promise<{ dockerHost: string | null }> {
+  let dockerHost: string | null = executionSnapshot?.dockerHost ?? null;
+  if (!executionSnapshot && config.preflight?.dockerRequired === true) {
+    dockerHost = (await preflight.probeDocker({ cwd: config.localPath })).host;
+  }
+  const preclaimNeedsRpc = !executionSnapshot && lanes.some((lane) => rpcEnabled(config, lane));
+  const preclaimNeedsCanonicalOAuth = !executionSnapshot && lanes.some((lane) => (
+    runtimeRole(config, lane).credentialMode === "canonical-oauth"
+  ));
+  const preclaimRuntime = preclaimNeedsRpc
+    ? await preflight.inspectPi({ cwd: config.localPath, piBin: config.preflight?.piBin ?? "pi" })
+    : null;
+  if (!executionSnapshot && lanes.includes("worker") && rpcEnabled(config, "worker")
+    && workerCompactionMode(config) === "controlled-threshold"
+    && preclaimRuntime?.version !== QUALIFIED_CONTROLLED_COMPACTION_PI_VERSION) {
+    throw new Error(`controlled Worker compaction requires Pi ${QUALIFIED_CONTROLLED_COMPACTION_PI_VERSION}`);
+  }
+  const preclaimCredentialAgentDir = preclaimNeedsRpc || preclaimNeedsCanonicalOAuth
+    ? (await preflight.assertNoAmbientSystemPrompt({ cwd: config.localPath })).agentDir
+    : null;
+  const preclaimCredentialDomainId = preclaimNeedsCanonicalOAuth
+    ? (await preflight.credentialDomain({ credentialAgentDir: preclaimCredentialAgentDir! })).credentialDomainId
+    : null;
+  for (const lane of lanes) {
+    const useRpc = executionSnapshot?.adapter === "pi-rpc" || (!executionSnapshot && rpcEnabled(config, lane));
+    const role = runtimeRole(config, lane);
+    const credentialMode = executionSnapshot
+      ? executionSnapshot.credentialDomainId ? "canonical-oauth" : useRpc ? snapshotCredentialMode(executionSnapshot) : undefined
+      : useRpc || role.credentialMode === "canonical-oauth" ? role.credentialMode : undefined;
+    const credentialAgentDir = useRpc || credentialMode === "canonical-oauth"
+      ? executionSnapshot?.context?.agentDir ?? preclaimCredentialAgentDir ?? undefined
+      : undefined;
+    const credentialDomainId = credentialMode === "canonical-oauth"
+      ? executionSnapshot?.credentialDomainId ?? preclaimCredentialDomainId ?? undefined
+      : undefined;
+    const modelConfigs = executionSnapshot?.resources.filter((resource) => resource.kind === "model-config") ?? [];
+    if (credentialMode === "canonical-model-config" && executionSnapshot && modelConfigs.length !== 1) {
+      throw new Error("Reviewer RPC snapshot must bind exactly one models.json");
+    }
+    const modelConfig = useRpc && credentialMode === "canonical-model-config"
+      ? modelConfigs[0] ?? executionResource("model-config", join(credentialAgentDir!, "models.json"))
+      : undefined;
+    const rpcHost = useRpc
+      ? executionSnapshot
+        ? executionSnapshot.resources.find((resource) => resource.kind === "runtime" && basename(resource.path) === "pi-rpc-sdk-entry.js")
+        : executionResource("runtime", PI_RPC_SDK_ENTRY)
+      : undefined;
+    await preflight.probeProvider({
+      lane,
+      cwd: config.localPath,
+      roleArgv: executionSnapshot?.argv ?? role.argv,
+      piBin: executionSnapshot?.executable ?? preclaimRuntime?.executable ?? config.preflight?.piBin ?? "pi",
+      ...(useRpc ? { piVersion: executionSnapshot?.runtimeVersion ?? preclaimRuntime!.version } : {}),
+      ...(useRpc ? { agentDir: executionSnapshot ? piRpcAgentDir(executionSnapshot) : resolve(config.stateDir, "preflight", `pi-rpc-${lane}-agent`) } : {}),
+      ...(credentialAgentDir ? { credentialAgentDir } : {}),
+      ...(credentialMode ? { credentialMode } : {}),
+      ...(credentialDomainId ? { credentialDomainId } : {}),
+      ...(credentialMode === "canonical-oauth" && (executionSnapshot?.provider ?? role.provider)
+        ? { credentialProvider: executionSnapshot?.provider ?? role.provider! }
+        : {}),
+      ...(modelConfig ? { modelConfig } : {}),
+      ...(rpcHost ? { rpcHost } : {}),
+    });
+  }
+  return { dockerHost };
 }
 
 export async function verifyExecutionSnapshot(

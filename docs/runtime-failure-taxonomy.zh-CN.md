@@ -64,6 +64,7 @@
 | `tool_execution_end` 后无 `agent_settled` | `FAKE_PI_TOOL_BEFORE_FAILURE=success` + `FAKE_PI_CONTINUATION_LOST=1` | `provider_continuation_lost`，不保存 tool result |
 | 首个工具前 partial assistant 后失联 | `FAKE_PI_ASSISTANT_BEFORE_CONTINUATION_LOST=1` + `FAKE_PI_CONTINUATION_LOST=1` | `provider_continuation_lost` + 完整无工具副作用边界 |
 | read/edit/bash 已开始后 Provider 429 | `FAKE_PI_TOOL_START_ONLY=<tool>` + assistant 429 | `toolExecutionStarted=true`，拒绝自动 fresh retry |
+| Pi 0.84.2 在消息流开始后报告 transport failure | projected `provider_transport_failure` + opaque Provider error | 只保留 `provider_network`，丢弃 diagnostic error/stack/details；工具已开始时仍拒绝自动 fresh retry |
 | durable result 已写但 terminal 缺失 | `FAKE_PI_RESULT_BEFORE_STALL=1` | result 创建刷新一次进展；随后 `runtime_stall`，failure receipt 优先且仍不能验收 |
 | terminal failure 后 durable result 已存在 | `FAKE_PI_TERMINAL_FAILURE_AFTER_RESULT=1` | failure receipt 优先，adapter 拒绝交付 |
 | 单条 event 超过 1 MiB | `FAKE_PI_OVERSIZE_EVENT=1` | `rpc_event_oversize`，spool 不保存大 payload |

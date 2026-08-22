@@ -415,6 +415,10 @@ export function projectPiRpcEvent(event: PiRpcEvent, runtimeVersion: string): Pi
     if (typeof source.errorMessage === "string") {
       message.errorMessage = boundedUtf8(source.errorMessage, MAX_PROJECTED_ERROR_BYTES);
     }
+    const providerFailureCode = runtimeVersion === "0.84.2"
+      ? projectedProviderFailureCode(source.diagnostics)
+      : undefined;
+    if (providerFailureCode) message.providerFailureCode = providerFailureCode;
     return {
       type,
       message,
@@ -494,6 +498,20 @@ function projectedUsage(value: unknown): PiRpcEvent {
 
 function projectedString(value: unknown, maxBytes: number): string | undefined {
   return typeof value === "string" ? boundedUtf8(value, maxBytes) : undefined;
+}
+
+function projectedProviderFailureCode(value: unknown): "provider_network" | undefined {
+  if (!Array.isArray(value)) return undefined;
+  for (const entry of value) {
+    const diagnostic = record(entry);
+    const details = record(diagnostic.details);
+    if (
+      diagnostic.type === "provider_transport_failure"
+      && details.eventsEmitted === true
+      && details.phase === "after_message_stream_start"
+    ) return "provider_network";
+  }
+  return undefined;
 }
 
 function boundedUtf8(value: string, maxBytes: number): string {

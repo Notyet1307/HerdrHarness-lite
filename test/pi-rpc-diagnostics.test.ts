@@ -193,6 +193,22 @@ test("Provider diagnostic fingerprints never depend on secret error text", () =>
   assert.equal(JSON.stringify(second).includes("SECOND_SECRET"), false);
 });
 
+test("qualified structured transport evidence classifies an opaque Provider failure without persisting text", () => {
+  const diagnostic = classifyProviderFailure(
+    "error",
+    "access_token_OPAQUE_PROVIDER_SENTINEL",
+    { ...context, providerApi: "openai-codex-responses" },
+    "provider_network",
+  );
+  assert.equal(diagnostic.failureCode, "provider_network");
+  assert.equal(diagnostic.code, "provider_network");
+  assert.equal(diagnostic.retryable, true);
+  assert.equal(JSON.stringify(diagnostic).includes("OPAQUE_PROVIDER_SENTINEL"), false);
+  assert.equal(classifyProviderFailure("error", "HTTP 401 denied", context, "provider_network").failureCode, "provider_authentication");
+  assert.equal(classifyProviderFailure("error", "opaque", context, "provider_timeout").failureCode, "provider_unknown");
+  assert.equal(classifyProviderFailure("error", "opaque", context, "provider_network").failureCode, "provider_unknown");
+});
+
 test("assistant aborts and malformed diagnostics fail closed", () => {
   const aborted = classifyProviderFailure("aborted", "access_token_SECRET", {
     ...context,
