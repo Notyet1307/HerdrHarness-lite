@@ -243,7 +243,7 @@ function readSelectedJson(path: string): unknown {
   }
 }
 
-function safeCompactionReceipt(value: unknown): Record<string, unknown> | null {
+export function safeCompactionReceipt(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const receipt = value as Record<string, unknown>;
   const allowed = [

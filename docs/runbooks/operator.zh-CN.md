@@ -154,7 +154,54 @@ same-HEAD Reviewer fresh retry 可能携带 `reviewerCheckpointInputs`。只读�
 
 Short provider probe、Herdr `done`、Reviewer child completed 或 validation pass 均不足以宣告恢复。至少等新的 durable role result 和对应 Git gate。
 
-## 9. 升级与回滚
+## 9. 失败诊断与 Fleet 聚合
+
+诊断命令只读项目 `state.json`、Controller 的 content-free `events.jsonl` 审计投影，以及 Attempt 目录中固定名称的 terminal/progress/Reviewer checkpoint receipt。它不读取 `runtime-events.jsonl`、objective/body、result 摘要、完整 Evidence、auth path、token、Provider 原始响应、stack 或私密 transcript，也不取得 Controller lease。
+
+单项目采集最近 7 天或 30 天：
+
+```bash
+herdr-harness-lite diagnose --config /ABSOLUTE/PATH/harness.config.json --days 7
+herdr-harness-lite diagnose --config /ABSOLUTE/PATH/harness.config.json --days 30
+```
+
+Fleet 聚合所有项目，或只看一个项目：
+
+```bash
+herdr-harness-fleet diagnose --config /ABSOLUTE/PATH/fleet.config.json --days 7
+herdr-harness-fleet diagnose --config /ABSOLUTE/PATH/fleet.config.json --project PROJECT_ID --days 30
+```
+
+默认输出只有聚合视图；需要逐 Attempt 安全字段时显式加 `--json`。逐 Attempt 输出仍只包含结构化分类、计数、布尔值、桶和安全身份，不包含正文。Provider/model 使用分别带类型域的稳定 SHA-256 ID，因此可以跨窗口分组比较，但不会把误填到 selector 的凭据原样写入审计或输出。Harness 配置可选择项目 ID 以及 repo/Issue 脱敏：
+
+```json
+{
+  "diagnostics": {
+    "projectId": "product-api",
+    "redactRepo": true,
+    "redactIssue": true
+  }
+}
+```
+
+读取结果时先看 `partial`、`corrupt` 和 `unknown` 桶：
+
+- 单个 receipt 损坏只把对应 Attempt 标为 `partial/corrupt`，不会中止其他项目或 Attempt；不得把 `unknown` 重新归入最接近的 failure code。
+- 新版本会把安全 Attempt 元数据追加到既有 best-effort `events.jsonl` 审计。状态原子提交仍是 authority；audit append 降级、升级前遗留数据、Pi RPC 缺失 terminal，或所有 adapter 同时缺失 terminal/progress receipt 时会产生 `partial/unknown`，不能据此声称完整失败率。
+- 7/30 天窗口按 durable Attempt/Job 时间、progress 时间或最后的文件创建事实过滤；使用 filesystem 时间的行会明确标为 partial。保留目标窗口内的项目 `stateDir`，不要为了统计手工补 receipt 或改 ledger。
+
+`taxonomyDomain` 用于判断失败层：
+
+- `execution`：Provider/model/runtime 确实未完成本次执行；查看 `failureDomain` 继续区分 `model`、`provider`、`rpc`、`credential`、`compaction` 或 `harness_policy`。
+- `observation`：Harness 无法确认 terminal/continuation/liveness；即使 `resultPresent=true` 也不能当成交付成功，应先收敛同一 Attempt 的事实，不能重发 prompt。
+- `acceptance`：durable result、identity、Git clean/exact HEAD、Reviewer validation 等验收失败；模型可能已经工作，但没有形成可交付 fixed point。
+- `deterministic`：固定 validation/check 命令给出可重复非零结果；它不同于 Provider 或 runtime 波动。
+
+`retryable` 只描述诊断，不授权恢复。自动恢复次数只统计 ledger 中明确、有限、可审计的 policy recovery；Analyst advice 不计为授权。
+
+用于 A/B canary 时，先固定 Issue 类型、lane、Pi 版本、validation 命令、超时、Git 基线与运行时 adapter，只改变一个 Provider/model 或 runtime 配置。Fleet 禁止重复 repo，因此同一 repo 的 A/B 应顺序运行；并行 canary 必须使用彼此隔离的 disposable repo/project。分别采集相同天数，比较 `byFailureCode`、`byProviderModel`、context/output 桶、durable-result、compaction、partial 比例和最终 Job outcome。样本量不足、partial 比例不同或 Git/GitHub fixed point 未完成时，不据此扩大 rollout 或自动放宽 recovery policy。
+
+## 10. 升级与回滚
 
 升级前：
 
@@ -167,7 +214,7 @@ Short provider probe、Herdr `done`、Reviewer child completed 或 validation pa
 
 回滚恢复上一版 code/build/config 后，复核 exact SHA、单一 Controller、heartbeat、ledger revision 和 active Attempt。旧日志需要按 mtime 与本次重启时间解释。
 
-## 10. 验证与证据
+## 11. 验证与证据
 
 仓库改动至少运行：
 

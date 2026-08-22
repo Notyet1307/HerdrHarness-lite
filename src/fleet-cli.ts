@@ -4,10 +4,12 @@ import { resetFleetProject } from "./fleet/reset.js";
 import { readFleetStatus } from "./fleet/status.js";
 import { runFleetSupervisor } from "./fleet/supervisor.js";
 import { runFleetTick } from "./fleet/tick.js";
+import { aggregateDiagnosticOutput, diagnoseProjects, diagnosticProject } from "./diagnostics.js";
 
 const usage = `Usage:
   herdr-harness-fleet validate --config /absolute/fleet.config.json [--project ID]
   herdr-harness-fleet status --config /absolute/fleet.config.json [--project ID] [--operator]
+  herdr-harness-fleet diagnose --config /absolute/fleet.config.json [--project ID] [--days 7] [--json]
   herdr-harness-fleet tick --config /absolute/fleet.config.json [--project ID] [--concurrency N]
   herdr-harness-fleet run --config /absolute/fleet.config.json [--project ID]
   herdr-harness-fleet reset --config /absolute/fleet.config.json --project ID
@@ -46,6 +48,14 @@ async function main(argv: string[]): Promise<number> {
   if (command === "status") {
     const status = await readFleetStatus({ ...config, projects }, argv.includes("--operator"));
     process.stdout.write(`${JSON.stringify(status, null, 2)}\n`);
+    return 0;
+  }
+  if (command === "diagnose") {
+    const report = diagnoseProjects(
+      projects.map((project) => diagnosticProject(project.config, project.id)),
+      { days: optionalIntegerFlag(argv, "--days") ?? 7 },
+    );
+    process.stdout.write(`${JSON.stringify(argv.includes("--json") ? report : aggregateDiagnosticOutput(report), null, 2)}\n`);
     return 0;
   }
   if (command === "tick") {

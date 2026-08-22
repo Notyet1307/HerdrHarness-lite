@@ -72,6 +72,16 @@ export function validateHarnessConfig(config: HarnessConfig): void {
       throw new Error("workerCompaction controlled-threshold requires workerRuntime=pi-rpc");
     }
   }
+  if (config.diagnostics !== undefined) {
+    if (!config.diagnostics || typeof config.diagnostics !== "object" || Array.isArray(config.diagnostics)
+      || Object.keys(config.diagnostics).some((key) => !["projectId", "redactRepo", "redactIssue"].includes(key))
+      || (config.diagnostics.projectId !== undefined
+        && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(config.diagnostics.projectId))
+      || (config.diagnostics.redactRepo !== undefined && typeof config.diagnostics.redactRepo !== "boolean")
+      || (config.diagnostics.redactIssue !== undefined && typeof config.diagnostics.redactIssue !== "boolean")) {
+      throw new Error("diagnostics must contain only a bounded projectId and boolean redaction flags");
+    }
+  }
   for (const [name, value] of [["worker", config.worker], ["reviewer", config.reviewer]] as const) {
     if (value !== undefined && (!value || typeof value !== "object" || Array.isArray(value))) throw new Error(`${name} must be an object`);
     if (value && Object.keys(value).some((key) => (
