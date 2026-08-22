@@ -59,6 +59,11 @@ test("Reviewer axis startup policy serializes OAuth and preserves custom Provide
   const contract = { status: "pass", summary: "ok", findings: [], evidenceRefs: [] };
   assert.deepEqual(extension.parseReviewAxisJson(JSON.stringify(contract)), contract);
   assert.deepEqual(extension.parseReviewAxisJson(`prose\n\`\`\`json\n${JSON.stringify(contract)}\n\`\`\``), contract);
+  assert.deepEqual(extension.parseReviewAxisJson(`prose\n${JSON.stringify(contract)}`), contract);
+  const bracedContract = { ...contract, summary: "quoted {value} and escaped \\\"text\\\"" };
+  assert.deepEqual(extension.parseReviewAxisJson(`prose\n${JSON.stringify(bracedContract)}`), bracedContract);
+  assert.equal(extension.parseReviewAxisJson(`prose\n${JSON.stringify(contract)}\n${JSON.stringify(contract)}`), undefined);
+  assert.equal(extension.parseReviewAxisJson(`prose\n${JSON.stringify({ ...contract, unexpected: true })}`), undefined);
   assert.equal(extension.parseReviewAxisJson(`\`\`\`\n${JSON.stringify(contract)}\n\`\`\``), undefined);
   assert.equal(extension.parseReviewAxisJson(`\`\`\`json\n${JSON.stringify(contract)}\n\`\`\`\n\`\`\`json\n${JSON.stringify(contract)}\n\`\`\``), undefined);
 
@@ -208,6 +213,9 @@ test("axisConcurrency=1 descriptor blocks dual launch and admits Standards then 
       findings: [],
       evidenceRefs: [],
       acceptanceReport: { private: fencedSentinel },
+      criteriaSatisfied: [{ id: "review", status: "satisfied", evidence: fencedSentinel }],
+      changedFiles: [],
+      validationOutput: [fencedSentinel],
     });
     const projectedStandards = await toolResultHook!({
       toolCallId: "standards",
@@ -219,13 +227,17 @@ test("axisConcurrency=1 descriptor blocks dual launch and admits Standards then 
         agent: "herdr-harness-review-axis",
         task: standardsTask,
         exitCode: 0,
-        finalOutput: `${fencedSentinel}\n\n\`\`\`json\n${standardsJson}\n\`\`\`\n\n${fencedSentinel}`,
+        finalOutput: `${fencedSentinel}\n\n${standardsJson}`,
       }] },
     });
     assert.equal(projectedStandards?.isError, undefined);
     assert.equal(JSON.stringify(projectedStandards).includes(fencedSentinel), false);
     assert.equal(existsSync(join(root, "standards-axis.json")), true);
-    assert.equal(JSON.parse(readFileSync(join(root, "standards-axis.json"), "utf8")).result.acceptanceReport, undefined);
+    const standardsCheckpoint = JSON.parse(readFileSync(join(root, "standards-axis.json"), "utf8")).result;
+    assert.equal(standardsCheckpoint.acceptanceReport, undefined);
+    assert.equal(standardsCheckpoint.criteriaSatisfied, undefined);
+    assert.equal(standardsCheckpoint.changedFiles, undefined);
+    assert.equal(standardsCheckpoint.validationOutput, undefined);
     const spec = { ...reviewCall, workflowScript: reviewWorkflowScript([reviewTasks[1]!]) };
     assert.equal(await toolCallHook!({ toolCallId: "spec", toolName: "subagent", input: spec }), undefined);
     const specTask = workflowEntries(spec.workflowScript)[0]!.task;

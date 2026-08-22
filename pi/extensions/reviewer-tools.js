@@ -14,6 +14,14 @@ const GENERIC_TOOL_OUTPUT_LIMIT = 16 * 1024;
 const CONTEXT_BUDGET_EXCEEDED = "reviewer_context_budget_exceeded";
 const VALIDATION_OUTPUT_REDACTED = "[redacted validation output]";
 const BOUNDED_TOP_LEVEL_TOOLS = new Set(["read", "grep", "find", "ls", "subagent"]);
+const ACCEPTANCE_REPORT_KEYS = new Set([
+  "acceptance", "acceptance-report", "acceptance_report", "acceptanceReport",
+  "criteriaSatisfied", "criteria_satisfied", "changedFiles", "changed_files",
+  "testsAddedOrUpdated", "tests_added_or_updated", "commandsRun", "commands_run",
+  "validationOutput", "validation_output", "residualRisks", "residual_risks",
+  "noStagedFiles", "no_staged_files", "diffSummary", "diff_summary",
+  "reviewFindings", "review_findings", "manualNotes", "manual_notes", "notes",
+]);
 const SAFE_SUBAGENT_CONFIG = {
   asyncByDefault: false,
   forceTopLevelAsync: false,
@@ -533,8 +541,9 @@ function projectAxisOutput(axis, output, descriptor) {
 }
 
 function normalizeReviewAxisResult(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value) || !Object.hasOwn(value, "acceptanceReport")) return value;
-  const { acceptanceReport: _ignored, ...normalized } = value;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const normalized = { ...value };
+  for (const key of ACCEPTANCE_REPORT_KEYS) delete normalized[key];
   return normalized;
 }
 
@@ -544,13 +553,52 @@ export function parseReviewAxisJson(output) {
     return JSON.parse(output);
   } catch {
     const fences = [...output.matchAll(/```json[ \t]*\r?\n([\s\S]*?)\r?\n```/giu)];
-    if (fences.length !== 1) return undefined;
-    try {
-      return JSON.parse(fences[0][1]);
-    } catch {
-      return undefined;
+    if (fences.length === 1) {
+      try {
+        return JSON.parse(fences[0][1]);
+      } catch {
+        return undefined;
+      }
+    }
+    if (output.includes("```")) return undefined;
+    const candidates = embeddedJsonObjects(output).filter((value) => validAxisResult(normalizeReviewAxisResult(value)));
+    return candidates.length === 1 ? candidates[0] : undefined;
+  }
+}
+
+function embeddedJsonObjects(output) {
+  const values = [];
+  let start = -1;
+  let depth = 0;
+  let quoted = false;
+  let escaped = false;
+  for (let index = 0; index < output.length; index += 1) {
+    const character = output[index];
+    if (start < 0) {
+      if (character === "{") {
+        start = index;
+        depth = 1;
+      }
+      continue;
+    }
+    if (quoted) {
+      if (escaped) escaped = false;
+      else if (character === "\\") escaped = true;
+      else if (character === "\"") quoted = false;
+      continue;
+    }
+    if (character === "\"") quoted = true;
+    else if (character === "{") depth += 1;
+    else if (character === "}" && --depth === 0) {
+      try {
+        values.push(JSON.parse(output.slice(start, index + 1)));
+      } catch {
+        // Only complete JSON objects can become candidates.
+      }
+      start = -1;
     }
   }
+  return values;
 }
 
 function validAxisResult(value) {
