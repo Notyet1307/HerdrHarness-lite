@@ -5,7 +5,7 @@ import { digest, type Attempt, type ExecutionSnapshot, type HarnessState, type J
 import { piRpcAgentDir } from "../pi-rpc-spool.js";
 import { message, result } from "./helpers.js";
 import { PI_RPC_SDK_ENTRY } from "./resources.js";
-import { rpcEnabled, runtimeRole, snapshotCredentialMode } from "./runtime-contract.js";
+import { rpcEnabled, runtimeRole, snapshotCredentialMode, workerCompactionMode } from "./runtime-contract.js";
 import type { ControllerContext } from "./context.js";
 import type { TickResult } from "./types.js";
 
@@ -34,6 +34,7 @@ export async function runRuntimePreflight(
         })
       : null;
     if (!executionSnapshot && lanes.includes("worker") && rpcEnabled(ctx.deps.config, "worker")
+      && workerCompactionMode(ctx.deps.config) === "controlled-threshold"
       && preclaimRuntime?.version !== QUALIFIED_CONTROLLED_COMPACTION_PI_VERSION) {
       throw new Error(`controlled Worker compaction requires Pi ${QUALIFIED_CONTROLLED_COMPACTION_PI_VERSION}`);
     }

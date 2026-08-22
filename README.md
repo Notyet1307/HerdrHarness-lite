@@ -21,7 +21,7 @@ This project is not a general multi-agent platform, an intra-project parallel sc
 - Reviewer remains fresh, read-only, exact-HEAD, two-axis, and independently validated.
 - Runtime events, Herdr status, child completion, and short probes are observations, not delivery truth.
 - Analyst advises only; policy or an exact human gate authorizes recovery.
-- Pi RPC auto-retry and Pi-owned auto-compaction remain disabled. Worker RPC alone may use the snapshot-bound, one-shot controlled threshold compaction; Reviewer compaction stays disabled.
+- Pi RPC auto-retry and Pi-owned auto-compaction remain disabled. Worker compaction defaults to disabled; only explicit `controlled-threshold` mode enables the snapshot-bound, one-shot threshold compaction. Reviewer compaction stays disabled.
 - Credentials never enter results, receipts, the ledger, documentation, or copied credential files.
 - Projects sharing canonical OAuth coordinate through a realpath-digest startup lease; openai-codex Reviewer axes serialize by default while custom Providers may use concurrency 1 or 2.
 - Fleet manages project processes only; it never writes project workflow transitions.
@@ -53,6 +53,8 @@ Copy [`harness.config.example.json`](./harness.config.example.json) to a private
 Preserve the example's complete role argv, ambient-discovery hardening flags, tools, thinking levels, and extension order. Keep the visible `reviewerArgv` provider/model aligned with the active Reviewer profile. `localPath`, `stateDir`, and `worktreeRoot` must be pairwise separate.
 
 The optional second Worker extension is exactly `@dietrichgebert/ponytail` `4.9.0`. When declared, Harness forces full mode while suppressing status/startup UI; it never relaxes the Worker UI-request deny policy.
+
+`workerCompaction.mode` accepts only `disabled` or `controlled-threshold`. The example and omitted/legacy configuration default to `disabled`; enable controlled mode only for an explicit long-task canary.
 
 Validate external access before running:
 

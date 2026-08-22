@@ -60,6 +60,15 @@ test("controlled compaction snapshot requires the exact qualified policy", () =>
     argv,
     compactionPolicy: { triggerPercent: 75, maxCompactions: 1, keepRecentTokens: 20_000, overflowContinuation: false },
   }), /exact qualified policy/);
+  const disabled = buildExecutionSnapshot({
+    adapter: "pi-rpc",
+    executable: "/pi",
+    runtimeVersion: "0.84.1",
+    argv,
+    compactionMode: "disabled",
+  });
+  assert.equal(disabled.compactionMode, "disabled");
+  assert.equal(disabled.compactionPolicy, undefined);
 });
 
 test("credential domain cannot be downgraded to runtime-default", () => {

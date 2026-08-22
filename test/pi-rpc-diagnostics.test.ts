@@ -82,6 +82,11 @@ test("runtime failure taxonomy exposes the stable cross-layer baseline", () => {
     "result_identity",
     "git_integrity",
     "policy_violation",
+    "compaction_provider_transient",
+    "compaction_provider_permanent",
+    "compaction_protocol",
+    "compaction_context_invalid",
+    "compaction_internal_api_drift",
     "compaction_failure",
     "validation_infrastructure",
     "validation_failed",
@@ -137,6 +142,23 @@ test("runtime failure taxonomy exposes the stable cross-layer baseline", () => {
   });
   assert.equal(isSafePiRpcDiagnostic(deadline), true);
   assert.equal(isSafePiRpcDiagnostic({ ...deadline, code: "provider_timeout" }), false);
+
+  for (const code of [
+    "compaction_provider_transient",
+    "compaction_provider_permanent",
+    "compaction_protocol",
+    "compaction_context_invalid",
+    "compaction_internal_api_drift",
+  ] as const) {
+    assert.equal(isSafePiRpcDiagnostic(makeSafeRuntimeDiagnostic({
+      domain: "execution",
+      code,
+      stage: "compaction",
+      failureDomain: "compaction",
+      failureCode: code,
+      retryable: false,
+    })), true);
+  }
 });
 
 test("credential startup failures keep the five stable content-free codes", () => {

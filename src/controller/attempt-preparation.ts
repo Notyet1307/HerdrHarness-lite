@@ -9,7 +9,7 @@ import { reviewerCheckpointIdentity } from "../reviewer-checkpoints.js";
 import type { ControllerContext } from "./context.js";
 import { message, result, safeToken, trimSlash } from "./helpers.js";
 import { BUNDLED_REVIEW_AXIS_AGENT, CREDENTIAL_STARTUP_LAUNCHER, PI_RPC_RUNNER, PI_RPC_SDK_ENTRY } from "./resources.js";
-import { rpcEnabled, runtimeRole } from "./runtime-contract.js";
+import { rpcEnabled, runtimeRole, workerCompactionMode } from "./runtime-contract.js";
 import { configuredRuntimeTimeouts, configuredValidationTimeoutMs } from "../runtime-timeouts.js";
 import { reviewerAxisConcurrency } from "../reviewer-provider-profile.js";
 import type { TickResult } from "./types.js";
@@ -80,7 +80,9 @@ export async function prepareAttempt(ctx: ControllerContext, state: HarnessState
       ? (await ctx.deps.preflight.probeDocker({ cwd: ctx.deps.config.localPath })).host
       : null;
     const useRpc = rpcEnabled(ctx.deps.config, lane);
-    if (useRpc && lane === "worker" && runtime.version !== QUALIFIED_CONTROLLED_COMPACTION_PI_VERSION) {
+    const controlledWorkerCompaction = useRpc && lane === "worker"
+      && workerCompactionMode(ctx.deps.config) === "controlled-threshold";
+    if (controlledWorkerCompaction && runtime.version !== QUALIFIED_CONTROLLED_COMPACTION_PI_VERSION) {
       throw new Error(`controlled Worker compaction requires Pi ${QUALIFIED_CONTROLLED_COMPACTION_PI_VERSION}`);
     }
     const role = runtimeRole(ctx.deps.config, lane);
@@ -110,9 +112,9 @@ export async function prepareAttempt(ctx: ControllerContext, state: HarnessState
       context,
       retryMode: useRpc ? "disabled" : "runtime-default",
       compactionMode: useRpc
-        ? lane === "worker" ? "controlled-threshold" : "disabled"
+        ? lane === "worker" ? workerCompactionMode(ctx.deps.config) : "disabled"
         : "runtime-default",
-      ...(useRpc && lane === "worker"
+      ...(controlledWorkerCompaction
         ? { compactionPolicy: WORKER_CONTROLLED_COMPACTION_POLICY }
         : {}),
       credentialMode: role.credentialMode,

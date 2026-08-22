@@ -15,6 +15,13 @@ let continuousOutput = null;
 const expectedVersionIndex = process.argv.indexOf("--expected-version");
 const runtimeVersion = expectedVersionIndex >= 0 ? process.argv[expectedVersionIndex + 1] : "0.84.2";
 
+if (process.env.FAKE_PI_COMPACTION_HOST_FAILURE) {
+  process.nextTick(() => process.stdout.write(`${JSON.stringify({
+    type: "harness_compaction_failure",
+    code: process.env.FAKE_PI_COMPACTION_HOST_FAILURE,
+  })}\n`));
+}
+
 if (process.env.FAKE_PI_IGNORE_SIGTERM === "1") {
   process.on("SIGTERM", () => {});
   setInterval(() => {}, 1_000);
@@ -134,6 +141,9 @@ function respond(command) {
       triggerPercent: 75,
       contextTokens: 80_000,
       contextWindow: 100_000,
+      payloadByteEstimate: 4096,
+      attemptCount: 1,
+      usedRetry: false,
       willRetry: false,
     });
     emitProjected(process.env.FAKE_PI_CONTROLLED_COMPACTION === "fail" ? {
@@ -144,8 +154,14 @@ function respond(command) {
       triggerPercent: 75,
       contextTokens: 80_000,
       contextWindow: 100_000,
+      payloadByteEstimate: 4096,
+      attemptCount: 2,
+      summaryRequestDurationMs: 25,
+      usedRetry: true,
       willRetry: false,
       outcome: "failed",
+      failureDomain: "compaction",
+      failureCode: "compaction_provider_transient",
     } : {
       type: "compaction_end",
       source: "harness-controlled",
@@ -154,12 +170,21 @@ function respond(command) {
       triggerPercent: 75,
       contextTokens: 80_000,
       contextWindow: 100_000,
+      payloadByteEstimate: 4096,
+      attemptCount: 1,
+      summaryRequestDurationMs: 12,
+      usedRetry: false,
       willRetry: false,
       outcome: "completed",
       tokensBefore: 80_000,
       estimatedTokensAfter: 12_000,
       summaryDigest: "a".repeat(64),
     });
+  }
+  for (let turn = 0; turn < Number(process.env.FAKE_PI_LONG_WORKER_TURNS ?? "0"); turn += 1) {
+    emit({ type: "message_update", message: { role: "assistant", usage: { totalTokens: 95_000 } } });
+    emit({ type: "turn_end" });
+    emit({ type: "turn_start" });
   }
   if (process.env.FAKE_PI_WAIT_FOR_ABORT === "1" || process.env.FAKE_PI_PROVIDER_NEVER_RETURNS === "1") return;
   if (process.env.FAKE_PI_CONTINUOUS_TOOL_OUTPUT === "1") {

@@ -3,6 +3,7 @@ import { closeSync, existsSync, openSync, readFileSync, readSync, statSync } fro
 import { join, resolve } from "node:path";
 import { isWorkerControlledCompactionPolicy } from "../compatibility.js";
 import { digest, type Attempt, type EvidenceItem, type EvidenceRequest, type Job } from "../model.js";
+import { isControlledCompactionFailureCode } from "../pi-rpc-compaction-compat.js";
 import type { EvidencePort } from "../ports.js";
 import { type CommandRunner, SyncCommandRunner } from "./command.js";
 
@@ -246,25 +247,37 @@ function safeCompactionReceipt(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const receipt = value as Record<string, unknown>;
   const allowed = [
-    "count", "triggerPercent", "contextTokens", "contextWindow", "outcome", "tokensBefore",
-    "estimatedTokensAfter", "summaryDigest", "willRetry",
+    "count", "reason", "triggerPercent", "contextTokens", "contextWindow", "payloadByteEstimate", "attemptCount",
+    "summaryRequestDurationMs", "usedRetry", "outcome", "tokensBefore", "estimatedTokensAfter", "summaryDigest",
+    "failureDomain", "failureCode", "willRetry",
   ];
   if (Object.keys(receipt).some((key) => !allowed.includes(key))
-    || receipt.count !== 1 || receipt.triggerPercent !== 75 || receipt.willRetry !== false
+    || receipt.count !== 1 || receipt.reason !== "threshold" || receipt.triggerPercent !== 75 || receipt.willRetry !== false
     || !Number.isSafeInteger(receipt.contextTokens) || Number(receipt.contextTokens) <= 0
     || !Number.isSafeInteger(receipt.contextWindow) || Number(receipt.contextWindow) <= 0
+    || !Number.isSafeInteger(receipt.payloadByteEstimate) || Number(receipt.payloadByteEstimate) < 0
+    || !Number.isSafeInteger(receipt.attemptCount) || Number(receipt.attemptCount) < 0 || Number(receipt.attemptCount) > 2
+    || !Number.isSafeInteger(receipt.summaryRequestDurationMs) || Number(receipt.summaryRequestDurationMs) < 0
+    || receipt.usedRetry !== (receipt.attemptCount === 2)
     || Number(receipt.contextTokens) * 100 < Number(receipt.contextWindow) * 75) return null;
   if (receipt.outcome === "failed") {
-    const failureKeys = ["count", "triggerPercent", "contextTokens", "contextWindow", "outcome", "willRetry"];
+    const failureKeys = [
+      "count", "reason", "triggerPercent", "contextTokens", "contextWindow", "payloadByteEstimate", "attemptCount",
+      "summaryRequestDurationMs", "usedRetry", "outcome", "failureDomain", "failureCode", "willRetry",
+    ];
     return Object.keys(receipt).length === failureKeys.length
+      && receipt.failureDomain === "compaction"
+      && isControlledCompactionFailureCode(receipt.failureCode)
       ? Object.fromEntries(failureKeys.map((key) => [key, receipt[key]]))
       : null;
   }
   if (receipt.outcome !== "completed"
+    || Number(receipt.attemptCount) < 1
+    || receipt.failureDomain !== undefined || receipt.failureCode !== undefined
     || !Number.isSafeInteger(receipt.tokensBefore) || Number(receipt.tokensBefore) < 0
     || !Number.isSafeInteger(receipt.estimatedTokensAfter) || Number(receipt.estimatedTokensAfter) < 0
     || typeof receipt.summaryDigest !== "string" || !/^[0-9a-f]{64}$/.test(receipt.summaryDigest)) return null;
-  return Object.fromEntries(allowed.map((key) => [key, receipt[key]]));
+  return Object.fromEntries(allowed.filter((key) => receipt[key] !== undefined).map((key) => [key, receipt[key]]));
 }
 
 function readTail(path: string, maxBytes: number): string | null {

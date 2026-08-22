@@ -14,10 +14,15 @@ import {
 } from "../src/pi-rpc-events.js";
 import { fakePiSdkSource } from "./fixtures/fake-pi-sdk.js";
 import {
-  installWorkerContextControls,
   projectPiRpcEvent,
   withProjectedPiRpcEvents,
 } from "../src/pi-rpc-sdk-entry.js";
+import {
+  ControlledCompactionFailure,
+  installWorkerContextControls,
+  installWorkerSystemContract,
+  loadWorkerCompactionSdk,
+} from "../src/pi-rpc-compaction-compat.js";
 import { StrictJsonlDecoder } from "../src/pi-rpc-runner.js";
 
 test("Pi RPC event adapter bounds a large agent_end without mutating Pi session data", () => {
@@ -232,11 +237,13 @@ test("Pi RPC event adapter projects only the RPC subscriber and preserves diagno
 });
 
 test("Worker context controls pin exact task data and compact once between tool turns", async () => {
-  const pinned = "<harness-pinned-task-data>EXACT_OBJECTIVE_AND_AC</harness-pinned-task-data>";
+  const pinnedMarkers = ["EXACT_OBJECTIVE", "EXACT_ACCEPTANCE_CRITERIA", "EXACT_TARGET", "EXACT_HANDOFF", "EXACT_WRITEBACK"];
+  const pinned = `<harness-pinned-task-data>${pinnedMarkers.join("|")}</harness-pinned-task-data>`;
   const events: Record<string, unknown>[] = [];
   const branch = [{ id: "entry-1" }];
   const compactedMessages = [{ role: "compactionSummary", summary: "private", timestamp: 1 }];
   let compactions = 0;
+  let compactInput: unknown = null;
   let preparedSettings: Record<string, unknown> | null = null;
   const session = {
     model: { provider: "test", id: "model", contextWindow: 100_000 },
@@ -261,8 +268,9 @@ test("Worker context controls pin exact task data and compact once between tool 
       preparedSettings = settings;
       return { firstKeptEntryId: "entry-1" };
     },
-    async compact() {
+    async compact(preparation: unknown) {
       compactions += 1;
+      compactInput = preparation;
       return {
         summary: "PRIVATE_SUMMARY",
         firstKeptEntryId: "entry-1",
@@ -282,7 +290,7 @@ test("Worker context controls pin exact task data and compact once between tool 
   const original = [{ role: "user", content: [{ type: "text", text: "recent" }] }];
   const firstRequest = await session.agent.transformContext(original);
   const secondRequest = await session.agent.transformContext(original);
-  assert.equal(JSON.stringify(firstRequest).split("EXACT_OBJECTIVE_AND_AC").length - 1, 1);
+  for (const marker of pinnedMarkers) assert.equal(JSON.stringify(firstRequest).split(marker).length - 1, 1);
   assert.deepEqual(firstRequest, secondRequest);
   assert.deepEqual(original, [{ role: "user", content: [{ type: "text", text: "recent" }] }]);
   assert.match(session.agent.state.systemPrompt, /harness-worker-contract/);
@@ -298,6 +306,7 @@ test("Worker context controls pin exact task data and compact once between tool 
   const afterCompact = await nextTurn(turn);
   const afterCeiling = await nextTurn(turn);
   assert.equal(compactions, 1);
+  for (const marker of pinnedMarkers) assert.equal(JSON.stringify(compactInput).includes(marker), false);
   assert.deepEqual(preparedSettings, { enabled: true, reserveTokens: 16_384, keepRecentTokens: 20_000 });
   assert.ok(afterCompact);
   assert.deepEqual(afterCompact.context.messages, compactedMessages);
@@ -305,11 +314,24 @@ test("Worker context controls pin exact task data and compact once between tool 
   assert.match(String(afterCompact.context.systemPrompt), /harness-worker-contract/);
   assert.match(String(afterCeiling.context.systemPrompt), /harness-worker-contract/);
   const postCompactRequest = await session.agent.transformContext(compactedMessages);
-  assert.equal(JSON.stringify(postCompactRequest).split("EXACT_OBJECTIVE_AND_AC").length - 1, 1);
+  for (const marker of pinnedMarkers) assert.equal(JSON.stringify(postCompactRequest).split(marker).length - 1, 1);
   assert.deepEqual(session.agent.state.messages, compactedMessages);
   assert.deepEqual(events.map((event) => event.type), ["compaction_start", "compaction_end"]);
+  assert.equal(events[0]?.attemptCount, 1);
+  assert.equal(events[1]?.attemptCount, 1);
+  assert.equal(events[1]?.usedRetry, false);
+  assert.ok(Number.isSafeInteger(events[1]?.payloadByteEstimate));
+  assert.ok(Number.isSafeInteger(events[1]?.summaryRequestDurationMs));
   assert.equal(JSON.stringify(events).includes("PRIVATE_SUMMARY"), false);
   assert.equal(events[1]?.summaryDigest && String(events[1]?.summaryDigest).length, 64);
+});
+
+test("disabled Worker keeps the trusted system contract without compaction hooks", () => {
+  const session = controlledCompactionSession();
+  const nextTurn = session.agent.prepareNextTurnWithContext;
+  installWorkerSystemContract(session);
+  assert.match(session.agent.state.systemPrompt, /harness-worker-contract/);
+  assert.equal(session.agent.prepareNextTurnWithContext, nextTurn);
 });
 
 test("controlled compaction Provider failure emits only a content-free failed event", async () => {
@@ -330,11 +352,15 @@ test("controlled compaction Provider failure emits only a content-free failed ev
       async prepareNextTurnWithContext() { return undefined; },
     },
   };
+  let requests = 0;
   installWorkerContextControls({
     calculateContextTokens(usage: { totalTokens: number }) { return usage.totalTokens; },
     estimateTokens() { return 0; },
     prepareCompaction() { return { firstKeptEntryId: "entry-1" }; },
-    async compact() { throw new Error(`Provider failed ${secret}`); },
+    async compact() {
+      requests += 1;
+      throw new Error(`network connection reset ${secret}`);
+    },
   }, session, "exact task", {
     triggerPercent: 75,
     maxCompactions: 1,
@@ -346,15 +372,120 @@ test("controlled compaction Provider failure emits only a content-free failed ev
   await assert.rejects(() => nextTurn({
     message: { usage: { totalTokens: 80_000 } },
     context: { messages: [], systemPrompt: "trusted" },
-  }), /Harness controlled compaction failed/);
-  assert.deepEqual(events.map(({ type, outcome, willRetry }) => ({ type, outcome, willRetry })), [
-    { type: "compaction_start", outcome: undefined, willRetry: false },
-    { type: "compaction_end", outcome: "failed", willRetry: false },
+  }), (error: unknown) => error instanceof ControlledCompactionFailure
+    && error.code === "compaction_provider_transient");
+  assert.equal(requests, 2);
+  assert.deepEqual(events.map(({ type, outcome, attemptCount, usedRetry, willRetry, failureCode }) => ({
+    type, outcome, attemptCount, usedRetry, willRetry, failureCode,
+  })), [
+    {
+      type: "compaction_start", outcome: undefined, attemptCount: 1, usedRetry: false,
+      willRetry: false, failureCode: undefined,
+    },
+    {
+      type: "compaction_end", outcome: "failed", attemptCount: 2, usedRetry: true,
+      willRetry: false, failureCode: "compaction_provider_transient",
+    },
   ]);
   assert.equal(JSON.stringify(events).includes(secret), false);
 });
 
-test("Pi RPC SDK host shares only canonical subscription OAuth and keeps settings in memory", () => {
+test("controlled compaction distinguishes permanent, protocol, and context failures without retry", async () => {
+  for (const fixture of [
+    {
+      expected: "compaction_provider_permanent",
+      prepare: () => ({ firstKeptEntryId: "entry-1" }),
+      compact: async () => { throw Object.assign(new Error("HTTP 401 private response"), { status: 401 }); },
+      requests: 1,
+    },
+    {
+      expected: "compaction_provider_permanent",
+      prepare: () => ({ firstKeptEntryId: "entry-1" }),
+      compact: async () => { throw Object.assign(new Error("service unavailable"), { status: 503 }); },
+      requests: 1,
+    },
+    {
+      expected: "compaction_protocol",
+      prepare: () => ({ firstKeptEntryId: "entry-1" }),
+      compact: async () => ({ summary: "", firstKeptEntryId: "entry-1", tokensBefore: 80_000 }),
+      requests: 1,
+    },
+    {
+      expected: "compaction_context_invalid",
+      prepare: () => undefined,
+      compact: async () => ({ summary: "unused" }),
+      requests: 0,
+    },
+  ] as const) {
+    const events: Record<string, unknown>[] = [];
+    let requests = 0;
+    const session = controlledCompactionSession();
+    installWorkerContextControls({
+      calculateContextTokens(usage: { totalTokens: number }) { return usage.totalTokens; },
+      estimateTokens() { return 0; },
+      prepareCompaction: fixture.prepare,
+      async compact() {
+        requests += 1;
+        return fixture.compact();
+      },
+    }, session, "exact objective acceptance target handoff writeback", {
+      triggerPercent: 75,
+      maxCompactions: 1,
+      keepRecentTokens: 20_000,
+      overflowContinuation: false,
+    }, (event) => events.push(event));
+
+    const nextTurn = session.agent.prepareNextTurnWithContext as unknown as (turn: unknown) => Promise<unknown>;
+    let observed: unknown;
+    try {
+      await nextTurn({
+        message: { usage: { totalTokens: 80_000 } },
+        context: { messages: [], systemPrompt: "trusted" },
+      });
+    } catch (error) {
+      observed = error;
+    }
+    assert.equal(observed instanceof ControlledCompactionFailure && observed.code, fixture.expected);
+    assert.equal(requests, fixture.requests);
+    assert.equal(events.at(-1)?.failureCode, fixture.expected);
+    assert.equal(events.at(-1)?.usedRetry, false);
+  }
+});
+
+test("controlled compaction compatibility adapter pins the exact private surface", async () => {
+  const root = mkdtempSync(join(tmpdir(), "harness-compaction-compat-"));
+  const dist = join(root, "dist");
+  const piIndex = join(dist, "index.js");
+  try {
+    mkdirSync(join(dist, "core", "compaction"), { recursive: true });
+    writeFileSync(join(root, "package.json"), '{"type":"module"}\n');
+    writeFileSync(piIndex, "export const VERSION = '0.84.2';\n");
+    writeFileSync(join(dist, "core", "compaction", "index.js"), "export function prepareCompaction() { return {}; }\n");
+    const publicApi = {
+      VERSION: "0.84.2",
+      calculateContextTokens() { return 1; },
+      estimateTokens() { return 1; },
+      async compact() { return {}; },
+    };
+
+    const loaded = await loadWorkerCompactionSdk(publicApi, piIndex, "0.84.2");
+    assert.equal(typeof loaded.prepareCompaction, "function");
+    await assert.rejects(
+      () => loadWorkerCompactionSdk(publicApi, piIndex, "0.84.1"),
+      (error: unknown) => error instanceof ControlledCompactionFailure
+        && error.code === "compaction_internal_api_drift",
+    );
+    await assert.rejects(
+      () => loadWorkerCompactionSdk({ ...publicApi, compact: undefined as never }, piIndex, "0.84.2"),
+      (error: unknown) => error instanceof ControlledCompactionFailure
+        && error.code === "compaction_internal_api_drift",
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("disabled Pi RPC SDK host does not load private compaction and keeps OAuth/settings isolated", () => {
   const root = mkdtempSync(join(tmpdir(), "harness-pi-sdk-"));
   const dist = join(root, "pi", "dist");
   const oauthAgentDir = join(root, "oauth-agent");
@@ -391,6 +522,7 @@ test("Pi RPC SDK host shares only canonical subscription OAuth and keeps setting
     };
     const result = runner.run(process.execPath, commandArgs, options);
 
+    assert.equal(existsSync(join(dist, "core", "compaction", "index.js")), false);
     assert.equal(result.ok, true, result.stderr);
     assert.match(result.stdout, /HERDR_HARNESS_PROVIDER_OK/);
     const capture = JSON.parse(readFileSync(capturePath, "utf8")) as Record<string, unknown>;
@@ -455,6 +587,24 @@ test("Pi RPC SDK host shares only canonical subscription OAuth and keeps setting
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+function controlledCompactionSession() {
+  return {
+    model: { provider: "test", id: "model", contextWindow: 100_000 },
+    thinkingLevel: "high",
+    modelRuntime: { async getAuth() { return undefined; } },
+    sessionManager: {
+      getBranch() { return [{ id: "entry-1" }]; },
+      appendCompaction() { return "compaction-1"; },
+      buildSessionContext() { return { messages: [] }; },
+    },
+    agent: {
+      state: { messages: [] as Record<string, unknown>[], systemPrompt: "trusted" },
+      async transformContext(messages: Record<string, unknown>[]) { return messages; },
+      async prepareNextTurnWithContext() { return undefined; },
+    },
+  };
+}
 
 test("Pi RPC SDK host reads one bound custom models.json without copying its API key", () => {
   const root = mkdtempSync(join(tmpdir(), "harness-pi-sdk-models-"));

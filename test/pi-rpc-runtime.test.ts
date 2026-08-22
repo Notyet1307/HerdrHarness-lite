@@ -601,9 +601,14 @@ test("durable runner disables retry and compaction before dispatch and settles t
     assert.equal(readJson<{ ok: boolean; agentSettled: boolean }>(join(plan.runtimeRoot, "terminal.json")).agentSettled, true);
     assert.deepEqual(readJson<{ controlledCompaction: Record<string, unknown> }>(join(plan.runtimeRoot, "terminal.json")).controlledCompaction, {
       count: 1,
+      reason: "threshold",
       triggerPercent: 75,
       contextTokens: 80_000,
       contextWindow: 100_000,
+      payloadByteEstimate: 4096,
+      attemptCount: 1,
+      summaryRequestDurationMs: 12,
+      usedRetry: false,
       outcome: "completed",
       tokensBefore: 80_000,
       estimatedTokensAfter: 12_000,
@@ -621,6 +626,25 @@ test("durable runner disables retry and compaction before dispatch and settles t
     restoreEnv("FAKE_PI_MODEL_SECRET", previous.modelSecret);
     restoreEnv("FAKE_PI_CONTROLLED_COMPACTION", previous.controlledCompaction);
     restoreEnv("FAKE_PI_EXPECT_PONYTAIL_ENV", previous.ponytail);
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("disabled Worker runs a long RPC attempt without controlled compaction artifacts", () => {
+  const fixture = rpcFixture();
+  try {
+    fixture.snapshot.runtimeVersion = "0.84.1";
+    fixture.snapshot.compactionMode = "disabled";
+    delete fixture.snapshot.compactionPolicy;
+    const { execution, plan } = runWorkerFault(fixture, { FAKE_PI_LONG_WORKER_TURNS: "4" });
+    assert.equal(execution.ok, true, execution.stderr);
+    assert.equal(readJson<{ compactionMode: string }>(join(plan.runtimeRoot, "ready.json")).compactionMode, "disabled");
+    assert.equal(existsSync(join(plan.runtimeRoot, "pinned-task-data.json")), false);
+    const terminal = readJson<Record<string, unknown>>(join(plan.runtimeRoot, "terminal.json"));
+    assert.equal(terminal.ok, true);
+    assert.equal(terminal.controlledCompaction, undefined);
+    assert.equal(readRuntimeEvents(plan.runtimeRoot).some((event) => String(event.type).startsWith("compaction_")), false);
+  } finally {
     rmSync(fixture.root, { recursive: true, force: true });
   }
 });
@@ -938,19 +962,47 @@ test("durable runner records a content-free controlled compaction failure", () =
     assert.equal(terminal.ok, false);
     assert.deepEqual(stableFailure(terminal), {
       domain: "execution",
-      code: "compaction_failure",
+      code: "compaction_provider_transient",
       stage: "compaction",
       retryable: false,
     });
     assert.deepEqual(terminal.controlledCompaction, {
       count: 1,
+      reason: "threshold",
       triggerPercent: 75,
       contextTokens: 80_000,
       contextWindow: 100_000,
+      payloadByteEstimate: 4096,
+      attemptCount: 2,
+      summaryRequestDurationMs: 25,
+      usedRetry: true,
       outcome: "failed",
+      failureDomain: "compaction",
+      failureCode: "compaction_provider_transient",
       willRetry: false,
     });
-    assert.equal(JSON.stringify(terminal).includes("summary"), false);
+    assert.equal(Object.hasOwn(terminal.controlledCompaction, "summary"), false);
+    assert.equal(JSON.stringify(terminal).includes("PRIVATE_COMPACTION_SUMMARY"), false);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("private compaction surface drift reaches the terminal receipt with a stable code", () => {
+  const fixture = rpcFixture();
+  try {
+    const { execution, plan } = runWorkerFault(fixture, {
+      FAKE_PI_COMPACTION_HOST_FAILURE: "compaction_internal_api_drift",
+    });
+    assert.equal(execution.ok, false);
+    const terminal = readJson<Record<string, unknown>>(join(plan.runtimeRoot, "terminal.json"));
+    assert.deepEqual(stableFailure(terminal), {
+      domain: "execution",
+      code: "compaction_internal_api_drift",
+      stage: "compaction",
+      retryable: false,
+    });
+    assert.equal(existsSync(join(plan.runtimeRoot, "accepted.json")), false);
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
   }
@@ -2071,7 +2123,7 @@ function rpcFixture(): {
       cwd: root,
       resultPath: attempt.resultPath,
       runtimeRoot,
-      ...(effectiveSnapshot.context?.lane === "worker" ? {
+      ...(effectiveSnapshot.context?.lane === "worker" && effectiveSnapshot.compactionMode === "controlled-threshold" ? {
         pinnedTaskData: { version: 1, digest: digest(pinnedContent), content: pinnedContent },
       } : {}),
       snapshot: effectiveSnapshot,
