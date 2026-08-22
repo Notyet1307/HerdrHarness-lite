@@ -31,6 +31,8 @@ const REVIEWER_SUBAGENT_CONFIG = `${JSON.stringify({
   forceTopLevelAsync: false,
   fleetView: false,
   intercomBridge: { mode: "off" },
+  turnBudget: { maxTurns: 10, graceTurns: 2 },
+  toolBudget: { soft: 16, hard: 24, block: ["read", "grep", "find", "ls"] },
 }, null, 2)}\n`;
 
 export class GitCli implements GitPort {
