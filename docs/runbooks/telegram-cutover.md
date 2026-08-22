@@ -47,6 +47,7 @@ npm run verify
 node dist/src/hermes-observer.js run --config /absolute/project-observer-v2.json --once
 node dist/src/fleet-observer.js run --config /absolute/fleet-observer.json --once
 node scripts/check-telegram-transport-contract.mjs ../harness-telegram-bridge
+npm run canary:telegram-transport -- ../harness-telegram-bridge
 ```
 
 - `/harness`（真实 Fleet 首页）；

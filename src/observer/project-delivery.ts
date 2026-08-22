@@ -7,8 +7,7 @@ import {
   type ProjectObserverStateV3,
   type ProjectOutboxEntry,
 } from "./project-state.js";
-
-const RETRY_DELAYS_MS = [5_000, 30_000, 120_000, 600_000, 1_800_000];
+import { scheduleObserverRetry } from "./retry.js";
 
 export type ProjectDeliveryConfig = {
   observerConfigPath: string;
@@ -86,8 +85,7 @@ function retry(
   entry: ProjectOutboxEntry,
   code: string,
 ): void {
-  entry.attempts += 1;
-  entry.nextAttemptAt = Date.now() + RETRY_DELAYS_MS[Math.min(entry.attempts - 1, RETRY_DELAYS_MS.length - 1)]!;
+  scheduleObserverRetry(entry);
   saveProjectObserverState(config.observerState, state);
   process.stderr.write(`${JSON.stringify({ ok: false, action: "notification_retry", key: entry.key, attempts: entry.attempts, code })}\n`);
 }

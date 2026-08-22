@@ -16,7 +16,8 @@
     "test": "npm run build && node --test 'dist/test/**/*.test.js'",
     "verify": "npm run typecheck && npm test",
     "check:telegram-fixtures": "npm run build && node scripts/telegram-transport-fixtures.mjs",
-    "check:telegram-contract": "node scripts/check-telegram-transport-contract.mjs"
+    "check:telegram-contract": "node scripts/check-telegram-transport-contract.mjs",
+    "canary:telegram-transport": "npm run build && node scripts/telegram-transport-integration-canary.mjs"
   },
   "bin": {
     "herdr-harness-lite": "./dist/src/cli.js",

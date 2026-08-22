@@ -257,6 +257,13 @@ test("project Transport v2 projects bounded workflow and safe runtime facts", ()
       "SECRET_VALIDATION_ERROR",
       root,
     ]) assert.equal(result.stdout.includes(secret), false, secret);
+
+    const human = spawnSync(process.execPath, [
+      resolve("dist/src/transport-cli.js"), "project", "status", "--config", observerConfig,
+    ], { encoding: "utf8", timeout: 10_000 });
+    assert.equal(human.status, 0, human.stderr);
+    assert.match(human.stdout, /Exposure-Agent.*BLOCKED/);
+    assert.equal(human.stdout.trimStart().startsWith("{"), false);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

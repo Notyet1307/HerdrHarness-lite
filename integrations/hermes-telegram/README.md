@@ -149,6 +149,7 @@ The committed schema and seven golden fixtures live under `schemas/` and
 
 ```bash
 node HerdrHarness-lite/scripts/check-telegram-transport-contract.mjs harness-telegram-bridge
+cd HerdrHarness-lite && npm run canary:telegram-transport -- ../harness-telegram-bridge
 ```
 
 ## Multi-repository routes
@@ -158,6 +159,11 @@ maps to one actual Fleet project ID, one Project Observer config, and fixed
 view/approval/diagnose argv. Fleet Observer repeats the projectId-to-routeId map
 so its envelopes are callback-safe; Bridge startup reads the real fleet-view and
 rejects any configured projectId missing from that view.
+
+Bridge Fleet config keeps the Fleet Observer `configPath` separate from the
+fixed `transport-cli.js fleet` / `fleet-diagnose` argv prefixes, matching the
+Project command convention; Bridge appends only allowlisted view/day and
+`--json v2` arguments.
 
 `fleet.config.example.json` belongs only to the legacy Hermes plugin. In that
 mode, set `HERDR_HARNESS_FLEET_CONFIG` for the Hermes Gateway and every Observer.

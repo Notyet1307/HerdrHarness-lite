@@ -313,6 +313,7 @@ test("runtime preflight fails before claim and does not reserve an issue", async
   assert.equal(output.action, "preflight_failed");
   assert.equal(output.ok, false);
   assert.match(output.message, /provider sessions are full/);
+  assert.equal(output.failureCode, undefined);
   assert.equal(store.state.activeJob, null);
   assert.equal(github.claims.length, 0);
 });
@@ -653,6 +654,7 @@ test("controlled Worker compaction rejects older Pi before claim", async () => {
 
   assert.equal(output.action, "preflight_failed");
   assert.match(output.message, /requires Pi 0\.84\.2/);
+  assert.equal(output.failureCode, undefined);
   assert.equal(store.state.activeJob, null);
   assert.deepEqual(github.claims, []);
 });

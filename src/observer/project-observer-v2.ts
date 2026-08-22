@@ -2,10 +2,9 @@ import { Buffer } from "node:buffer";
 import { closeSync, existsSync, lstatSync, openSync, readFileSync, readSync, statSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import { JsonStateStore } from "../adapters/json-store.js";
-import type { AutomaticRecovery, HarnessState, Job } from "../model.js";
-import { operatorActionsFor } from "../policy.js";
-import { automaticRecoveryEvent, preflightFailureEvent, recoveryQuotaExhaustedEvent, transportEvent } from "../transport/event-projection.js";
-import { loadProjectHarnessConfig, loadProjectTransportConfig, projectView, type ProjectHarnessConfig } from "../transport/project-projection.js";
+import { transportEvent } from "../transport/event-projection.js";
+import { projectLogProjection, projectObservationProjection, type ProjectObservationProjection } from "../transport/project-observation.js";
+import { loadProjectHarnessConfig, loadProjectTransportConfig, type ProjectHarnessConfig } from "../transport/project-projection.js";
 import type { EventEnvelope, TransportIdentity } from "../transport/telegram-protocol.js";
 import { flushProjectOutbox, type ProjectDeliveryConfig } from "./project-delivery.js";
 import {
@@ -82,9 +81,14 @@ async function cycle(config: ProjectObserverV2Config): Promise<void> {
 }
 
 async function observeLedger(config: ProjectObserverV2Config, observer: ProjectObserverStateV3, now: string): Promise<void> {
-  let ledger: HarnessState;
+  let projection: ProjectObservationProjection;
   try {
-    ledger = await new JsonStateStore(config.harnessStateDir).load();
+    projection = projectObservationProjection(
+      await new JsonStateStore(config.harnessStateDir).load(),
+      config.harness,
+      config.identity,
+      { now, heartbeatTimeoutMs: config.heartbeatTimeoutMs },
+    );
   } catch {
     if (observer.ledgerHealthy) enqueueProjectEvent(observer, stateEvent(config.identity, "ledger.unavailable", "critical", "Harness ledger unavailable", "The project ledger cannot be read; no recovery action was attempted.", true, now));
     observer.ledgerHealthy = false;
@@ -94,131 +98,53 @@ async function observeLedger(config: ProjectObserverV2Config, observer: ProjectO
     enqueueProjectEvent(observer, stateEvent(config.identity, "ledger.restored", "info", "Harness ledger restored", "The project ledger is readable again.", false, now));
   }
   observer.ledgerHealthy = true;
-  const projection = projectView(ledger, config.harness, config.identity, {
-    now,
-    heartbeatTimeoutMs: config.heartbeatTimeoutMs,
-  });
   if (!observer.ledgerInitialized) {
     observer.ledgerInitialized = true;
-    baseline(observer, ledger);
-    observer.controllerHealth = projection.project.controller.health;
-    observer.lastProjectionDigest = projectProjectionDigest(projection);
+    baseline(observer, projection);
+    observer.controllerHealth = projection.view.project.controller.health;
+    observer.lastProjectionDigest = projectProjectionDigest(projection.view);
     return;
   }
 
-  if (ledger.terminalJobs.length < observer.terminalCount) {
+  if (projection.terminalCount < observer.terminalCount) {
     enqueueProjectEvent(observer, stateEvent(config.identity, "state.unavailable", "critical", "Terminal history regressed", "Harness terminal history regressed; an operator must inspect the ledger.", true, now));
+  } else if (observer.terminalCount < projection.terminalWindowStart) {
+    enqueueProjectEvent(observer, stateEvent(config.identity, "state.unavailable", "critical", "Terminal transition window exceeded", "More terminal transitions occurred than the bounded projection can carry; query the ledger through the read-only CLI.", true, now));
   } else {
-    for (const terminal of ledger.terminalJobs.slice(observer.terminalCount)) {
-      enqueueProjectEvent(observer, transportEvent({
-        ...config.identity,
-        occurredAt: terminal.finishedAt,
-        severity: "info",
-        category: terminal.state === "done" ? "project.done" : "project.cancelled",
-        dedupeKey: `project.${terminal.state}:${terminal.id}`,
-        title: terminal.state === "done" ? "Project task completed" : "Project task cancelled",
-        summary: "Harness recorded a new terminal workflow state.",
-        facts: [{ label: "Issue", value: String(terminal.issueNumber) }, { label: "State", value: terminal.state }],
-      }, now));
-    }
+    for (const event of projection.terminalEvents.slice(observer.terminalCount - projection.terminalWindowStart)) enqueueProjectEvent(observer, event);
   }
 
-  const job = ledger.activeJob;
-  const changed = job?.id !== observer.lastJobId;
-  if (job && changed) {
-    enqueueProjectEvent(observer, transportEvent({
-      ...config.identity,
-      occurredAt: job.createdAt,
-      severity: "info",
-      category: "project.started",
-      dedupeKey: `project.started:${job.id}`,
-      title: "Project task started",
-      summary: "Harness selected and durably recorded a new project task.",
-      facts: [{ label: "Issue", value: String(job.task.issueNumber) }, { label: "State", value: job.state }],
-    }, now));
-    observeCurrentJob(config, observer, job, 0, null, null, now);
-  } else if (job) {
-    observeCurrentJob(config, observer, job, observer.lastAutomaticRecoveryCount, observer.lastIncidentId, observer.lastAnalysisId, now);
-  } else if (observer.lastJobId && ledger.terminalJobs.length === observer.terminalCount) {
+  const active = projection.active;
+  const changed = active?.id !== observer.lastJobId;
+  if (active && changed) {
+    enqueueProjectEvent(observer, active.startedEvent);
+    observeCurrentProjection(observer, active, 0, null, null);
+  } else if (active) {
+    observeCurrentProjection(observer, active, observer.lastAutomaticRecoveryCount, observer.lastIncidentId, observer.lastAnalysisId);
+  } else if (observer.lastJobId && projection.terminalCount === observer.terminalCount) {
     enqueueProjectEvent(observer, stateEvent(config.identity, "state.unavailable", "critical", "Active workflow disappeared", "The active Job disappeared without a new terminal record; an operator must inspect the ledger.", true, now));
   }
 
-  observeControllerHealth(config.identity, observer, projection.project.controller.health, now);
-  baseline(observer, ledger);
-  observer.lastProjectionDigest = projectProjectionDigest(projection);
+  observeControllerHealth(config.identity, observer, projection.view.project.controller.health, now);
+  baseline(observer, projection);
+  observer.lastProjectionDigest = projectProjectionDigest(projection.view);
 }
 
-function observeCurrentJob(
-  config: ProjectObserverV2Config,
+function observeCurrentProjection(
   observer: ProjectObserverStateV3,
-  job: Job,
+  active: NonNullable<ProjectObservationProjection["active"]>,
   recoveryOffset: number,
   previousIncident: string | null,
   previousAnalysis: string | null,
-  now: string,
 ): void {
-  const recoveries = job.automaticRecoveries ?? [];
-  const newRecoveries = recoveries.slice(Math.min(recoveryOffset, recoveries.length));
-  for (const recovery of newRecoveries) enqueueProjectEvent(observer, automaticRecoveryEvent(job, recovery, config.identity, now));
+  const newRecoveries = active.automaticRecoveryEvents.slice(Math.min(recoveryOffset, active.automaticRecoveryEvents.length));
+  for (const event of newRecoveries) enqueueProjectEvent(observer, event);
   if (newRecoveries.length > 0) return;
-  const incidentChanged = job.incident?.id !== (previousIncident ?? undefined);
-  const analysisChanged = job.analysis?.id !== (previousAnalysis ?? undefined);
-  if (job.analysis && analysisChanged) {
-    const option = operatorActionsFor(job).find((candidate) => candidate.kind === "approve_retry");
-    if (job.state === "blocked" && job.incident && job.analysis.incidentId === job.incident.id && option?.effect === job.analysis.action) {
-      enqueueProjectApproval(observer, job.analysis.id);
-      return;
-    }
-    const actions = operatorActionsFor(job).map((action) => action.kind);
-    enqueueProjectEvent(observer, transportEvent({
-      ...config.identity,
-      occurredAt: job.analysis.createdAt,
-      severity: actions.length > 0 ? "warning" : "info",
-      category: "analyst.decision",
-      dedupeKey: `analyst.decision:${job.analysis.id}`,
-      title: "Analyst decision recorded",
-      summary: "Harness recorded a bounded Analyst recommendation; it does not authorize workflow mutation.",
-      facts: [{ label: "Recommendation", value: job.analysis.action }, { label: "Operator options", value: String(actions.length) }],
-      actionRequired: actions.length > 0,
-      operatorActionKinds: actions,
-    }, now));
-  } else if (job.incident && incidentChanged) {
-    enqueueIncident(config.identity, observer, job, now);
-  }
-}
-
-function enqueueIncident(identity: TransportIdentity & { projectId: string }, observer: ProjectObserverStateV3, job: Job, now: string): void {
-  const incident = job.incident!;
-  const exhausted = recoveryQuotaExhaustedEvent(job, identity, now);
-  if (exhausted) {
-    enqueueProjectEvent(observer, exhausted);
-    return;
-  }
-  const code = incident.runtimeDiagnostic?.code ?? incident.runtimeDiagnostic?.failureCode
-    ?? (incident.class === "integrity_violation" || incident.class === "validation_infrastructure" ? incident.class : null);
-  const classified = code ? preflightFailureEvent({
-    ...identity,
-    position: incident.id,
-    failureCode: code,
-    retryable: incident.runtimeDiagnostic?.retryable ?? false,
-  }, incident.createdAt) : null;
-  if (classified) {
-    enqueueProjectEvent(observer, classified);
-    return;
-  }
-  const actions = operatorActionsFor(job).map((action) => action.kind);
-  enqueueProjectEvent(observer, transportEvent({
-    ...identity,
-    occurredAt: incident.createdAt,
-    severity: "warning",
-    category: "incident.new",
-    dedupeKey: `incident.new:${incident.id}`,
-    title: "New workflow incident",
-    summary: "Harness recorded a new workflow incident; the workflow remains fail-closed.",
-    facts: [{ label: "Class", value: incident.class }, { label: "Lane", value: incident.lane }],
-    actionRequired: actions.length > 0,
-    operatorActionKinds: actions,
-  }, now));
+  const incidentChanged = active.incidentId !== previousIncident;
+  const analysisChanged = active.analysisId !== previousAnalysis;
+  if (active.approvalAnalysisId && analysisChanged) enqueueProjectApproval(observer, active.approvalAnalysisId);
+  else if (active.analysisEvent && analysisChanged) enqueueProjectEvent(observer, active.analysisEvent);
+  else if (active.incidentEvent && incidentChanged) enqueueProjectEvent(observer, active.incidentEvent);
 }
 
 function observeControllerHealth(
@@ -296,44 +222,25 @@ function observeControllerEvent(
   position: string,
   now: string,
 ): void {
-  let value: unknown;
-  try { value = JSON.parse(line) as unknown; } catch { return; }
-  const event = record(value);
-  if (event.ok === true) {
+  const projected = projectLogProjection(line, identity, position, now);
+  if (projected.kind === "healthy") {
     observer.lastControllerAlertKey = null;
     return;
   }
-  if (event.ok !== false || typeof event.action !== "string" || event.action === "blocked") return;
-  const diagnostic = record(event.runtimeDiagnostic ?? event.failure);
-  const failureCode = typeof event.failureCode === "string"
-    ? event.failureCode
-    : typeof diagnostic.code === "string"
-      ? diagnostic.code
-      : typeof diagnostic.failureCode === "string" ? diagnostic.failureCode : null;
-  const retryable = typeof event.retryable === "boolean"
-    ? event.retryable
-    : typeof diagnostic.retryable === "boolean" ? diagnostic.retryable : null;
-  const alertKey = `${event.action}\0${typeof event.jobId === "string" ? event.jobId : ""}\0${failureCode ?? "legacy"}`;
-  if (alertKey === observer.lastControllerAlertKey) return;
-  observer.lastControllerAlertKey = alertKey;
-  const projected = preflightFailureEvent({
-    ...identity,
-    position,
-    failureCode: event.action === "preflight_failed" ? failureCode : event.action,
-    retryable,
-  }, now);
-  if (projected) enqueueProjectEvent(observer, projected, PREFLIGHT_COOLDOWN_MS);
+  if (projected.kind !== "failure" || projected.alertKey === observer.lastControllerAlertKey) return;
+  observer.lastControllerAlertKey = projected.alertKey;
+  enqueueProjectEvent(observer, projected.event, PREFLIGHT_COOLDOWN_MS);
 }
 
-function baseline(observer: ProjectObserverStateV3, ledger: HarnessState): void {
-  const job = ledger.activeJob;
-  observer.lastJobId = job?.id ?? null;
-  observer.lastJobRevision = job?.revision ?? null;
-  observer.lastJobState = job?.state ?? null;
-  observer.lastIncidentId = job?.incident?.id ?? null;
-  observer.lastAnalysisId = job?.analysis?.id ?? null;
-  observer.lastAutomaticRecoveryCount = job?.automaticRecoveries?.length ?? 0;
-  observer.terminalCount = ledger.terminalJobs.length;
+function baseline(observer: ProjectObserverStateV3, projection: ProjectObservationProjection): void {
+  const active = projection.active;
+  observer.lastJobId = active?.id ?? null;
+  observer.lastJobRevision = active?.revision ?? null;
+  observer.lastJobState = active?.state as ProjectObserverStateV3["lastJobState"] ?? null;
+  observer.lastIncidentId = active?.incidentId ?? null;
+  observer.lastAnalysisId = active?.analysisId ?? null;
+  observer.lastAutomaticRecoveryCount = active?.automaticRecoveryCount ?? 0;
+  observer.terminalCount = projection.terminalCount;
 }
 
 function stateEvent(
@@ -407,10 +314,6 @@ function readLogChunk(path: string, offset: number, size: number): string {
   } finally {
     closeSync(descriptor);
   }
-}
-
-function record(value: unknown): Record<string, unknown> {
-  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
 
 function delay(milliseconds: number): Promise<void> {

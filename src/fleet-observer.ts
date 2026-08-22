@@ -13,8 +13,7 @@ import {
   type FleetObserverOutboxEntry,
   type FleetObserverState,
 } from "./observer/fleet-state.js";
-
-const RETRY_DELAYS_MS = [5_000, 30_000, 120_000, 600_000, 1_800_000];
+import { scheduleObserverRetry } from "./observer/retry.js";
 
 type FleetObserverConfig = {
   configPath: string;
@@ -217,8 +216,7 @@ function flush(config: FleetObserverConfig, state: FleetObserverState): void {
 }
 
 function retry(config: FleetObserverConfig, state: FleetObserverState, entry: FleetObserverOutboxEntry): void {
-  entry.attempts += 1;
-  entry.nextAttemptAt = Date.now() + RETRY_DELAYS_MS[Math.min(entry.attempts - 1, RETRY_DELAYS_MS.length - 1)]!;
+  scheduleObserverRetry(entry);
   saveFleetObserverState(config.observerState, state);
   process.stderr.write(`${JSON.stringify({ ok: false, action: "notification_retry", key: entry.key, attempts: entry.attempts, code: "delivery_failed" })}\n`);
 }
