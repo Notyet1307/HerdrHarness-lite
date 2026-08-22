@@ -82,7 +82,10 @@ export function spoolPath(root: string, name: string): string {
 
 export function ensurePrivateDirectory(path: string): void {
   mkdirSync(path, { recursive: true, mode: 0o700 });
+  const identity = lstatSync(path);
+  if (!identity.isDirectory() || identity.isSymbolicLink()) throw new Error("Pi RPC private directory must not be a symlink");
   chmodSync(path, 0o700);
+  if ((lstatSync(path).mode & 0o777) !== 0o700) throw new Error("Pi RPC private directory must have mode 0700");
 }
 
 export function preparePiRpcAgentDir(snapshot: ExecutionSnapshot): string {
@@ -95,6 +98,10 @@ export function piRpcAgentDir(snapshot: ExecutionSnapshot): string {
   return join(rpcRuntimeRoot(snapshot), "pi-agent");
 }
 
+export function preparePiRpcToolAgentDir(snapshot: ExecutionSnapshot): string {
+  return preparePiRpcToolAgentDirAt(join(rpcRuntimeRoot(snapshot), "tool-agent"));
+}
+
 export function preparePiRpcAgentDirAt(isolated: string): string {
   ensurePrivateDirectory(dirname(isolated));
   ensurePrivateDirectory(isolated);
@@ -102,6 +109,26 @@ export function preparePiRpcAgentDirAt(isolated: string): string {
   if (pathExists(join(isolated, "auth.json"))) throw new Error("Pi RPC private agent directory must not contain auth.json");
   if (pathExists(join(isolated, "models.json"))) throw new Error("Pi RPC canary must not mount or create models.json");
   return isolated;
+}
+
+export function preparePiRpcToolAgentDirAt(isolated: string): string {
+  ensurePrivateDirectory(dirname(isolated));
+  ensurePrivateDirectory(isolated);
+  if (pathExists(join(isolated, "settings.json")) || pathExists(join(isolated, "models.json"))) {
+    throw new Error("Pi RPC tool agent directory must not contain settings.json or models.json");
+  }
+  assertEmptyPrivateStore(join(isolated, "auth.json"), "auth.json");
+  assertEmptyPrivateStore(join(isolated, "models-store.json"), "models-store.json");
+  return isolated;
+}
+
+function assertEmptyPrivateStore(path: string, name: string): void {
+  if (!pathExists(path)) return;
+  const stat = lstatSync(path);
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || (stat.mode & 0o777) !== 0o600
+    || readFileSync(path, "utf8") !== "{}") {
+    throw new Error(`Pi RPC tool agent ${name} must be one empty private store`);
+  }
 }
 
 export function writeExclusiveJson(path: string, value: unknown): void {

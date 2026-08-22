@@ -55,6 +55,8 @@ Worker 启用 Ponytail 时，extension 顺序必须严格为 bundled `worker-too
 
 `stateDir` 不得与 source 或 `worktreeRoot` 重叠。包含 token、OAuth 或 custom model credentials 的 canonical Pi 文件保持原位和私有 mode；不要复制到配置、Attempt 目录、日志或 ledger。Harness 只记录 canonical `auth.json` realpath 的 SHA-256 domain ID，并在 credential store 内的私有 coordination directory 写无 credential 内容的 startup lease/probe cache。
 
+Worker 的主 `pi-agent` 与 bash/工具子进程使用不同的 Attempt-private agent directory。子进程若启动默认 Pi，允许在 `tool-agent` 创建严格空的 `{}` store；非空 `auth.json`、`models.json`、`settings.json` 或文件身份异常仍属于 credential integrity failure。不要通过删除现场文件或放宽主 `pi-agent` postflight 来恢复；应先核对两处目录的安全元数据，再按当前 operator action 使用 fresh Attempt。
+
 `reviewer.axisConcurrency` 只接受 1 或 2。custom Provider 默认 2 并可显式改为 1；`credentialMode=canonical-oauth + provider=openai-codex` 无条件收紧为 1，Standards 完成并释放 axis startup lease 后才启动 Spec。
 
 配置要求 Docker 时，preflight 只接受本地 Unix socket，并验证 daemon 与 Compose。不要把远端 Docker credential boundary 隐式带入 Attempt。

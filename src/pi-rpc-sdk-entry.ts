@@ -12,7 +12,7 @@ import {
   piRpcEventPayloadMetadata,
   projectUnknownPiRpcEvent,
 } from "./pi-rpc-events.js";
-import { preparePiRpcAgentDirAt } from "./pi-rpc-spool.js";
+import { preparePiRpcAgentDirAt, preparePiRpcToolAgentDirAt } from "./pi-rpc-spool.js";
 import {
   controlledCompactionFailureCode,
   installWorkerContextControls,
@@ -132,6 +132,7 @@ async function main(argv: string[]): Promise<void> {
   if (resolve(process.env.PI_CODING_AGENT_DIR ?? "") !== privateAgentDir) {
     throw new Error("Pi RPC SDK host is not bound to the Attempt-private agent directory");
   }
+  const toolAgentDir = preparePiRpcToolAgentDirAt(join(dirname(privateAgentDir), "tool-agent"));
   failureStage = "credential-binding";
   const credentialAgentDir = resolve(host.credentialAgentDir);
   if (credentialAgentDir === privateAgentDir) throw new Error("Pi RPC credential and private agent directories must differ");
@@ -302,26 +303,32 @@ async function main(argv: string[]): Promise<void> {
     agentDir: privateAgentDir,
     sessionManager: pi.SessionManager.inMemory(cwd),
   });
-  if (host.probeMessage !== null) {
-    failureStage = "provider-probe";
-    const cached = activeCredential && authRevisionId
-      ? probeCacheIsFresh({ ...activeCredential, authRevisionId })
-      : false;
-    const marker = await runProbe(runtime, host.probeMessage, cached);
-    if (!cached && activeCredential && authRevisionId) {
-      recordProbeSuccess({ ...activeCredential, authRevisionId });
+  process.env.PI_CODING_AGENT_DIR = toolAgentDir;
+  try {
+    if (host.probeMessage !== null) {
+      failureStage = "provider-probe";
+      const cached = activeCredential && authRevisionId
+        ? probeCacheIsFresh({ ...activeCredential, authRevisionId })
+        : false;
+      const marker = await runProbe(runtime, host.probeMessage, cached);
+      if (!cached && activeCredential && authRevisionId) {
+        recordProbeSuccess({ ...activeCredential, authRevisionId });
+      }
+      process.stdout.write(`${marker}\n`);
+      assertCredentialInputs();
+      preparePiRpcAgentDirAt(privateAgentDir);
+      ownedCredentialLease?.stop();
+      ownedCredentialLease = null;
+      return;
     }
-    process.stdout.write(`${marker}\n`);
+    failureStage = "rpc-mode";
+    await pi.runRpcMode(withProjectedPiRpcEvents(runtime, host.expectedVersion, controlledEvents.subscribe));
     assertCredentialInputs();
     preparePiRpcAgentDirAt(privateAgentDir);
-    ownedCredentialLease?.stop();
-    ownedCredentialLease = null;
-    return;
+  } finally {
+    process.env.PI_CODING_AGENT_DIR = privateAgentDir;
+    preparePiRpcToolAgentDirAt(toolAgentDir);
   }
-  failureStage = "rpc-mode";
-  await pi.runRpcMode(withProjectedPiRpcEvents(runtime, host.expectedVersion, controlledEvents.subscribe));
-  assertCredentialInputs();
-  preparePiRpcAgentDirAt(privateAgentDir);
 }
 
 /**

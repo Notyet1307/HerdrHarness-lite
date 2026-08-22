@@ -1,11 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { Buffer } from "node:buffer";
-import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { SyncCommandRunner } from "../src/adapters/command.js";
 import { executionResourceDigest } from "../src/attempt-plan.js";
+import { preparePiRpcToolAgentDirAt } from "../src/pi-rpc-spool.js";
 import { QUALIFIED_PI_RPC_VERSIONS } from "../src/compatibility.js";
 import {
   MAX_UNKNOWN_PI_RPC_EVENT_BYTES,
@@ -520,6 +521,17 @@ test("disabled Pi RPC SDK host does not load private compaction and keeps OAuth/
       env: { ...process.env, PI_CODING_AGENT_DIR: privateAgentDir, FAKE_PI_SDK_CAPTURE: capturePath },
       timeoutMs: 10_000,
     };
+    const nestedDefaults = runner.run(process.execPath, commandArgs, {
+      ...options,
+      env: { ...options.env, FAKE_PI_SDK_INIT_DEFAULT_STORES: "1" },
+    });
+    assert.equal(nestedDefaults.ok, true, nestedDefaults.stderr);
+    const nestedCapture = JSON.parse(readFileSync(capturePath, "utf8")) as { defaultStoreAgentDir?: string };
+    assert.ok(nestedCapture.defaultStoreAgentDir);
+    assert.ok(resolve(nestedCapture.defaultStoreAgentDir) !== resolve(privateAgentDir));
+    assert.equal(existsSync(join(privateAgentDir, "auth.json")), false);
+    assert.equal(readFileSync(join(nestedCapture.defaultStoreAgentDir, "auth.json"), "utf8"), "{}");
+    assert.equal(readFileSync(join(nestedCapture.defaultStoreAgentDir, "models-store.json"), "utf8"), "{}");
     const result = runner.run(process.execPath, commandArgs, options);
 
     assert.equal(existsSync(join(dist, "core", "compaction", "index.js")), false);
@@ -579,10 +591,38 @@ test("disabled Pi RPC SDK host does not load private compaction and keeps OAuth/
     assert.equal(lockContention.stderr, "FAIL: Pi RPC SDK host failed at oauth-refresh\n");
     assert.match(lockContention.stdout, /"code":"oauth_probe_failed"/);
 
+    const unsafeArgs = [...commandArgs];
+    unsafeArgs[unsafeArgs.indexOf("--model") + 1] = "gpt-unsafe";
+    const credentialSentinel = "NESTED_CREDENTIAL_SENTINEL";
+    const unsafeNestedStore = runner.run(process.execPath, unsafeArgs, {
+      ...options,
+      env: {
+        ...options.env,
+        FAKE_PI_SDK_INIT_DEFAULT_STORES: "1",
+        FAKE_PI_SDK_DEFAULT_AUTH_CONTENT: `{"oauth":"${credentialSentinel}"}`,
+      },
+    });
+    assert.equal(unsafeNestedStore.ok, false);
+    assert.equal(unsafeNestedStore.stdout.includes(credentialSentinel) || unsafeNestedStore.stderr.includes(credentialSentinel), false);
+    writeFileSync(join(nestedCapture.defaultStoreAgentDir, "auth.json"), "{}", { mode: 0o600 });
+
     linkSync(authPath, join(root, "auth-hardlink.json"));
     const rejected = runner.run(process.execPath, commandArgs, options);
     assert.equal(rejected.ok, false);
     assert.match(rejected.stderr, /Pi RPC SDK host failed/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Pi RPC tool agent directory rejects a symlink", () => {
+  const root = mkdtempSync(join(tmpdir(), "harness-pi-tool-agent-"));
+  const target = join(root, "target");
+  const toolAgentDir = join(root, "tool-agent");
+  try {
+    mkdirSync(target, { mode: 0o700 });
+    symlinkSync(target, toolAgentDir);
+    assert.throws(() => preparePiRpcToolAgentDirAt(toolAgentDir), /must not be a symlink/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
