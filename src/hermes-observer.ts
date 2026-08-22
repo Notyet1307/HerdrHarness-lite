@@ -83,7 +83,15 @@ type CardOutboxEntry = {
   nextAttemptAt: number;
 };
 
-type OutboxEntry = TextOutboxEntry | CardOutboxEntry | ApprovalOutboxEntry;
+type TransportOutboxEntry = {
+  kind: "transport";
+  key: string;
+  payload: unknown;
+  attempts: number;
+  nextAttemptAt: number;
+};
+
+type OutboxEntry = TextOutboxEntry | CardOutboxEntry | ApprovalOutboxEntry | TransportOutboxEntry;
 
 type ObserverState = {
   version: 2;
@@ -427,6 +435,12 @@ async function flushOutbox(config: ObserverConfig, state: ObserverState): Promis
       } else {
         sent = sendCard(config, card);
       }
+    } else if (entry.kind === "transport") {
+      if (!config.deliveryCommand) {
+        retryEntry(config, state, entry, "Transport v2 outbox requires deliveryCommand");
+        return;
+      }
+      sent = sendCard(config, entry.payload);
     } else if (entry.kind === "card") {
       sent = sendCard(config, { text: entry.message });
     } else if (config.deliveryCommand) {
@@ -662,17 +676,17 @@ function assertSecureAbsoluteFile(path: string, label: string): void {
 function loadState(path: string): ObserverState {
   if (!existsSync(path)) return emptyState();
   assertSecureAbsoluteFile(path, "observer state");
-  const raw = JSON.parse(readFileSync(path, "utf8")) as ObserverState | (Omit<ObserverState, "version" | "outbox"> & {
-    version: 1;
-    outbox: Array<{ key: string; message: string; attempts: number; nextAttemptAt: number }>;
-  });
+  const raw = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
   const migrated = raw.version === 1
-    ? { ...raw, version: 2 as const, outbox: raw.outbox.map((entry) => ({ kind: "text" as const, ...entry })) }
-    : raw;
+    ? { ...raw, version: 2 as const, outbox: (raw.outbox as Array<Record<string, unknown>>).map((entry) => ({ kind: "text" as const, ...entry })) }
+    : raw.version === 3
+      ? migrateV3State(raw)
+      : raw as unknown as ObserverState;
+  const normalized = migrated as ObserverState;
   const value: ObserverState = {
-    ...migrated,
-    lastAutomaticRecoveryCount: Number.isInteger((migrated as Partial<ObserverState>).lastAutomaticRecoveryCount)
-      ? (migrated as Partial<ObserverState>).lastAutomaticRecoveryCount!
+    ...normalized,
+    lastAutomaticRecoveryCount: Number.isInteger(normalized.lastAutomaticRecoveryCount)
+      ? normalized.lastAutomaticRecoveryCount
       : 0,
   };
   if (
@@ -697,11 +711,57 @@ function loadState(path: string): ObserverState {
       || !Number.isFinite(entry.nextAttemptAt)
       || (entry.kind === "text" || entry.kind === "card"
         ? typeof entry.message !== "string"
-        : entry.kind !== "approval" || typeof entry.analysisId !== "string"))
+        : entry.kind === "approval"
+          ? typeof entry.analysisId !== "string"
+          : entry.kind !== "transport" || !entry.payload || typeof entry.payload !== "object"
+            || Buffer.byteLength(JSON.stringify(entry.payload), "utf8") > 32 * 1024))
   ) {
     throw new Error("invalid observer state");
   }
   return value;
+}
+
+function migrateV3State(raw: Record<string, unknown>): ObserverState {
+  if (!Array.isArray(raw.outbox)) throw new Error("invalid version 3 observer outbox");
+  const outbox: OutboxEntry[] = raw.outbox.map((value) => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("invalid version 3 observer entry");
+    const entry = value as Record<string, unknown>;
+    const common = {
+      key: String(entry.key ?? ""),
+      attempts: Number(entry.attempts ?? 0),
+      nextAttemptAt: Number(entry.nextAttemptAt ?? 0),
+    };
+    if (entry.kind === "approval") return { kind: "approval", ...common, analysisId: String(entry.analysisId ?? "") };
+    if (entry.kind !== "payload" || !entry.payload || typeof entry.payload !== "object" || Array.isArray(entry.payload)) {
+      throw new Error("invalid version 3 observer payload");
+    }
+    const payload = entry.payload as Record<string, unknown>;
+    if (payload.version === 2) return { kind: "transport", ...common, payload };
+    if (typeof payload.text !== "string") throw new Error("invalid legacy payload in version 3 observer state");
+    return payload.parseMode === "plain"
+      ? { kind: "text", ...common, message: payload.text }
+      : { kind: "card", ...common, message: payload.text };
+  });
+  return {
+    version: 2,
+    initialized: raw.initialized === true,
+    ledgerInitialized: raw.ledgerInitialized === true,
+    ledgerHealthy: raw.ledgerHealthy !== false,
+    logInitialized: raw.logInitialized === true,
+    logHealthy: raw.logHealthy !== false,
+    controllerDown: raw.controllerHealth !== "healthy",
+    controllerDownLogMtimeMs: 0,
+    controllerLogOffset: Number(raw.controllerLogOffset ?? 0),
+    lastControllerAlertKey: typeof raw.lastControllerAlertKey === "string" ? raw.lastControllerAlertKey : null,
+    lastJobId: typeof raw.lastJobId === "string" ? raw.lastJobId : null,
+    lastJobRevision: Number.isInteger(raw.lastJobRevision) ? Number(raw.lastJobRevision) : null,
+    lastJobState: typeof raw.lastJobState === "string" ? raw.lastJobState as JobState : null,
+    lastIncidentId: typeof raw.lastIncidentId === "string" ? raw.lastIncidentId : null,
+    lastAnalysisId: typeof raw.lastAnalysisId === "string" ? raw.lastAnalysisId : null,
+    lastAutomaticRecoveryCount: Number.isInteger(raw.lastAutomaticRecoveryCount) ? Number(raw.lastAutomaticRecoveryCount) : 0,
+    terminalCount: Number(raw.terminalCount ?? 0),
+    outbox,
+  };
 }
 
 function emptyState(): ObserverState {

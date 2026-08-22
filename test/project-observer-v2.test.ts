@@ -109,6 +109,46 @@ test("Project Observer v2 migrates state, suppresses replay, and dedupes Control
 
     migrated = JSON.parse(readFileSync(observerState, "utf8"));
     assert.equal(migrated.outbox.length, 0);
+    migrated.outbox.push({
+      kind: "payload",
+      key: "rollback-pending-v2",
+      payload: {
+        version: 2,
+        kind: "event",
+        generatedAt: new Date().toISOString(),
+        routeId: "exposure",
+        projectId: "Exposure-Agent",
+        fleetId: "engineering-fleet",
+        eventId: "event-rollback-pending",
+        dedupeKey: "rollback-pending-v2",
+        occurredAt: new Date().toISOString(),
+        severity: "info",
+        category: "state.restored",
+        title: "Pending before rollback",
+        summary: "Pending v2 delivery survives transport rollback.",
+        facts: [],
+        actionRequired: false,
+        operatorActionKinds: [],
+      },
+      attempts: 0,
+      nextAttemptAt: 0,
+    });
+    writeFileSync(observerState, JSON.stringify(migrated), { mode: 0o600 });
+
+    const rollback = JSON.parse(readFileSync(observerConfig, "utf8"));
+    delete rollback.transportVersion;
+    delete rollback.routeId;
+    delete rollback.projectId;
+    delete rollback.fleetId;
+    rollback.laneId = "exposure";
+    writeFileSync(observerConfig, JSON.stringify(rollback), { mode: 0o600 });
+    assert.equal(runObserver(observerConfig).status, 0, "v1 rollback rejected migrated v3 state");
+    const rolledBack = JSON.parse(readFileSync(observerState, "utf8"));
+    assert.equal(rolledBack.version, 2);
+    assert.equal(rolledBack.outbox.length, 0);
+    const rollbackDelivered = readDelivered(captureFile);
+    assert.equal(rollbackDelivered.length, 4, "v1 rollback replayed or dropped a v2 transition");
+    assert.equal(rollbackDelivered.at(-1).dedupeKey, "rollback-pending-v2");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
