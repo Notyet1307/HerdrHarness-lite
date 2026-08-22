@@ -545,15 +545,10 @@ test("Pi RPC canary preflights and routes only Worker through its isolated runti
   assert.deepEqual(herdr.prompts.map((prompt) => prompt.skill), ["code-review"]);
   assert.equal(store.state.activeJob?.attempts[0]?.executionSnapshot?.adapter, "pi-rpc");
   assert.equal(store.state.activeJob?.attempts[0]?.executionSnapshot?.retryMode, "disabled");
-  assert.equal(store.state.activeJob?.attempts[0]?.executionSnapshot?.compactionMode, "controlled-threshold");
-  assert.deepEqual(store.state.activeJob?.attempts[0]?.executionSnapshot?.compactionPolicy, {
-    triggerPercent: 75,
-    maxCompactions: 1,
-    keepRecentTokens: 20_000,
-    overflowContinuation: false,
-  });
-  assert.equal(/Objective:/.test(workerRpc.prompts[0]?.text ?? ""), false);
-  assert.match(workerRpc.prompts[0]?.text ?? "", /pinned task data is injected before every model request/i);
+  assert.equal(store.state.activeJob?.attempts[0]?.executionSnapshot?.compactionMode, "disabled");
+  assert.equal(store.state.activeJob?.attempts[0]?.executionSnapshot?.compactionPolicy, undefined);
+  assert.match(workerRpc.prompts[0]?.text ?? "", /Objective:/);
+  assert.equal(/pinned task data is injected before every model request/i.test(workerRpc.prompts[0]?.text ?? ""), false);
   assert.equal(store.state.activeJob?.attempts[1]?.executionSnapshot?.adapter, "herdr-pi-cli");
   assert.deepEqual(store.state.activeJob?.attempts[0]?.executionSnapshot?.argv.slice(-2), ["--mode", "rpc"]);
   const rpcProbes = preflight.providerCalls.filter((call) => call.lane === "worker");
@@ -605,7 +600,12 @@ test("controlled Worker compaction rejects older Pi before claim", async () => {
   const preflight = new FakeRuntimePreflight();
   preflight.version = "0.84.1";
   const controller = new HarnessController({
-    config: { ...config, workerRuntime: "pi-rpc", workerArgv: rpcWorkerArgv },
+    config: {
+      ...config,
+      workerRuntime: "pi-rpc",
+      workerArgv: rpcWorkerArgv,
+      workerCompaction: { mode: "controlled-threshold" },
+    },
     store,
     github,
     git: new FakeGit(),

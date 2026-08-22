@@ -22,7 +22,7 @@ Fleet 是独立的进程生命周期层：每个项目对应一个单项目 Cont
 - Reviewer 阶段 checkpoint 只在 Harness private state 中原子创建、digest 绑定且最多跨 fresh Attempt 复用一次；checkpoint 本身不是 review pass。
 - Runtime event、Herdr status、child completion 与短 probe 都只是观察事实。
 - Analyst 只有建议权；policy 或精确 human gate 才能授权恢复。
-- Pi RPC auto-retry 与 Pi 自有 auto-compaction 保持关闭。只有 Worker RPC 可使用 snapshot 绑定、最多一次的受控阈值压缩；Reviewer 压缩仍关闭。
+- Pi RPC auto-retry 与 Pi 自有 auto-compaction 保持关闭。Worker compaction 默认关闭，只有显式 `controlled-threshold` 才启用 snapshot 绑定、最多一次的受控阈值压缩；Reviewer 压缩仍关闭。
 - 凭据不进入 result、receipt、ledger、文档或复制出的 credential 文件。
 - 多项目共享 canonical OAuth 时，以 auth realpath digest 绑定跨进程 startup lease；openai-codex Reviewer axes 默认串行，custom Provider 可配置 1 或 2。
 - Fleet 只管理项目进程，不写项目 workflow transition。
@@ -54,6 +54,8 @@ npm run build
 保持 example 中完整 role argv、ambient-discovery hardening flags、tools、thinking 和 extension 顺序。裸 `reviewerArgv` 的可见 provider/model 应与 active Reviewer profile 一致。`localPath`、`stateDir` 和 `worktreeRoot` 必须两两隔离。
 
 Worker 可选的第二个 extension 只能是 `@dietrichgebert/ponytail` `4.9.0`。声明后 Harness 强制 full mode，同时静默 status/startup UI；Worker UI request 的拒绝策略不会放宽。
+
+`workerCompaction.mode` 只接受 `disabled` 或 `controlled-threshold`。示例和缺省值均为 `disabled`；旧配置省略该字段时也不会自动开启。只应在明确的长任务 canary 中显式启用 controlled 模式。
 
 运行前验证外部访问：
 

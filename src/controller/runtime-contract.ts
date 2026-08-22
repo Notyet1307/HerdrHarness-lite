@@ -7,6 +7,10 @@ export function rpcEnabled(config: HarnessConfig, lane: Attempt["lane"]): boolea
   return (lane === "worker" ? config.workerRuntime : config.reviewerRuntime) === "pi-rpc";
 }
 
+export function workerCompactionMode(config: HarnessConfig): "disabled" | "controlled-threshold" {
+  return config.workerCompaction?.mode ?? "disabled";
+}
+
 export function runtimeRole(config: HarnessConfig, lane: Attempt["lane"]): {
   argv: string[];
   credentialMode: PiRpcCredentialMode;

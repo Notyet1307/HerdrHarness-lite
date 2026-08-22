@@ -50,6 +50,10 @@ import {
   resolveCredentialDomain,
   type CredentialStartupLease,
 } from "./credential-startup.js";
+import {
+  isControlledCompactionFailureCode,
+  type ControlledCompactionFailureCode,
+} from "./pi-rpc-compaction-compat.js";
 
 const MAX_RPC_LINE_BYTES = 1024 * 1024;
 const MAX_EVENT_LOG_BYTES = 512 * 1024;
@@ -264,6 +268,7 @@ async function main(argv: string[]): Promise<void> {
   let transcriptBytes = 0;
   let controlledCompactionPhase: "idle" | "started" | "completed" = "idle";
   let controlledCompactionReceipt: JsonObject | null = null;
+  let controlledCompactionFailureCode: ControlledCompactionFailureCode | null = null;
   let assistantMessageActive = false;
   let lastProgressAt = runtimeStartedAt;
   let lastProgressType: ProgressType = "runner_started";
@@ -336,6 +341,12 @@ async function main(argv: string[]): Promise<void> {
       const code = credentialStartupErrorCode({ code: event.code });
       if (!code) throw piRpcRunnerError("rpc_protocol", "rpc_command_failed", false);
       throw piRpcRunnerError("credential", code, credentialStartupRetryable(code));
+    }
+    if (reportedType === "harness_compaction_failure") {
+      if (!isControlledCompactionFailureCode(event.code)) {
+        throw piRpcRunnerError("rpc_protocol", "rpc_command_failed", false);
+      }
+      throw piRpcRunnerError("compaction", event.code, false);
     }
     const classification: PiRpcEventClassification = knownPiRpcEventClassification(reportedType)
       ?? projectedUnknownPiRpcEventClassification(event, plan.snapshot.runtimeVersion);
@@ -432,6 +443,7 @@ async function main(argv: string[]): Promise<void> {
       const accepted = acceptControlledCompactionEvent(plan, event, controlledCompactionPhase);
       controlledCompactionPhase = accepted.phase;
       if (accepted.receipt) controlledCompactionReceipt = accepted.receipt;
+      if (accepted.failureCode) controlledCompactionFailureCode = accepted.failureCode;
       if (accepted.error) policyViolation = accepted.error;
     }
     if (classification === "forbidden") {
@@ -444,7 +456,10 @@ async function main(argv: string[]): Promise<void> {
     }
     if (classification === "unknown-unsafe") policyViolation = "unsafe unknown Pi RPC event";
     if (type === "agent_settled") {
-      if (controlledCompactionPhase === "started") policyViolation = "controlled compaction did not finish before settlement";
+      if (controlledCompactionPhase === "started") {
+        controlledCompactionFailureCode = "compaction_protocol";
+        policyViolation = "controlled compaction failed";
+      }
       settled = true;
     }
   };
@@ -639,13 +654,13 @@ async function main(argv: string[]): Promise<void> {
             failureCode: deadlineFailure,
             retryable: false,
           })
-        : policyViolation === "controlled compaction failed"
+        : controlledCompactionFailureCode
         ? makeSafeRuntimeDiagnostic({
             domain: "execution",
-            code: "compaction_failure",
+            code: controlledCompactionFailureCode,
             stage: "compaction",
             failureDomain: "compaction",
-            failureCode: "compaction_failure",
+            failureCode: controlledCompactionFailureCode,
             retryable: false,
           })
         : policyViolation
@@ -854,12 +869,14 @@ function validatePlan(plan: PiRpcPlan): void {
     : lane === "reviewer"
       && (plan.snapshot.credentialMode === "canonical-oauth" || plan.snapshot.credentialMode === "canonical-model-config");
   const validCompaction = lane === "worker"
-    ? plan.snapshot.runtimeVersion === QUALIFIED_CONTROLLED_COMPACTION_PI_VERSION
-      && plan.snapshot.compactionMode === "controlled-threshold"
-      && isWorkerControlledCompactionPolicy(plan.snapshot.compactionPolicy)
-      && plan.pinnedTaskData?.version === 1
-      && /^[0-9a-f]{64}$/i.test(plan.pinnedTaskData.digest)
-      && digest(plan.pinnedTaskData.content) === plan.pinnedTaskData.digest
+    ? plan.snapshot.compactionMode === "disabled"
+      ? plan.snapshot.compactionPolicy === undefined && plan.pinnedTaskData === undefined
+      : plan.snapshot.runtimeVersion === QUALIFIED_CONTROLLED_COMPACTION_PI_VERSION
+        && plan.snapshot.compactionMode === "controlled-threshold"
+        && isWorkerControlledCompactionPolicy(plan.snapshot.compactionPolicy)
+        && plan.pinnedTaskData?.version === 1
+        && /^[0-9a-f]{64}$/i.test(plan.pinnedTaskData.digest)
+        && digest(plan.pinnedTaskData.content) === plan.pinnedTaskData.digest
     : lane === "reviewer"
       && plan.snapshot.compactionMode === "disabled"
       && plan.snapshot.compactionPolicy === undefined
@@ -902,13 +919,27 @@ function acceptControlledCompactionEvent(
   plan: PiRpcPlan,
   event: JsonObject,
   phase: "idle" | "started" | "completed",
-): { phase: "idle" | "started" | "completed"; receipt: JsonObject | null; error: string | null } {
+): {
+  phase: "idle" | "started" | "completed";
+  receipt: JsonObject | null;
+  error: string | null;
+  failureCode: ControlledCompactionFailureCode | null;
+} {
   const policy = plan.snapshot.compactionPolicy;
   const type = event.type;
-  const baseValid = plan.snapshot.context?.lane === "worker"
+  const controlledPlan = plan.snapshot.context?.lane === "worker"
     && plan.snapshot.compactionMode === "controlled-threshold"
-    && isWorkerControlledCompactionPolicy(policy)
-    && event.source === "harness-controlled"
+    && isWorkerControlledCompactionPolicy(policy);
+  if (!controlledPlan) {
+    return { phase, receipt: null, error: "invalid controlled compaction event", failureCode: null };
+  }
+  const protocolFailure = (error: string) => ({
+    phase: "completed" as const,
+    receipt: null,
+    error,
+    failureCode: "compaction_protocol" as const,
+  });
+  const baseValid = event.source === "harness-controlled"
     && event.reason === "threshold"
     && event.count === 1
     && event.triggerPercent === policy?.triggerPercent
@@ -917,72 +948,104 @@ function acceptControlledCompactionEvent(
     && /^[0-9a-f]{64}$/.test(event.payloadDigest)
     && Number.isSafeInteger(event.payloadBytes)
     && Number(event.payloadBytes) >= 0;
-  if (!baseValid) return { phase, receipt: null, error: "invalid controlled compaction event" };
+  if (!baseValid) return protocolFailure("invalid controlled compaction event");
   if (type === "compaction_start") {
     const allowed = new Set([
       "type", "source", "reason", "count", "triggerPercent", "contextTokens", "contextWindow", "willRetry",
-      "payloadBytes", "payloadDigest",
+      "payloadByteEstimate", "attemptCount", "usedRetry", "payloadBytes", "payloadDigest",
     ]);
     const contextTokens = Number(event.contextTokens);
     const contextWindow = Number(event.contextWindow);
+    const payloadByteEstimate = Number(event.payloadByteEstimate);
+    const attemptCount = Number(event.attemptCount);
     if (phase !== "idle" || Object.keys(event).some((key) => !allowed.has(key))
       || !Number.isSafeInteger(contextTokens) || contextTokens <= 0
       || !Number.isSafeInteger(contextWindow) || contextWindow <= 0
+      || !Number.isSafeInteger(payloadByteEstimate) || payloadByteEstimate < 0
+      || !Number.isSafeInteger(attemptCount) || attemptCount < 0 || attemptCount > 1
+      || event.usedRetry !== false
       || contextTokens * 100 < contextWindow * policy!.triggerPercent) {
-      return { phase, receipt: null, error: "invalid controlled compaction start" };
+      return protocolFailure("invalid controlled compaction start");
     }
-    return { phase: "started", receipt: null, error: null };
+    return { phase: "started", receipt: null, error: null, failureCode: null };
   }
   const allowed = new Set([
-    "type", "source", "reason", "count", "triggerPercent", "contextTokens", "contextWindow", "willRetry", "outcome", "tokensBefore",
-    "estimatedTokensAfter", "summaryDigest", "payloadBytes", "payloadDigest",
+    "type", "source", "reason", "count", "triggerPercent", "contextTokens", "contextWindow", "payloadByteEstimate",
+    "attemptCount", "summaryRequestDurationMs", "usedRetry", "willRetry", "outcome", "tokensBefore",
+    "estimatedTokensAfter", "summaryDigest", "failureDomain", "failureCode", "payloadBytes", "payloadDigest",
   ]);
   const tokensBefore = Number(event.tokensBefore);
   const estimatedTokensAfter = Number(event.estimatedTokensAfter);
   const contextTokens = Number(event.contextTokens);
   const contextWindow = Number(event.contextWindow);
+  const payloadByteEstimate = Number(event.payloadByteEstimate);
+  const attemptCount = Number(event.attemptCount);
+  const summaryRequestDurationMs = Number(event.summaryRequestDurationMs);
   if (type !== "compaction_end" || phase !== "started" || Object.keys(event).some((key) => !allowed.has(key))) {
-    return { phase, receipt: null, error: "controlled compaction changed shape" };
+    return protocolFailure("controlled compaction changed shape");
   }
+  const commonValid = Number.isSafeInteger(contextTokens) && contextTokens > 0
+    && Number.isSafeInteger(contextWindow) && contextWindow > 0
+    && contextTokens * 100 >= contextWindow * policy!.triggerPercent
+    && Number.isSafeInteger(payloadByteEstimate) && payloadByteEstimate >= 0
+    && Number.isSafeInteger(attemptCount) && attemptCount >= 0 && attemptCount <= 2
+    && Number.isSafeInteger(summaryRequestDurationMs) && summaryRequestDurationMs >= 0
+    && event.usedRetry === (attemptCount === 2);
+  if (!commonValid) return protocolFailure("controlled compaction changed shape");
   if (event.outcome === "failed") {
     const failureKeys = new Set([
-      "type", "source", "reason", "count", "triggerPercent", "contextTokens", "contextWindow", "willRetry", "outcome", "payloadBytes", "payloadDigest",
+      "type", "source", "reason", "count", "triggerPercent", "contextTokens", "contextWindow", "payloadByteEstimate",
+      "attemptCount", "summaryRequestDurationMs", "usedRetry", "willRetry", "outcome", "failureDomain", "failureCode",
+      "payloadBytes", "payloadDigest",
     ]);
     if (Object.keys(event).some((key) => !failureKeys.has(key))
-      || !Number.isSafeInteger(contextTokens) || contextTokens <= 0
-      || !Number.isSafeInteger(contextWindow) || contextWindow <= 0
-      || contextTokens * 100 < contextWindow * policy!.triggerPercent) {
-      return { phase, receipt: null, error: "controlled compaction failure changed shape" };
+      || event.failureDomain !== "compaction"
+      || !isControlledCompactionFailureCode(event.failureCode)
+      || ((event.failureCode === "compaction_provider_transient" || event.failureCode === "compaction_provider_permanent")
+        && attemptCount < 1)) {
+      return protocolFailure("controlled compaction failure changed shape");
     }
     return {
       phase: "completed",
       receipt: {
         count: 1,
+        reason: "threshold",
         triggerPercent: policy!.triggerPercent,
         contextTokens,
         contextWindow,
+        payloadByteEstimate,
+        attemptCount,
+        summaryRequestDurationMs,
+        usedRetry: event.usedRetry,
         outcome: "failed",
+        failureDomain: "compaction",
+        failureCode: event.failureCode,
         willRetry: false,
       },
       error: "controlled compaction failed",
+      failureCode: event.failureCode,
     };
   }
   if (event.outcome !== "completed"
-    || !Number.isSafeInteger(contextTokens) || contextTokens <= 0
-    || !Number.isSafeInteger(contextWindow) || contextWindow <= 0
-    || contextTokens * 100 < contextWindow * policy!.triggerPercent
+    || attemptCount < 1
+    || event.failureDomain !== undefined || event.failureCode !== undefined
     || !Number.isSafeInteger(tokensBefore) || tokensBefore < 0
     || !Number.isSafeInteger(estimatedTokensAfter) || estimatedTokensAfter < 0
     || typeof event.summaryDigest !== "string" || !/^[0-9a-f]{64}$/.test(event.summaryDigest)) {
-    return { phase, receipt: null, error: "controlled compaction completion changed shape" };
+    return protocolFailure("controlled compaction completion changed shape");
   }
   return {
     phase: "completed",
     receipt: {
       count: 1,
+      reason: "threshold",
       triggerPercent: policy!.triggerPercent,
       contextTokens,
       contextWindow,
+      payloadByteEstimate,
+      attemptCount,
+      summaryRequestDurationMs,
+      usedRetry: event.usedRetry,
       outcome: "completed",
       tokensBefore,
       estimatedTokensAfter,
@@ -990,6 +1053,7 @@ function acceptControlledCompactionEvent(
       willRetry: false,
     },
     error: null,
+    failureCode: null,
   };
 }
 
@@ -1011,6 +1075,12 @@ function preparePinnedTaskData(plan: PiRpcPlan): string | null {
 
 function runtimeControlHostArgs(plan: PiRpcPlan, pinnedTaskDataPath: string | null): string[] {
   if (plan.snapshot.context?.lane !== "worker") return [];
+  if (plan.snapshot.compactionMode === "disabled") {
+    if (pinnedTaskDataPath || plan.pinnedTaskData || plan.snapshot.compactionPolicy) {
+      throw new Error("disabled Worker compaction cannot bind controlled context data");
+    }
+    return [];
+  }
   if (!pinnedTaskDataPath || !plan.pinnedTaskData || !plan.snapshot.compactionPolicy) {
     throw new Error("controlled Worker runtime has no pinned task data or compaction policy");
   }

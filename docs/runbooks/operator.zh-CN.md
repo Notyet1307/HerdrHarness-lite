@@ -47,6 +47,8 @@ codex --version
 
 保持 example 中 ambient-discovery hardening flags、tools、thinking、extension 顺序和 role contract 完整。启用 `reviewerProviderProfiles` 时，裸 `reviewerArgv` selector 应与 active profile 可见值一致；Controller 会在 future Attempt preparation 时绑定 active selection。
 
+`workerCompaction.mode` 只接受 `disabled | controlled-threshold`。example、缺省值以及省略该字段的旧配置都安全解析为 `disabled`，迁移不会自动开启。只有明确的长任务 canary 才改为 `controlled-threshold`；变更只影响之后创建的 fresh Worker Attempt。
+
 Worker 启用 Ponytail 时，extension 顺序必须严格为 bundled `worker-tools.js` 后接 `@dietrichgebert/ponytail` `4.9.0` 的 manifest entry。Harness 会强制 `PONYTAIL_DEFAULT_MODE=full`、`PONYTAIL_HIDE_STATUS=1`、`PONYTAIL_QUIET_STARTUP=1`；不要为 Ponytail 放宽 Worker UI allowlist。
 
 `stateDir` 不得与 source 或 `worktreeRoot` 重叠。包含 token、OAuth 或 custom model credentials 的 canonical Pi 文件保持原位和私有 mode；不要复制到配置、Attempt 目录、日志或 ledger。Harness 只记录 canonical `auth.json` realpath 的 SHA-256 domain ID，并在 credential store 内的私有 coordination directory 写无 credential 内容的 startup lease/probe cache。
@@ -80,7 +82,7 @@ node dist/src/cli.js status --config /ABSOLUTE/PATH/harness.config.json --operat
 - configured Herdr session 可达；
 - target checkout 与 worktree root 存在且权限正确；
 - 当前 active Job、Attempt phase、Incident、operator actions 与 ledger revision 已被理解；
-- Worker RPC snapshot 显示 `controlled-threshold`（75%、最多一次、overflow continuation=false），Reviewer 仍显示 `disabled`；
+- Worker RPC snapshot 与配置一致：默认 `disabled`；显式 canary 才显示 `controlled-threshold`（75%、最多一次、overflow continuation=false）。Reviewer 始终显示 `disabled`；
 - 要 claim 的 Issue/Map frontier 是本次明确允许推进的队列；
 - 部署操作不会顺带启动 Worker 或 Reviewer。
 

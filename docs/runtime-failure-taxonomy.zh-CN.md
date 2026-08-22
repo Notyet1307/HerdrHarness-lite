@@ -43,7 +43,11 @@
 | `result_identity` | acceptance | Controller result validation | `integrity_violation` + hold | 否 | 否 | expected/observed job、Attempt、lane、HEAD 的有界值 |
 | `git_integrity` | acceptance | Worker Git verification / Reviewer preflight 与 exact-HEAD gate | `integrity_violation` 或 `reviewer_preflight_dirty` | 模型可能已工作，但未形成可交付 fixed point | 否；Reviewer residue 只能经现有 Analyst/human gate fresh retry | HEAD、branch、clean/dirty 分类、允许 result path；不复制凭据文件 |
 | `policy_violation` | execution | runner 对 unknown-unsafe/control/auto-retry/multiple-start 事件的 gate | terminal failure → bounded observation → `infrastructure_exhausted` | 可能有 result，但 failure receipt 优先 | 仅既有 narrow policy | 固定 policy code、事件 classification/type/byte count/digest，不记录 payload |
-| `compaction_failure` | execution | controlled Worker compaction + runner | content-free failed event → terminal failure → `infrastructure_exhausted` | 否 | Worker running 不自动 | 次数、阈值、context/window、`outcome=failed`、`willRetry=false` |
+| `compaction_provider_transient` | execution | controlled summary request | network/rate-limit/timeout 的第二次请求仍失败 → terminal failure | 否 | 不创建 fresh Attempt；summary-local retry 已耗尽 | trigger、context/window、payload estimate、2 次 request、duration、`usedRetry=true` |
+| `compaction_provider_permanent` | execution | controlled summary request | 非允许 transient 分类 → 立即 terminal failure | 否 | 否 | 同上，不记录 Provider 原文 |
+| `compaction_protocol` | execution | compaction adapter / runner event contract | result/event shape 不满足 exact contract → terminal failure | 否 | 否 | 固定 code 与可验证的数值 receipt；无原始 payload |
+| `compaction_context_invalid` | execution | compaction preparation | 阈值触发后没有可压缩的有效 context → terminal failure | 否 | 否 | attempt count 0、payload estimate 与 duration |
+| `compaction_internal_api_drift` | execution | exact-version compatibility adapter | version/private surface/session hook 漂移 → preflight/runtime terminal failure | 否 | 否 | exact code；不记录 stack/private response |
 | `validation_infrastructure` | acceptance | Reviewer preflight / fixed validation launcher | 分类只在 tool-local receipt；Reviewer 若提交 blocked/failed result，Controller 再按 result 进入 `review_uncertain`，Incident 不直接携带此 code | 否 | 否 | command identity、exit/signal、bounded error/tail、Docker version/host identity |
 | `validation_failed` | deterministic | 固定 Reviewer validation command | Controller receipt 记录 `failed-checks`；`pass` 被拒绝，Reviewer 必须提交绑定 validation finding 的 changes | 否 | 否 | command identity、exit code、stdout/stderr redaction marker、原始 byte count 与 SHA-256 |
 
@@ -68,11 +72,12 @@
 | 无害未知 telemetry | `FAKE_PI_UNKNOWN_EVENT=telemetry` | exact-qualified contract 下只接受无 opaque 文本的有界结构化值，记录 content-free unknown-safe observation，不刷新 progress |
 | 未知 UI / retry event | `FAKE_PI_UNKNOWN_EVENT=ui/retry` | 记录 type/byte count/digest 后 content-free `policy_violation` |
 | OAuth lock contention | `test/fixtures/fake-pi-sdk.ts` + `FAKE_PI_SDK_OAUTH_LOCK_CONTENTION=1` | SDK host 只输出安全 stage，不输出 OAuth/token/error 原文 |
-| controlled compaction Provider 请求失败 | fake compaction SDK 抛错，或 `FAKE_PI_CONTROLLED_COMPACTION=fail` | 单次、无 retry、无 summary/Provider 原文的 `compaction_failure` |
+| controlled compaction transient Provider 请求失败 | fake compaction SDK 连续抛出 network/rate-limit/timeout，或 `FAKE_PI_CONTROLLED_COMPACTION=fail` | summary 请求总计两次、无 prompt replay/第二个 `agent_start`、无 summary/Provider 原文的 `compaction_provider_transient` |
+| controlled compaction permanent/protocol/context/API drift | fake adapter 分别返回 401、invalid result、no preparation 或 changed exact surface | 不 retry；稳定区分四个对应 code，private import 只存在于 compatibility adapter |
 
 ## 5. 记录边界
 
-允许持久化：Attempt/generation/plan identity，稳定分类，允许枚举的 Provider API，4xx/5xx 状态码，bounded counters，transcript/event 字节桶，event/summary/status/worktree digest，六个 side-effect boundary 布尔值，child exit，compaction 数值 receipt，以及固定 validation receipt 的 identity、argv/digest、时间、exit/signal/timeout、环境/resource/source digest 和 stdout/stderr 有界投影。原始 validation 输出不落盘；Review Axis 原文只在权限收紧的 Attempt 私有 evidence 文件中保存。模型只收到有界投影，ledger 只保存 validation receipt 的 path/digest/status binding，terminal receipt 不保存原文。
+允许持久化：Attempt/generation/plan identity，稳定分类，允许枚举的 Provider API，4xx/5xx 状态码，bounded counters，transcript/event 字节桶，event/summary/status/worktree digest，六个 side-effect boundary 布尔值，child exit，compaction 的 trigger、context/window、payload byte estimate、attempt count、duration、retry 布尔、before/after estimate、summary digest 与稳定 failure domain/code，以及固定 validation receipt 的 identity、argv/digest、时间、exit/signal/timeout、环境/resource/source digest 和 stdout/stderr 有界投影。原始 validation 输出不落盘；Review Axis 原文只在权限收紧的 Attempt 私有 evidence 文件中保存。模型只收到有界投影，ledger 只保存 validation receipt 的 path/digest/status binding，terminal receipt 不保存原文。
 
 禁止持久化：access token、OAuth 内容、API key、Provider 原始响应或 stderr、完整私密 transcript、tool 原始 payload、compaction summary 内容和原始 stack。`runtime-events.jsonl` 只保留 event classification/type、原始 payload byte count、digest 和少量 allowlisted 标志，并有 512 KiB 总上限。
 

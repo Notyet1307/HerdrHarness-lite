@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { validateHarnessConfig } from "../src/controller/config-validation.js";
+import { workerCompactionMode } from "../src/controller/runtime-contract.js";
 import type { HarnessConfig } from "../src/ports.js";
 import {
   configuredRuntimeTimeouts,
@@ -79,6 +80,39 @@ test("runtime timeout defaults remain compatible and overrides fail closed", () 
     assert.throws(() => validateHarnessConfig({ ...base, worker: { totalTimeoutMs: 100, noProgressTimeoutMs: 101 } }), /must not exceed/);
     assert.throws(() => validateHarnessConfig({ ...base, validation: { totalTimeoutMs: 0 } }), /validation\.totalTimeoutMs/);
     assert.throws(() => validateHarnessConfig({ ...base, termination: { sigtermGraceMs: -1 } }), /termination grace/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Worker compaction defaults disabled and rejects ambiguous or unused configuration", () => {
+  assert.equal(workerCompactionMode({} as HarnessConfig), "disabled");
+  assert.equal(workerCompactionMode({ workerCompaction: { mode: "controlled-threshold" } } as HarnessConfig), "controlled-threshold");
+  const root = mkdtempSync(join(tmpdir(), "herdr-config-compaction-"));
+  try {
+    const base = {
+      repo: "owner/repo",
+      localPath: join(root, "source"),
+      stateDir: join(root, "state"),
+      baseRef: "main",
+      readyLabel: "ready-for-agent",
+      claimLabel: "agent:claimed",
+      worktreeRoot: join(root, "worktrees"),
+      maxReviewRounds: 3,
+      maxAnalystTurns: 3,
+      reviewerValidationArgv: ["npm", "test"],
+      workerArgv: [],
+      reviewerArgv: [],
+    } satisfies HarnessConfig;
+    for (const path of [base.localPath, base.stateDir, base.worktreeRoot]) mkdirSync(path, { recursive: true });
+    assert.throws(() => validateHarnessConfig({
+      ...base,
+      workerCompaction: { mode: "invalid" },
+    } as unknown as HarnessConfig), /workerCompaction/);
+    assert.throws(() => validateHarnessConfig({
+      ...base,
+      workerCompaction: { mode: "controlled-threshold" },
+    }), /requires workerRuntime=pi-rpc/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

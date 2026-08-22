@@ -1,5 +1,9 @@
 import { createHash } from "node:crypto";
 import { credentialStartupErrorCode, credentialStartupRetryable } from "./credential-startup.js";
+import {
+  CONTROLLED_COMPACTION_FAILURE_CODES,
+  isControlledCompactionFailureCode,
+} from "./pi-rpc-compaction-compat.js";
 
 export const PI_RPC_FAILURE_DOMAINS = [
   "provider",
@@ -64,6 +68,7 @@ export const PI_RPC_FAILURE_CODES = [
   "result_identity",
   "git_integrity",
   "policy_violation",
+  ...CONTROLLED_COMPACTION_FAILURE_CODES,
   "compaction_failure",
   "validation_infrastructure",
   "validation_failed",
@@ -123,6 +128,7 @@ export const FAILURE_CODES = [
   "result_identity",
   "git_integrity",
   "policy_violation",
+  ...CONTROLLED_COMPACTION_FAILURE_CODES,
   "compaction_failure",
   "validation_infrastructure",
   "validation_failed",
@@ -309,12 +315,13 @@ export function piRpcRunnerError(
 export function classifyPiRpcRunnerFailure(error: unknown, failureStage: string): ClassifiedRunnerFailure {
   const stage = normalizedFailureStage(failureStage);
   if (error instanceof PiRpcRunnerError) {
+    const stable = stableRunnerFailure(error.failureDomain, error.failureCode, stage);
     return {
       failureDomain: error.failureDomain,
       failureCode: error.failureCode,
       retryable: error.retryable,
-      ...stableRunnerFailure(error.failureDomain, error.failureCode, stage),
-      failureStage: stage,
+      ...stable,
+      failureStage: stable.stage,
     };
   }
 
@@ -698,12 +705,13 @@ function withStableRunnerFailure(
   retryable: boolean,
   failureStage: FailureStage,
 ): ClassifiedRunnerFailure {
+  const stable = stableRunnerFailure(failureDomain, failureCode, failureStage);
   return {
     failureDomain,
     failureCode,
     retryable,
-    ...stableRunnerFailure(failureDomain, failureCode, failureStage),
-    failureStage,
+    ...stable,
+    failureStage: stable.stage,
   };
 }
 
@@ -729,6 +737,9 @@ function stableRunnerFailure(
     if (failureCode === "attempt_deadline") return { domain: "execution", code: "attempt_deadline", stage };
     if (failureCode === "rpc_terminal_missing") return { domain: "observation", code: "rpc_terminal_missing", stage };
     if (failureCode === "runtime_terminated") return { domain: "execution", code: "runtime_terminated", stage };
+  }
+  if (failureDomain === "compaction" && isControlledCompactionFailureCode(failureCode)) {
+    return { domain: "execution", code: failureCode, stage: "compaction" };
   }
   return { domain: "execution", code: "runtime_internal", stage };
 }
@@ -797,7 +808,11 @@ function stableIdentityMatches(diagnostic: SafeRuntimeDiagnostic & FailureClassi
   }
   if (diagnostic.failureDomain === "git") return diagnostic.failureCode === "git_integrity" && same("acceptance", "git_integrity");
   if (diagnostic.failureDomain === "policy") return diagnostic.failureCode === "policy_violation" && same("execution", "policy_violation");
-  if (diagnostic.failureDomain === "compaction") return diagnostic.failureCode === "compaction_failure" && same("execution", "compaction_failure");
+  if (diagnostic.failureDomain === "compaction") {
+    return isControlledCompactionFailureCode(diagnostic.failureCode)
+      ? same("execution", diagnostic.failureCode)
+      : diagnostic.failureCode === "compaction_failure" && same("execution", "compaction_failure");
+  }
   if (diagnostic.failureDomain === "tool") return diagnostic.failureCode === "tool_contract" && same("execution", "tool_contract");
   if (diagnostic.failureDomain === "validation") {
     return diagnostic.failureCode === "validation_failed"

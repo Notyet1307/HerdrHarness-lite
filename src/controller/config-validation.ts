@@ -62,6 +62,16 @@ export function validateHarnessConfig(config: HarnessConfig): void {
       throw new Error("preflight.dockerRequired must be boolean");
     }
   }
+  if (config.workerCompaction !== undefined) {
+    if (!config.workerCompaction || typeof config.workerCompaction !== "object" || Array.isArray(config.workerCompaction)
+      || Object.keys(config.workerCompaction).some((key) => key !== "mode")
+      || (config.workerCompaction.mode !== "disabled" && config.workerCompaction.mode !== "controlled-threshold")) {
+      throw new Error("workerCompaction must contain exactly mode=disabled or mode=controlled-threshold");
+    }
+    if (config.workerCompaction.mode === "controlled-threshold" && config.workerRuntime !== "pi-rpc") {
+      throw new Error("workerCompaction controlled-threshold requires workerRuntime=pi-rpc");
+    }
+  }
   for (const [name, value] of [["worker", config.worker], ["reviewer", config.reviewer]] as const) {
     if (value !== undefined && (!value || typeof value !== "object" || Array.isArray(value))) throw new Error(`${name} must be an object`);
     if (value && Object.keys(value).some((key) => (

@@ -11,6 +11,9 @@
   "maxAnalystTurns": 3,
   "workerRuntime": "herdr-pi-cli",
   "reviewerRuntime": "pi-rpc",
+  "workerCompaction": {
+    "mode": "disabled"
+  },
   "worker": {
     "totalTimeoutMs": 5400000,
     "noProgressTimeoutMs": 900000
