@@ -144,6 +144,7 @@ node dist/src/fleet-cli.js status --config /PRIVATE/PATH/fleet.config.json --ope
 - [Controller/Fleet ADR](./docs/adr/0004-modular-controller-and-project-fleet.md)：本轮改造的长期边界。
 - [Fleet 运行手册](./docs/fleet.zh-CN.md)：多项目配置、隔离、监督和恢复。
 - [运维手册](./docs/runbooks/operator.zh-CN.md)：单项目 setup、canary、run、recovery、upgrade 与 rollback。
+- [Provider/runtime canary](./docs/runbooks/provider-runtime-canary.zh-CN.md)：独立 A/B 矩阵、中断恢复、压力组与报告。
 - [Telegram integration](./integrations/hermes-telegram/README.md)：standalone Bridge 与 Hermes compatibility 配置。
 - [Telegram cutover](./docs/runbooks/telegram-cutover.md)：部署、canary 与 rollback。
 - [架构决策](./docs/adr/)：Attempt 完整性、context closure、retry ownership、受控压缩与 Fleet 隔离的长期决策。

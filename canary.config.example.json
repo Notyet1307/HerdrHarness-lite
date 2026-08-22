@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "stateDir": "/absolute/private/path/to/herdr-provider-runtime-canary",
+  "harnessConfig": "/absolute/private/path/to/harness.canary-template.json",
+  "herdrSession": "herdr-harness-provider-canary",
+  "repetitions": 3,
+  "stressConcurrency": 2,
+  "oauthReviewerProfile": "openai-subscription",
+  "customReviewerProfile": "custom",
+  "validationLongMs": 60000,
+  "validationOutputBytes": 2097152
+}

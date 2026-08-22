@@ -16,6 +16,7 @@ import { startControllerHeartbeat } from "./controller-heartbeat.js";
 import { acquireControllerLease } from "./controller-lease.js";
 import { digest } from "./model.js";
 import { aggregateDiagnosticOutput, diagnoseProjects, diagnosticProject } from "./diagnostics.js";
+import { aggregateCanaryReport, readCanaryReport } from "./canary.js";
 import { projectOperatorState } from "./policy.js";
 import { approveRecovery, cancelHeldJob, reassessIncident, resolveDecision } from "./recovery.js";
 import { installProcessShutdownSignal } from "./shutdown-signal.js";
@@ -26,6 +27,7 @@ const usage = `Usage:
   herdr-harness-lite run --config /absolute/harness.config.json [--poll-ms 15000] [--max-cycles N]
   herdr-harness-lite status --config /absolute/harness.config.json [--operator]
   herdr-harness-lite diagnose --config /absolute/harness.config.json [--days 7] [--json]
+  herdr-harness-lite diagnose --canary /absolute/canary-report.json [--json]
   herdr-harness-lite decide --config /absolute/harness.config.json --option ID --actor TEXT --reason TEXT
   herdr-harness-lite approve --config /absolute/harness.config.json --revision N --incident ID --analysis ID --actor TEXT --reason TEXT
   herdr-harness-lite reassess --config /absolute/harness.config.json --revision N --incident ID --analysis ID --actor TEXT --reason TEXT
@@ -55,6 +57,11 @@ async function main(argv: string[]): Promise<number> {
   const command = argv[2];
   if (!command || command === "help" || command === "--help" || command === "-h") {
     process.stdout.write(usage);
+    return 0;
+  }
+  if (command === "diagnose" && flag(argv, "--canary")) {
+    const report = readCanaryReport(resolve(requiredFlag(argv, "--canary")));
+    process.stdout.write(`${JSON.stringify(argv.includes("--json") ? report : aggregateCanaryReport(report), null, 2)}\n`);
     return 0;
   }
   const configPath = flag(argv, "--config");
