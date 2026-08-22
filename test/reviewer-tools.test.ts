@@ -143,6 +143,60 @@ test("axisConcurrency=1 descriptor blocks dual launch and admits Standards then 
     assert.equal(existsSync(join(root, "standards-axis.json")), true);
     const spec = { ...reviewCall, workflowScript: reviewWorkflowScript([reviewTasks[1]!]) };
     assert.equal(await toolCallHook!({ toolCallId: "spec", toolName: "subagent", input: spec }), undefined);
+    const specTask = workflowEntries(spec.workflowScript)[0]!.task;
+    const sentinel = "access_token_AXIS_FAILURE_SENTINEL";
+    const failedSpec = await toolResultHook!({
+      toolCallId: "spec",
+      toolName: "subagent",
+      input: spec,
+      content: [{ type: "text", text: sentinel }],
+      isError: true,
+      details: { mode: "workflow", results: [{
+        agent: "herdr-harness-review-axis",
+        task: specTask,
+        exitCode: 1,
+        error: sentinel,
+        finalOutput: sentinel,
+        messages: [{
+          role: "assistant",
+          stopReason: "error",
+          errorMessage: sentinel,
+          diagnostics: [{
+            type: "provider_transport_failure",
+            error: { message: sentinel, stack: sentinel },
+            details: { eventsEmitted: true, phase: "after_message_stream_start" },
+          }],
+        }],
+      }] },
+    });
+    assert.equal(failedSpec?.isError, true);
+    const failedDetails = failedSpec?.details as Record<string, {
+      failure?: Record<string, unknown>;
+    }>;
+    assert.deepEqual(failedDetails.Spec?.failure, {
+      domain: "execution",
+      code: "review_axis_provider_network",
+      stage: "review-axis",
+      retryable: true,
+      exitCode: 1,
+      errorPresent: true,
+      interrupted: false,
+      timedOut: false,
+      stopped: false,
+      detached: false,
+      outputByteCount: Buffer.byteLength(sentinel, "utf8"),
+      outputDigest: sha256(sentinel),
+    });
+    assert.equal(JSON.stringify(failedSpec).includes(sentinel), false);
+
+    await tools.get("review_submit")!.execute("blocked", {
+      status: "blocked",
+      summary: "Spec did not complete.",
+      findings: [],
+    });
+    const blocked = JSON.parse(readFileSync(resultPath, "utf8")) as { summary: string };
+    assert.match(blocked.summary, /Harness Review Axis failure: axis=Spec code=review_axis_provider_network exit=1/);
+    assert.equal(blocked.summary.includes(sentinel), false);
   } finally {
     restoreEnv("HERDR_HARNESS_REVIEW_DESCRIPTOR", previous.descriptor);
     restoreEnv("PI_CODING_AGENT_DIR", previous.agentDir);

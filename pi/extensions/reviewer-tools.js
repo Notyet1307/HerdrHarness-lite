@@ -41,6 +41,7 @@ export default function reviewerTools(pi) {
   const checkpointInputs = readCheckpointInputs(descriptor);
   let environmentPreflight = null;
   let submitted = false;
+  const axisFailures = new Map();
   const axesCalls = new Map();
   const launchedAxes = new Set();
   const axisResults = {
@@ -97,7 +98,10 @@ export default function reviewerTools(pi) {
         projected = { completed: false, results: {}, details: { error: "Attempt-private Review Axis evidence capture failed" } };
       }
       for (const [axis, axisResult] of Object.entries(projected.results)) {
-        if (axisResult.status === "blocked") continue;
+        if (axisResult.status === "blocked") {
+          if (axisResult.failure) axisFailures.set(axis, axisResult.failure);
+          continue;
+        }
         publishReviewerCheckpoint(descriptor, axis === "Standards" ? "standards-axis" : "spec-axis", axisResult);
         axisResults[axis] = axisResult;
       }
@@ -233,7 +237,10 @@ export default function reviewerTools(pi) {
       if (params.status === "pass" && validationReceipt?.status !== "passed") {
         throw new Error("Reviewer pass requires a passed Controller validation receipt");
       }
-      const finalResult = { status: params.status, summary: params.summary, findings: params.findings };
+      const summary = params.status === "blocked"
+        ? blockedReviewerSummary(params.summary, axisFailures)
+        : params.summary;
+      const finalResult = { status: params.status, summary, findings: params.findings };
       if ((params.status === "pass" || params.status === "changes")
         && (!finalProposal || JSON.stringify(finalResult) !== JSON.stringify(finalProposal))) {
         throw new Error("Reviewer final submission must preserve the durable final aggregation exactly");
@@ -244,7 +251,7 @@ export default function reviewerTools(pi) {
         attemptId: descriptor.attemptId,
         lane: "reviewer",
         status: params.status,
-        summary: params.summary,
+        summary,
         reviewedHeadSha: descriptor.reviewedHeadSha,
         findings: params.findings,
       };
@@ -416,7 +423,7 @@ export function reviewerAxisStartupAllowed(axisConcurrency, standardsComplete, a
 
 function projectReviewAxes(event, expectedTasks, descriptor) {
   const details = event.details;
-  const rawResults = !event.isError && details && typeof details === "object" && !Array.isArray(details)
+  const rawResults = details && typeof details === "object" && !Array.isArray(details)
     && details.mode === "workflow" && Array.isArray(details.results) && details.results.length === expectedTasks.length
     ? details.results
     : [];
@@ -432,7 +439,12 @@ function projectReviewAxes(event, expectedTasks, descriptor) {
       || result.interrupted || result.timedOut || result.stopped || result.detached
       || typeof result.finalOutput !== "string" || !result.finalOutput.trim()) {
       completed = false;
-      results[axis] = invalidAxisProjection("Review axis did not return one successful structured result", Buffer.alloc(0));
+      const raw = typeof result?.finalOutput === "string" ? Buffer.from(result.finalOutput, "utf8") : Buffer.alloc(0);
+      results[axis] = invalidAxisProjection(
+        "Review axis did not return one successful structured result",
+        raw,
+        reviewAxisFailure(result, raw),
+      );
       continue;
     }
     const projected = projectAxisOutput(axis, result.finalOutput, descriptor);
@@ -529,7 +541,7 @@ function sameFindingIdentity(actual, expected) {
   return actualIdentities.every((finding, index) => finding === expectedIdentities[index]);
 }
 
-function invalidAxisProjection(summary, raw) {
+function invalidAxisProjection(summary, raw, failureDetails) {
   return {
     status: "blocked",
     summary,
@@ -538,7 +550,70 @@ function invalidAxisProjection(summary, raw) {
     outputByteCount: raw.length,
     outputDigest: sha256(raw),
     truncated: raw.length > 0,
+    ...(failureDetails ? { failure: failureDetails } : {}),
   };
+}
+
+function reviewAxisFailure(result, raw) {
+  const providerNetwork = childProviderNetworkFailure(result?.messages);
+  const emptyResponse = result?.error === "Subagent produced no output (possible model cold-start or empty response).";
+  const code = providerNetwork
+    ? "review_axis_provider_network"
+    : result?.timedOut === true
+      ? "review_axis_timeout"
+      : result?.interrupted === true
+        ? "review_axis_interrupted"
+        : result?.stopped === true
+          ? "review_axis_stopped"
+          : result?.detached === true
+            ? "review_axis_detached"
+            : emptyResponse
+              ? "review_axis_empty_response"
+              : result
+                ? "review_axis_execution_failed"
+                : "review_axis_result_missing";
+  const exitCode = Number.isInteger(result?.exitCode) && result.exitCode >= -2 && result.exitCode <= 255
+    ? result.exitCode
+    : null;
+  return {
+    domain: "execution",
+    code,
+    stage: "review-axis",
+    retryable: providerNetwork || result?.timedOut === true || emptyResponse,
+    exitCode,
+    errorPresent: typeof result?.error === "string" && result.error.length > 0,
+    interrupted: result?.interrupted === true,
+    timedOut: result?.timedOut === true,
+    stopped: result?.stopped === true,
+    detached: result?.detached === true,
+    outputByteCount: raw.length,
+    outputDigest: sha256(raw),
+  };
+}
+
+function childProviderNetworkFailure(messages) {
+  if (!Array.isArray(messages)) return false;
+  for (const message of messages.slice(-64)) {
+    if (!message || typeof message !== "object" || Array.isArray(message) || message.role !== "assistant"
+      || !Array.isArray(message.diagnostics)) continue;
+    for (const entry of message.diagnostics.slice(-16)) {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)
+        || entry.type !== "provider_transport_failure"
+        || !entry.details || typeof entry.details !== "object" || Array.isArray(entry.details)) continue;
+      if (entry.details.eventsEmitted === true && entry.details.phase === "after_message_stream_start") return true;
+    }
+  }
+  return false;
+}
+
+function blockedReviewerSummary(summary, axisFailures) {
+  if (axisFailures.size === 0) return summary;
+  const audit = [...axisFailures].map(([axis, details]) => (
+    `axis=${axis} code=${details.code} exit=${details.exitCode ?? "unknown"} timedOut=${details.timedOut} interrupted=${details.interrupted} stopped=${details.stopped} detached=${details.detached} outputBytes=${details.outputByteCount}`
+  )).join("; ");
+  const record = `Harness Review Axis failure: ${audit}`;
+  const prefix = summary.slice(0, Math.max(0, 4_000 - record.length - 1));
+  return prefix ? `${prefix}\n${record}` : record.slice(0, 4_000);
 }
 
 function completedAxes(results) {

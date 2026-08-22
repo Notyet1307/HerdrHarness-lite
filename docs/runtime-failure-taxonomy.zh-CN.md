@@ -53,6 +53,8 @@
 
 现有 Provider 还会细分 rejected、unavailable、unknown；RPC 还会保留 invalid JSON、command mismatch、transport closed 等 `failureCode`。稳定 `code` 用于跨层聚合，细粒度兼容字段用于定位，二者都不能被压缩成单一 `infrastructure_exhausted` message。
 
+Reviewer child axis 的失败分类目前是 `reviewer-tools` 的 tool-local 投影，不新增 ledger `SafeRuntimeDiagnostic` code。它严格区分 `review_axis_provider_network`、`review_axis_timeout`、`review_axis_interrupted`、`review_axis_stopped`、`review_axis_detached`、`review_axis_empty_response`、`review_axis_execution_failed` 与 `review_axis_result_missing`，并把安全元数据追加到 durable blocked Reviewer summary；这些 code 仍不直接授权 retry。
+
 ## 4. 离线 deterministic fixtures
 
 所有 fixture 都使用本地 fake child / fake SDK，不连接真实 Provider：
@@ -65,6 +67,7 @@
 | 首个工具前 partial assistant 后失联 | `FAKE_PI_ASSISTANT_BEFORE_CONTINUATION_LOST=1` + `FAKE_PI_CONTINUATION_LOST=1` | `provider_continuation_lost` + 完整无工具副作用边界 |
 | read/edit/bash 已开始后 Provider 429 | `FAKE_PI_TOOL_START_ONLY=<tool>` + assistant 429 | `toolExecutionStarted=true`，拒绝自动 fresh retry |
 | Pi 0.84.2 在消息流开始后报告 transport failure | projected `provider_transport_failure` + opaque Provider error | 只保留 `provider_network`，丢弃 diagnostic error/stack/details；工具已开始时仍拒绝自动 fresh retry |
+| pi-subagents 以 `isError=true` 返回失败 Review Axis result | exact axis/task result + error/timeout/exit metadata | 仍解析 `details.results`，只输出固定 child code、exit/布尔值和 output byte count/digest；原始 error/message/stack/output 不进入 durable summary |
 | durable result 已写但 terminal 缺失 | `FAKE_PI_RESULT_BEFORE_STALL=1` | result 创建刷新一次进展；随后 `runtime_stall`，failure receipt 优先且仍不能验收 |
 | terminal failure 后 durable result 已存在 | `FAKE_PI_TERMINAL_FAILURE_AFTER_RESULT=1` | failure receipt 优先，adapter 拒绝交付 |
 | 单条 event 超过 1 MiB | `FAKE_PI_OVERSIZE_EVENT=1` | `rpc_event_oversize`，spool 不保存大 payload |
