@@ -1,0 +1,208 @@
+{
+  "version": 1,
+  "qualifiedVersions": {
+    "0.84.0": "pi-rpc-events-v1",
+    "0.84.1": "pi-rpc-events-v1",
+    "0.84.2": "pi-rpc-events-v1"
+  },
+  "contracts": {
+    "pi-rpc-events-v1": {
+      "observational": [
+        "turn_start",
+        "turn_end"
+      ],
+      "progress": [
+        "agent_settled",
+        "message_start",
+        "message_update",
+        "message_end",
+        "tool_execution_start",
+        "tool_execution_update",
+        "tool_execution_end",
+        "bash_execution_update"
+      ],
+      "authority-changing": [
+        "agent_start",
+        "agent_end",
+        "compaction_start",
+        "compaction_end",
+        "extension_ui_request"
+      ],
+      "forbidden": [
+        "queue_update",
+        "auto_retry_start",
+        "auto_retry_end",
+        "summarization_retry_scheduled",
+        "summarization_retry_attempt_start",
+        "summarization_retry_finished",
+        "extension_ui_response"
+      ]
+    }
+  },
+  "unknownCases": [
+    {
+      "name": "bounded telemetry",
+      "event": {
+        "type": "future_telemetry",
+        "metrics": {
+          "privateMetric": 987654321,
+          "latencyMs": 12,
+          "tokenUsage": {
+            "input": 10,
+            "output": 2
+          }
+        }
+      },
+      "classification": "unknown-safe"
+    },
+    {
+      "name": "UI request",
+      "event": {
+        "type": "future_ui_request",
+        "request": {
+          "action": "open"
+        },
+        "privatePayload": "PRIVATE_UI_SENTINEL"
+      },
+      "classification": "unknown-unsafe"
+    },
+    {
+      "name": "retry action",
+      "event": {
+        "type": "future_retry_event",
+        "retry": {
+          "action": "resume"
+        },
+        "privatePayload": "PRIVATE_RETRY_SENTINEL"
+      },
+      "classification": "unknown-unsafe"
+    },
+    {
+      "name": "Controller response",
+      "event": {
+        "type": "future_notice",
+        "requiresControllerResponse": true,
+        "privatePayload": "PRIVATE_RESPONSE_SENTINEL"
+      },
+      "classification": "unknown-unsafe"
+    },
+    {
+      "name": "Controller acknowledgement",
+      "event": {
+        "type": "future_telemetry",
+        "controllerAckRequired": true
+      },
+      "classification": "unknown-unsafe"
+    },
+    {
+      "name": "credential content",
+      "event": {
+        "type": "future_telemetry",
+        "accessToken": "ACCESS_TOKEN_SENTINEL"
+      },
+      "classification": "unknown-unsafe"
+    },
+    {
+      "name": "credential-shaped opaque value",
+      "event": {
+        "type": "future_telemetry",
+        "data": "sk-live-0123456789abcdef"
+      },
+      "classification": "unknown-unsafe"
+    },
+    {
+      "name": "opaque text log",
+      "event": {
+        "type": "future_log",
+        "message": "TEXT_REQUIRES_EXPLICIT_QUALIFICATION"
+      },
+      "classification": "unknown-unsafe"
+    },
+    {
+      "name": "nested opaque type text",
+      "event": {
+        "type": "future_telemetry",
+        "metadata": {
+          "type": "OPAQUE_TEXT_REQUIRES_QUALIFICATION"
+        }
+      },
+      "classification": "unknown-unsafe"
+    },
+    {
+      "name": "opaque text in array",
+      "event": {
+        "type": "future_telemetry",
+        "metrics": [
+          "ARRAY_TEXT_REQUIRES_QUALIFICATION"
+        ]
+      },
+      "classification": "unknown-unsafe"
+    },
+    {
+      "name": "control text in array",
+      "event": {
+        "type": "future_telemetry",
+        "metrics": [
+          "command"
+        ]
+      },
+      "classification": "unknown-unsafe"
+    },
+    {
+      "name": "session replacement",
+      "event": {
+        "type": "future_event",
+        "sessionReplacement": "fresh"
+      },
+      "classification": "unknown-unsafe"
+    },
+    {
+      "name": "tool permission change",
+      "event": {
+        "type": "future_event",
+        "toolPermission": "write"
+      },
+      "classification": "unknown-unsafe"
+    },
+    {
+      "name": "provider model switch",
+      "event": {
+        "type": "future_event",
+        "provider": "other",
+        "model": "other-model"
+      },
+      "classification": "unknown-unsafe"
+    },
+    {
+      "name": "human input request",
+      "event": {
+        "type": "future_event",
+        "inputRequired": true
+      },
+      "classification": "unknown-unsafe"
+    },
+    {
+      "name": "unconfirmed continuation",
+      "event": {
+        "type": "future_continuation",
+        "state": "pending"
+      },
+      "classification": "unknown-unsafe"
+    },
+    {
+      "name": "second agent start",
+      "event": {
+        "type": "future_agent_started"
+      },
+      "classification": "unknown-unsafe"
+    },
+    {
+      "name": "agent lifecycle",
+      "event": {
+        "type": "future_lifecycle_event",
+        "phase": "started"
+      },
+      "classification": "unknown-unsafe"
+    }
+  ]
+}

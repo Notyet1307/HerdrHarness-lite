@@ -37,6 +37,11 @@ import {
   type PiRpcProviderApi,
   type SafeRuntimeDiagnostic,
 } from "./pi-rpc-diagnostics.js";
+import {
+  knownPiRpcEventClassification,
+  projectedUnknownPiRpcEventClassification,
+  type PiRpcEventClassification,
+} from "./pi-rpc-events.js";
 import { snapshotRuntimeTimeouts, validTimeoutMs } from "./runtime-timeouts.js";
 import {
   acquireCredentialStartupLease,
@@ -52,18 +57,6 @@ const COMMAND_TIMEOUT_MS = 30_000;
 const POLL_MS = 50;
 const PROGRESS_WRITE_INTERVAL_MS = 1_000;
 const REVIEW_ORIGINAL_AGENT_DIR_ENV = "HERDR_HARNESS_REVIEW_CANONICAL_PI_AGENT_DIR";
-const KNOWN_EVENT_TYPES = new Set([
-  "agent_start", "agent_end", "agent_settled",
-  "turn_start", "turn_end",
-  "message_start", "message_update", "message_end",
-  "tool_execution_start", "tool_execution_update", "tool_execution_end",
-  "bash_execution_update", "queue_update",
-  "auto_retry_start", "auto_retry_end",
-  "compaction_start", "compaction_end",
-  "summarization_retry_scheduled", "summarization_retry_attempt_start", "summarization_retry_finished",
-  "extension_ui_request", "extension_ui_response",
-]);
-
 type JsonObject = Record<string, unknown>;
 type Child = ReturnType<typeof spawn>;
 type ChildExit = { code: number | null; signal: string | null };
@@ -344,9 +337,16 @@ async function main(argv: string[]): Promise<void> {
       if (!code) throw piRpcRunnerError("rpc_protocol", "rpc_command_failed", false);
       throw piRpcRunnerError("credential", code, credentialStartupRetryable(code));
     }
-    const type = KNOWN_EVENT_TYPES.has(reportedType) ? reportedType : "unknown";
+    const classification: PiRpcEventClassification = knownPiRpcEventClassification(reportedType)
+      ?? projectedUnknownPiRpcEventClassification(event, plan.snapshot.runtimeVersion);
+    const type = reportedType;
     eventCount += 1;
     lastEventType = type;
+    let refreshesProgress = false;
+    const refreshProgress = (progressType: ProgressType): void => {
+      refreshesProgress = true;
+      markProgress(progressType);
+    };
     const eventMessage = object(event.message);
     if (type === "message_start") assistantMessageActive = eventMessage.role === "assistant";
     if (assistantMessageActive || eventMessage.role === "assistant") {
@@ -357,31 +357,37 @@ async function main(argv: string[]): Promise<void> {
       toolCallObserved = true;
       toolExecutionStarted = true;
     }
-    if (assistantMessageActive && type === "message_start") markProgress("assistant_message_start");
-    if (assistantMessageActive && type === "message_update") markProgress("assistant_message_update");
+    if (assistantMessageActive && type === "message_start") refreshProgress("assistant_message_start");
+    if (assistantMessageActive && type === "message_update") refreshProgress("assistant_message_update");
     if ((assistantMessageActive || eventMessage.role === "assistant") && type === "message_end") {
-      markProgress("assistant_message_end");
+      refreshProgress("assistant_message_end");
       assistantMessageActive = false;
     }
     if (type === "tool_execution_start") {
-      markProgress("tool_execution_start");
+      refreshProgress("tool_execution_start");
     }
-    if (type === "tool_execution_update" || type === "bash_execution_update") markProgress("tool_execution_update");
-    if (type === "tool_execution_end") markProgress("tool_execution_end");
-    if (type === "compaction_start") markProgress("compaction_start");
-    if (type === "compaction_end") markProgress("compaction_end");
+    if (type === "tool_execution_update" || type === "bash_execution_update") refreshProgress("tool_execution_update");
+    if (type === "tool_execution_end") refreshProgress("tool_execution_end");
+    if (type === "compaction_start") refreshProgress("compaction_start");
+    if (type === "compaction_end") refreshProgress("compaction_end");
     if ([
       "auto_retry_start", "auto_retry_end", "summarization_retry_scheduled",
       "summarization_retry_attempt_start", "summarization_retry_finished",
-    ].includes(type)) markProgress("provider_retry_progress");
-    if (type === "agent_settled") markProgress("agent_settled");
+    ].includes(type)) refreshProgress("provider_retry_progress");
+    if (type === "agent_settled") refreshProgress("agent_settled");
     if (type === "agent_end") agentEndObserved = true;
     if (type === "turn_start") turnCount += 1;
     if (["message_end", "tool_execution_end", "turn_end"].includes(type)) {
       transcriptBytes = Math.min(4 * 1024 * 1024, transcriptBytes + observedPayloadBytes(event));
     }
     if (["message_update", "tool_execution_update", "bash_execution_update"].includes(type)) return;
-    const summary: JsonObject = { type, digest: observedPayloadDigest(event) };
+    const summary: JsonObject = {
+      type,
+      classification,
+      refreshesProgress,
+      payloadBytes: observedPayloadBytes(event),
+      digest: observedPayloadDigest(event),
+    };
     const message = type === "message_end" ? eventMessage : {};
     if (message.role === "assistant") assistantMessageCount += 1;
     if (type === "tool_execution_end") {
@@ -418,8 +424,7 @@ async function main(argv: string[]): Promise<void> {
       logTruncated = true;
     }
     if (type === "agent_start" && ++agentStarts > 1) policyViolation = "multiple agent_start events";
-    if (type === "agent_end" && event.willRetry === true) policyViolation = "agent_end requested an automatic retry";
-    if (type === "unknown") policyViolation = "unknown Pi RPC event";
+    if (type === "agent_end" && event.willRetry !== false) policyViolation = "agent_end did not rule out an automatic retry";
     if (type === "extension_ui_request" && !allowedReviewerLifecycleCleanup(plan, event, settled, agentStarts)) {
       policyViolation = "forbidden Pi RPC control event";
     }
@@ -429,13 +434,15 @@ async function main(argv: string[]): Promise<void> {
       if (accepted.receipt) controlledCompactionReceipt = accepted.receipt;
       if (accepted.error) policyViolation = accepted.error;
     }
-    if ([
-      "auto_retry_start", "auto_retry_end", "queue_update",
-      "extension_ui_response",
-      "summarization_retry_scheduled", "summarization_retry_attempt_start", "summarization_retry_finished",
-    ].includes(type)) {
+    if (classification === "forbidden") {
       policyViolation = "forbidden Pi RPC control event";
     }
+    if (classification === "authority-changing" && ![
+      "agent_start", "agent_end", "compaction_start", "compaction_end", "extension_ui_request",
+    ].includes(type)) {
+      policyViolation = "unvalidated Pi RPC authority-changing event";
+    }
+    if (classification === "unknown-unsafe") policyViolation = "unsafe unknown Pi RPC event";
     if (type === "agent_settled") {
       if (controlledCompactionPhase === "started") policyViolation = "controlled compaction did not finish before settlement";
       settled = true;
@@ -1022,7 +1029,7 @@ function hasSupportedPonytail(plan: PiRpcPlan): boolean {
 }
 
 function allowedReviewerLifecycleCleanup(plan: PiRpcPlan, event: JsonObject, settled: boolean, agentStarts: number): boolean {
-  const allowedKeys = new Set(["type", "id", "method", "widgetKey"]);
+  const allowedKeys = new Set(["type", "id", "method", "widgetKey", "payloadBytes", "payloadDigest"]);
   return (agentStarts === 0 || settled)
     && plan.snapshot.context?.lane === "reviewer"
     && typeof event.id === "string"

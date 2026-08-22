@@ -6,6 +6,12 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { SyncCommandRunner } from "../src/adapters/command.js";
 import { executionResourceDigest } from "../src/attempt-plan.js";
+import { QUALIFIED_PI_RPC_VERSIONS } from "../src/compatibility.js";
+import {
+  MAX_UNKNOWN_PI_RPC_EVENT_BYTES,
+  PI_RPC_EVENT_CONTRACT,
+  type PiRpcEventClassification,
+} from "../src/pi-rpc-events.js";
 import { fakePiSdkSource } from "./fixtures/fake-pi-sdk.js";
 import {
   installWorkerContextControls,
@@ -25,7 +31,7 @@ test("Pi RPC event adapter bounds a large agent_end without mutating Pi session 
     ],
   };
 
-  const projected = projectPiRpcEvent(event);
+  const projected = projectPiRpcEvent(event, "0.84.2");
   const line = `${JSON.stringify(projected)}\n`;
 
   assert.equal(new StrictJsonlDecoder().push(line).length, 1);
@@ -59,7 +65,7 @@ test("Pi RPC event adapter keeps Pi 0.84.2 message_update serialization fields",
     },
   };
 
-  const projected = projectPiRpcEvent(event);
+  const projected = projectPiRpcEvent(event, "0.84.2");
   const message = projected.message as Record<string, unknown>;
   assert.equal(message.role, "assistant");
   assert.deepEqual(message.usage, event.message.usage);
@@ -77,7 +83,7 @@ test("Pi RPC event adapter projects tool-call observation without tool arguments
       role: "assistant",
       content: [{ type: "toolCall", name: "bash", arguments: { token: "PRIVATE_TOOL_ARGUMENT" } }],
     },
-  });
+  }, "0.84.2");
   assert.equal(projected.assistantContentObserved, false);
   assert.equal(projected.toolCallObserved, true);
   assert.equal(JSON.stringify(projected).includes("PRIVATE_TOOL_ARGUMENT"), false);
@@ -98,7 +104,7 @@ test("Pi RPC event adapter strips controlled compaction summary content", () => 
     result: { summary: "PRIVATE_COMPACTION_SUMMARY" },
   };
 
-  const projected = projectPiRpcEvent(event);
+  const projected = projectPiRpcEvent(event, "0.84.2");
 
   assert.equal(projected.type, "compaction_end");
   assert.equal(projected.source, "harness-controlled");
@@ -107,6 +113,81 @@ test("Pi RPC event adapter strips controlled compaction summary content", () => 
   assert.equal(projected.summaryDigest, "a".repeat(64));
   assert.equal(JSON.stringify(projected).includes("PRIVATE_COMPACTION_SUMMARY"), false);
   assert.equal(projected.result, undefined);
+});
+
+test("Pi RPC event adapter strips forbidden payloads and keeps only validated UI cleanup fields", () => {
+  const retry = projectPiRpcEvent({
+    type: "auto_retry_start",
+    privatePayload: "PRIVATE_RETRY_PAYLOAD",
+  }, "0.84.2");
+  assert.equal(retry.type, "auto_retry_start");
+  assert.equal(retry.privatePayload, undefined);
+  assert.match(String(retry.payloadDigest), /^[0-9a-f]{64}$/u);
+
+  const ui = projectPiRpcEvent({
+    type: "extension_ui_request",
+    id: "cleanup",
+    method: "setWidget",
+    widgetKey: "subagent-async",
+    privatePayload: "PRIVATE_UI_PAYLOAD",
+  }, "0.84.2");
+  assert.equal(ui.id, "cleanup");
+  assert.equal(ui.method, "setWidget");
+  assert.equal(ui.widgetKey, "subagent-async");
+  assert.equal(ui.privatePayload, undefined);
+  assert.match(String(ui.payloadDigest), /^[0-9a-f]{64}$/u);
+});
+
+test("qualified Pi versions pin explicit known and unknown event contracts", () => {
+  const fixture = JSON.parse(readFileSync(resolve("test/fixtures/pi-rpc-event-contract.json"), "utf8")) as {
+    version: number;
+    qualifiedVersions: Record<string, string>;
+    contracts: Record<string, Partial<Record<PiRpcEventClassification, string[]>>>;
+    unknownCases: Array<{
+      name: string;
+      event: Record<string, unknown>;
+      classification: "unknown-safe" | "unknown-unsafe";
+    }>;
+  };
+  const knownClasses: PiRpcEventClassification[] = ["observational", "progress", "authority-changing", "forbidden"];
+  const actualContract = Object.fromEntries(knownClasses.map((classification) => [
+    classification,
+    Object.entries(PI_RPC_EVENT_CONTRACT)
+      .filter(([, value]) => value === classification)
+      .map(([type]) => type)
+      .sort(),
+  ]));
+
+  assert.equal(fixture.version, 1);
+  assert.deepEqual(Object.keys(fixture.qualifiedVersions).sort(), [...QUALIFIED_PI_RPC_VERSIONS].sort());
+  for (const version of QUALIFIED_PI_RPC_VERSIONS) {
+    const contract = fixture.contracts[fixture.qualifiedVersions[version] ?? ""];
+    assert.ok(contract, `missing event contract for Pi ${version}`);
+    assert.deepEqual(
+      Object.fromEntries(knownClasses.map((classification) => [classification, [...(contract[classification] ?? [])].sort()])),
+      actualContract,
+    );
+    for (const contractCase of fixture.unknownCases) {
+      const projected = projectPiRpcEvent(contractCase.event, version);
+      assert.equal(projected.classification, contractCase.classification, `${version}: ${contractCase.name}`);
+      assert.equal(projected.refreshesProgress, false);
+      assert.ok(Number.isSafeInteger(projected.payloadBytes));
+      assert.match(String(projected.payloadDigest), /^[0-9a-f]{64}$/u);
+      assert.equal(JSON.stringify(projected).includes("SENTINEL"), false);
+    }
+  }
+
+  const unqualified = projectPiRpcEvent(fixture.unknownCases[0]!.event, "0.85.0");
+  assert.equal(unqualified.classification, "unknown-unsafe");
+  assert.equal(unqualified.unsafeReason, "unqualified-version");
+  const oversize = projectPiRpcEvent({
+    type: "future_telemetry",
+    payload: `PRIVATE_OVERSIZE_SENTINEL${"x".repeat(MAX_UNKNOWN_PI_RPC_EVENT_BYTES)}`,
+  }, "0.84.2");
+  assert.equal(oversize.classification, "unknown-unsafe");
+  assert.equal(oversize.unsafeReason, "oversize");
+  assert.ok(Buffer.byteLength(JSON.stringify(oversize)) < 1024);
+  assert.equal(JSON.stringify(oversize).includes("PRIVATE_OVERSIZE_SENTINEL"), false);
 });
 
 test("Pi RPC event adapter projects only the RPC subscriber and preserves diagnostic fields", () => {
@@ -121,7 +202,7 @@ test("Pi RPC event adapter projects only the RPC subscriber and preserves diagno
       },
     },
   };
-  const projectedRuntime = withProjectedPiRpcEvents(runtime);
+  const projectedRuntime = withProjectedPiRpcEvents(runtime, "0.84.2");
   const received: Record<string, unknown>[] = [];
   projectedRuntime.session.subscribe((event) => received.push(event));
 

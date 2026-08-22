@@ -42,7 +42,7 @@
 | `result_missing` | acceptance | Pi RPC adapter / Controller result validation | 一次 same-Attempt observation 后 `infrastructure_exhausted` | 是 | Worker running 不自动；Reviewer 可能命中既有 same-HEAD policy | Attempt identity、result path 是否存在、terminal identity |
 | `result_identity` | acceptance | Controller result validation | `integrity_violation` + hold | 否 | 否 | expected/observed job、Attempt、lane、HEAD 的有界值 |
 | `git_integrity` | acceptance | Worker Git verification / Reviewer preflight 与 exact-HEAD gate | `integrity_violation` 或 `reviewer_preflight_dirty` | 模型可能已工作，但未形成可交付 fixed point | 否；Reviewer residue 只能经现有 Analyst/human gate fresh retry | HEAD、branch、clean/dirty 分类、允许 result path；不复制凭据文件 |
-| `policy_violation` | execution | runner 对 unknown/control/auto-retry/multiple-start 事件的 gate | terminal failure → bounded observation → `infrastructure_exhausted` | 可能有 result，但 failure receipt 优先 | 仅既有 narrow policy | 固定 policy code、事件 type/digest，不记录 payload |
+| `policy_violation` | execution | runner 对 unknown-unsafe/control/auto-retry/multiple-start 事件的 gate | terminal failure → bounded observation → `infrastructure_exhausted` | 可能有 result，但 failure receipt 优先 | 仅既有 narrow policy | 固定 policy code、事件 classification/type/byte count/digest，不记录 payload |
 | `compaction_failure` | execution | controlled Worker compaction + runner | content-free failed event → terminal failure → `infrastructure_exhausted` | 否 | Worker running 不自动 | 次数、阈值、context/window、`outcome=failed`、`willRetry=false` |
 | `validation_infrastructure` | acceptance | Reviewer preflight / fixed validation launcher | 分类只在 tool-local receipt；Reviewer 若提交 blocked/failed result，Controller 再按 result 进入 `review_uncertain`，Incident 不直接携带此 code | 否 | 否 | command identity、exit/signal、bounded error/tail、Docker version/host identity |
 | `validation_failed` | deterministic | 固定 Reviewer validation command | Controller receipt 记录 `failed-checks`；`pass` 被拒绝，Reviewer 必须提交绑定 validation finding 的 changes | 否 | 否 | command identity、exit code、stdout/stderr redaction marker、原始 byte count 与 SHA-256 |
@@ -65,7 +65,8 @@
 | 单条 event 超过 1 MiB | `FAKE_PI_OVERSIZE_EVENT=1` | `rpc_event_oversize`，spool 不保存大 payload |
 | Reviewer validation 输出很大 | `test/fixtures/reviewer-validation.js --stdout-bytes/--stderr-bytes` | 5 MiB/stream 与超过旧 20 MiB buffer 的 fixture 都只保存固定 redaction marker、原始 byte count 与 SHA-256；原始 validation 输出不落盘 |
 | Review Axis 输出很大 | `test/fixtures/pi-subagents/index.js` + `FAKE_PI_REVIEW_AXIS_OUTPUT_BYTES` | 1 MiB/axis fixture 只向父 Reviewer 返回各 12 KiB 内结构化投影；原文不进入 durable result |
-| 未知 RPC event | `FAKE_PI_UNKNOWN_EVENT=1` | content-free `policy_violation` |
+| 无害未知 telemetry | `FAKE_PI_UNKNOWN_EVENT=telemetry` | exact-qualified contract 下只接受无 opaque 文本的有界结构化值，记录 content-free unknown-safe observation，不刷新 progress |
+| 未知 UI / retry event | `FAKE_PI_UNKNOWN_EVENT=ui/retry` | 记录 type/byte count/digest 后 content-free `policy_violation` |
 | OAuth lock contention | `test/fixtures/fake-pi-sdk.ts` + `FAKE_PI_SDK_OAUTH_LOCK_CONTENTION=1` | SDK host 只输出安全 stage，不输出 OAuth/token/error 原文 |
 | controlled compaction Provider 请求失败 | fake compaction SDK 抛错，或 `FAKE_PI_CONTROLLED_COMPACTION=fail` | 单次、无 retry、无 summary/Provider 原文的 `compaction_failure` |
 
@@ -73,7 +74,7 @@
 
 允许持久化：Attempt/generation/plan identity，稳定分类，允许枚举的 Provider API，4xx/5xx 状态码，bounded counters，transcript/event 字节桶，event/summary/status/worktree digest，六个 side-effect boundary 布尔值，child exit，compaction 数值 receipt，以及固定 validation receipt 的 identity、argv/digest、时间、exit/signal/timeout、环境/resource/source digest 和 stdout/stderr 有界投影。原始 validation 输出不落盘；Review Axis 原文只在权限收紧的 Attempt 私有 evidence 文件中保存。模型只收到有界投影，ledger 只保存 validation receipt 的 path/digest/status binding，terminal receipt 不保存原文。
 
-禁止持久化：access token、OAuth 内容、API key、Provider 原始响应或 stderr、完整私密 transcript、tool 原始 payload、compaction summary 内容和原始 stack。`runtime-events.jsonl` 只保留 event type、digest 和少量 allowlisted 标志，并有 512 KiB 总上限。
+禁止持久化：access token、OAuth 内容、API key、Provider 原始响应或 stderr、完整私密 transcript、tool 原始 payload、compaction summary 内容和原始 stack。`runtime-events.jsonl` 只保留 event classification/type、原始 payload byte count、digest 和少量 allowlisted 标志，并有 512 KiB 总上限。
 
 ## 6. 基线边界
 

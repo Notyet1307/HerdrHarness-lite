@@ -1,13 +1,19 @@
 #!/usr/bin/env node
-import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
+import {
+  knownPiRpcEventClassification,
+  piRpcEventPayloadMetadata,
+  projectUnknownPiRpcEvent,
+} from "../../dist/src/pi-rpc-events.js";
 
 let buffer = "";
 let autoCompactionEnabled = true;
 let splitStateResponse = true;
 let continuousOutput = null;
+const expectedVersionIndex = process.argv.indexOf("--expected-version");
+const runtimeVersion = expectedVersionIndex >= 0 ? process.argv[expectedVersionIndex + 1] : "0.84.2";
 
 if (process.env.FAKE_PI_IGNORE_SIGTERM === "1") {
   process.on("SIGTERM", () => {});
@@ -107,6 +113,10 @@ function respond(command) {
   if (command.type !== "prompt") return;
 
   emit({ type: "agent_start" });
+  if (process.env.FAKE_PI_MULTIPLE_AGENT_START === "1") emit({ type: "agent_start" });
+  if (["extension_ui_response", "queue_update"].includes(process.env.FAKE_PI_FORBIDDEN_EVENT)) {
+    emit({ type: process.env.FAKE_PI_FORBIDDEN_EVENT, privatePayload: "PRIVATE_FORBIDDEN_SENTINEL" });
+  }
   if (process.env.FAKE_PI_WORKER_UI_REQUEST === "1") {
     emit({ type: "extension_ui_request", id: "worker-ui", method: "setStatus", widgetKey: "ponytail" });
   }
@@ -211,11 +221,35 @@ function respond(command) {
     emit({ type: "agent_settled" });
     return;
   }
-  if (process.env.FAKE_PI_UNKNOWN_EVENT === "1") {
-    emit({ type: "future_rpc_event", privatePayload: "must-not-be-persisted" });
+  if (process.env.FAKE_PI_RAW_UNSAFE_REASON === "1") {
+    process.stdout.write(`${JSON.stringify({
+      type: "future_event",
+      classification: "unknown-unsafe",
+      refreshesProgress: false,
+      payloadBytes: 0,
+      payloadDigest: "a".repeat(64),
+      unsafeReason: "access_token_RAW_REASON_SENTINEL",
+    })}\n`);
     emit({ type: "agent_end", messages: [], willRetry: false });
     emit({ type: "agent_settled" });
     return;
+  }
+  if (process.env.FAKE_PI_UNKNOWN_EVENT) {
+    const unknown = {
+      telemetry: {
+        type: "future_telemetry",
+        metrics: { privateMetric: 987654321, latencyMs: 12, tokenUsage: { input: 10, output: 2 } },
+      },
+      ui: { type: "future_ui_request", request: { action: "open" }, privatePayload: "PRIVATE_UI_SENTINEL" },
+      retry: { type: "future_retry_event", retry: { action: "resume" }, privatePayload: "PRIVATE_RETRY_SENTINEL" },
+    }[process.env.FAKE_PI_UNKNOWN_EVENT];
+    if (!unknown) throw new Error("unknown fake Pi event fixture");
+    emit(unknown);
+    if (process.env.FAKE_PI_UNKNOWN_EVENT !== "telemetry") {
+      emit({ type: "agent_end", messages: [], willRetry: false });
+      emit({ type: "agent_settled" });
+      return;
+    }
   }
   const lane = process.env.FAKE_PI_LANE ?? "worker";
   writeFileSync(process.env.FAKE_PI_RESULT_PATH, `${JSON.stringify(lane === "reviewer" ? {
@@ -281,16 +315,14 @@ function writePrivateAuth() {
 }
 
 function emit(value) {
-  process.stdout.write(`${JSON.stringify(value)}\n`);
+  const projected = value.type === "response" || knownPiRpcEventClassification(value.type) !== null
+    ? value
+    : projectUnknownPiRpcEvent(value, runtimeVersion);
+  process.stdout.write(`${JSON.stringify(projected)}\n`);
 }
 
 function emitProjected(value) {
-  const serialized = JSON.stringify(value);
-  emit({
-    ...value,
-    payloadBytes: Buffer.byteLength(serialized),
-    payloadDigest: createHash("sha256").update(serialized).digest("hex"),
-  });
+  emit({ ...value, ...piRpcEventPayloadMetadata(value) });
 }
 
 function emitAcrossUtf8Boundary(value) {
