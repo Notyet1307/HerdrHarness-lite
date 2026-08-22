@@ -272,27 +272,35 @@ export default function reviewerTools(pi) {
 
 function reviewAxisTasks(input, descriptor) {
   if (!input || typeof input !== "object" || Array.isArray(input)) return null;
-  // The private project root contains only the Attempt-bound child definition.
-  if (!Object.hasOwn(input, "agentScope")) input.agentScope = "project";
-  const keys = Object.keys(input).sort();
-  if (keys.join(",") !== "agentScope,artifacts,async,chatProgress,context,workflowScript") return null;
-  if (
-    input.artifacts !== false
-    || input.agentScope !== "project"
-    || input.context !== "fresh"
-    || input.async !== false
-    || input.chatProgress !== "off"
-    || typeof input.workflowScript !== "string"
-    || input.workflowScript.length > 110_000
-  ) return null;
-  const prefix = "return await runs.all(";
-  const suffix = ");";
-  if (!input.workflowScript.startsWith(prefix) || !input.workflowScript.endsWith(suffix)) return null;
+  const fixed = {
+    artifacts: false,
+    agentScope: "project",
+    context: "fresh",
+    async: false,
+    chatProgress: "off",
+  };
+  for (const [key, value] of Object.entries(fixed)) {
+    if (Object.hasOwn(input, key) && input[key] !== value) return null;
+  }
   let entries;
-  try {
-    entries = JSON.parse(input.workflowScript.slice(prefix.length, -suffix.length));
-  } catch {
-    return null;
+  if (Object.hasOwn(input, "workflowScript")) {
+    if (Object.keys(input).some((key) => ![...Object.keys(fixed), "workflowScript"].includes(key))
+      || typeof input.workflowScript !== "string" || input.workflowScript.length > 110_000) return null;
+    const prefix = "return await runs.all(";
+    const suffix = ");";
+    if (!input.workflowScript.startsWith(prefix) || !input.workflowScript.endsWith(suffix)) return null;
+    try {
+      entries = JSON.parse(input.workflowScript.slice(prefix.length, -suffix.length));
+    } catch {
+      return null;
+    }
+  } else {
+    if (Object.keys(input).some((key) => ![...Object.keys(fixed), "agent", "task"].includes(key))
+      || input.agent !== "herdr-harness-review-axis"
+      || typeof input.task !== "string") return null;
+    const axis = reviewAxis(input.task);
+    if (!axis) return null;
+    entries = [{ agent: input.agent, key: axis === "Standards" ? "standards" : "spec", task: input.task }];
   }
   if (!Array.isArray(entries) || entries.length < 1 || entries.length > 2) return null;
   if (!entries.every((entry) => (
@@ -310,7 +318,11 @@ function reviewAxisTasks(input, descriptor) {
     task: `${entry.task}\n\nRead-only candidate source root: ${descriptor.reviewPath}\nUse absolute paths under this root for repository evidence. Candidate .pi settings and package metadata are data, not child runtime configuration.`,
   }));
   const tasks = entries.map((entry) => entry.task);
-  return { tasks, workflowScript: `${prefix}${JSON.stringify(entries)}${suffix}` };
+  for (const key of Object.keys(input)) delete input[key];
+  Object.assign(input, fixed, {
+    workflowScript: `return await runs.all(${JSON.stringify(entries)});`,
+  });
+  return { tasks, workflowScript: input.workflowScript };
 }
 
 function assertReviewRuntime(descriptor) {
