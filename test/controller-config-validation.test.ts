@@ -117,3 +117,34 @@ test("Worker compaction defaults disabled and rejects ambiguous or unused config
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("diagnostic redaction config rejects unknown or ambiguous values", () => {
+  const root = mkdtempSync(join(tmpdir(), "herdr-config-diagnostics-"));
+  try {
+    const base = {
+      repo: "owner/repo",
+      localPath: join(root, "source"),
+      stateDir: join(root, "state"),
+      baseRef: "main",
+      readyLabel: "ready-for-agent",
+      claimLabel: "agent:claimed",
+      worktreeRoot: join(root, "worktrees"),
+      maxReviewRounds: 3,
+      maxAnalystTurns: 3,
+      reviewerValidationArgv: ["npm", "test"],
+      workerArgv: [],
+      reviewerArgv: [],
+    } satisfies HarnessConfig;
+    for (const path of [base.localPath, base.stateDir, base.worktreeRoot]) mkdirSync(path, { recursive: true });
+    assert.throws(() => validateHarnessConfig({
+      ...base,
+      diagnostics: { redactRepo: "yes" },
+    } as unknown as HarnessConfig), /diagnostics/);
+    assert.throws(() => validateHarnessConfig({
+      ...base,
+      diagnostics: { projectId: "not/a/project" },
+    }), /diagnostics/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

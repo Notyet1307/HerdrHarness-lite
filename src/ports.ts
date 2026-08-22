@@ -46,6 +46,11 @@ export type HarnessConfig = {
   workerRuntime?: "herdr-pi-cli" | "pi-rpc";
   reviewerRuntime?: "herdr-pi-cli" | "pi-rpc";
   workerCompaction?: { mode: "disabled" | "controlled-threshold" };
+  diagnostics?: {
+    projectId?: string;
+    redactRepo?: boolean;
+    redactIssue?: boolean;
+  };
   worker?: { totalTimeoutMs?: number; noProgressTimeoutMs?: number };
   reviewer?: { totalTimeoutMs?: number; noProgressTimeoutMs?: number; axisConcurrency?: 1 | 2 };
   validation?: { totalTimeoutMs?: number };

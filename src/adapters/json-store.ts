@@ -10,6 +10,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
+import { diagnosticAuditProjection } from "../diagnostics.js";
 import { assertJobInvariant, type HarnessState } from "../model.js";
 import type { StateStore } from "../ports.js";
 
@@ -60,6 +61,7 @@ export class JsonStateStore implements StateStore {
       // append failure must not tell the Controller that the transition rolled
       // back and thereby invite replay of an external side effect.
       try {
+        const attemptDiagnostic = diagnosticAuditProjection(next.activeJob);
         appendFileSync(
           this.eventPath,
           `${JSON.stringify({
@@ -68,6 +70,8 @@ export class JsonStateStore implements StateStore {
             activeJobId: next.activeJob?.id ?? null,
             activeRevision: next.activeJob?.revision ?? null,
             activeState: next.activeJob?.state ?? null,
+            automaticRecoveryCount: next.activeJob ? (next.activeJob.automaticRecoveries?.length ?? 0) : null,
+            ...(attemptDiagnostic ? { attemptDiagnostic } : {}),
           })}\n`,
           { encoding: "utf8", mode: 0o600 },
         );

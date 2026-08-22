@@ -15,6 +15,7 @@ import { HarnessController } from "./controller.js";
 import { startControllerHeartbeat } from "./controller-heartbeat.js";
 import { acquireControllerLease } from "./controller-lease.js";
 import { digest } from "./model.js";
+import { aggregateDiagnosticOutput, diagnoseProjects, diagnosticProject } from "./diagnostics.js";
 import { projectOperatorState } from "./policy.js";
 import { approveRecovery, cancelHeldJob, reassessIncident, resolveDecision } from "./recovery.js";
 import { installProcessShutdownSignal } from "./shutdown-signal.js";
@@ -24,6 +25,7 @@ const usage = `Usage:
   herdr-harness-lite tick --config /absolute/harness.config.json
   herdr-harness-lite run --config /absolute/harness.config.json [--poll-ms 15000] [--max-cycles N]
   herdr-harness-lite status --config /absolute/harness.config.json [--operator]
+  herdr-harness-lite diagnose --config /absolute/harness.config.json [--days 7] [--json]
   herdr-harness-lite decide --config /absolute/harness.config.json --option ID --actor TEXT --reason TEXT
   herdr-harness-lite approve --config /absolute/harness.config.json --revision N --incident ID --analysis ID --actor TEXT --reason TEXT
   herdr-harness-lite reassess --config /absolute/harness.config.json --revision N --incident ID --analysis ID --actor TEXT --reason TEXT
@@ -66,6 +68,11 @@ async function main(argv: string[]): Promise<number> {
   const clock = new SystemClock();
   const ids = new UuidIds();
 
+  if (command === "diagnose") {
+    const report = diagnoseProjects([diagnosticProject(config)], { days: optionalIntegerFlag(argv, "--days") ?? 7 });
+    process.stdout.write(`${JSON.stringify(argv.includes("--json") ? report : aggregateDiagnosticOutput(report), null, 2)}\n`);
+    return 0;
+  }
   if (command === "status") {
     const state = await store.load();
     process.stdout.write(`${JSON.stringify(argv.includes("--operator") ? projectOperatorState(state) : state, null, 2)}\n`);

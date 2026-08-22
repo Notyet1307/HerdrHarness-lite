@@ -14,6 +14,11 @@
   "workerCompaction": {
     "mode": "disabled"
   },
+  "diagnostics": {
+    "projectId": "product-api",
+    "redactRepo": false,
+    "redactIssue": false
+  },
   "worker": {
     "totalTimeoutMs": 5400000,
     "noProgressTimeoutMs": 900000
