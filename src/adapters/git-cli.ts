@@ -974,7 +974,7 @@ function piSubagentWrapper(
   credential: { provider: string; model: string; credentialDomainId: string; launcherPath: string } | null,
 ): string {
   if (credential) {
-    return `#!/bin/sh\nexec ${shellQuote(process.execPath)} ${shellQuote(credential.launcherPath)} --provider ${shellQuote(credential.provider)} --model ${shellQuote(credential.model)} --credential-agent-dir "$PI_CODING_AGENT_DIR" --credential-domain-id ${shellQuote(credential.credentialDomainId)} --pi-executable ${shellQuote(executable)} --expected-version ${shellQuote(runtimeVersion)} -- --append-system-prompt ${shellQuote(emptyAppendSystemPromptPath)} "$@"\n`;
+    return `#!/bin/sh\nexec ${shellQuote(process.execPath)} ${shellQuote(credential.launcherPath)} --provider ${shellQuote(credential.provider)} --model ${shellQuote(credential.model)} --credential-agent-dir "$HERDR_HARNESS_REVIEW_CANONICAL_PI_AGENT_DIR" --credential-domain-id ${shellQuote(credential.credentialDomainId)} --pi-executable ${shellQuote(executable)} --expected-version ${shellQuote(runtimeVersion)} -- --append-system-prompt ${shellQuote(emptyAppendSystemPromptPath)} "$@"\n`;
   }
   return `#!/bin/sh\nactual_version=$(${shellQuote(executable)} --version) || exit $?\nif [ "$actual_version" != ${shellQuote(runtimeVersion)} ]; then\n  printf 'Pi runtime version changed: expected %s, got %s\\n' ${shellQuote(runtimeVersion)} "$actual_version" >&2\n  exit 70\nfi\nexec ${shellQuote(executable)} --append-system-prompt ${shellQuote(emptyAppendSystemPromptPath)} "$@"\n`;
 }

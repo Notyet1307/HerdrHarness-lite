@@ -523,12 +523,20 @@ test("disabled Pi RPC SDK host does not load private compaction and keeps OAuth/
     };
     const nestedDefaults = runner.run(process.execPath, commandArgs, {
       ...options,
-      env: { ...options.env, FAKE_PI_SDK_INIT_DEFAULT_STORES: "1" },
+      env: {
+        ...options.env,
+        FAKE_PI_SDK_INIT_DEFAULT_STORES: "1",
+        FAKE_PI_SDK_RESTORE_PARENT_AGENT_DIR: oauthAgentDir,
+      },
     });
     assert.equal(nestedDefaults.ok, true, nestedDefaults.stderr);
-    const nestedCapture = JSON.parse(readFileSync(capturePath, "utf8")) as { defaultStoreAgentDir?: string };
+    const nestedCapture = JSON.parse(readFileSync(capturePath, "utf8")) as {
+      defaultStoreAgentDir?: string;
+      canonicalAgentDir?: string;
+    };
     assert.ok(nestedCapture.defaultStoreAgentDir);
     assert.ok(resolve(nestedCapture.defaultStoreAgentDir) !== resolve(privateAgentDir));
+    assert.equal(nestedCapture.canonicalAgentDir, oauthAgentDir);
     assert.equal(existsSync(join(privateAgentDir, "auth.json")), false);
     assert.equal(readFileSync(join(nestedCapture.defaultStoreAgentDir, "auth.json"), "utf8"), "{}");
     assert.equal(readFileSync(join(nestedCapture.defaultStoreAgentDir, "models-store.json"), "utf8"), "{}");
