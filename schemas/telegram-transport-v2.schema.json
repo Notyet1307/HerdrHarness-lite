@@ -15,6 +15,12 @@
     "time": { "type": "string", "format": "date-time", "maxLength": 64 },
     "nullableTime": { "oneOf": [{ "$ref": "#/$defs/time" }, { "type": "null" }] },
     "nullableString": { "type": ["string", "null"], "maxLength": 512 },
+    "nullableCode": { "type": ["string", "null"], "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$" },
+    "jobState": { "enum": ["claimed", "worker_ready", "worker_running", "reviewer_ready", "reviewer_running", "publish_ready", "awaiting_merge", "blocked", "recovery_approved", "done", "cancelled", null] },
+    "fleetWorkflowState": { "enum": ["idle", "claimed", "worker_ready", "worker_running", "reviewer_ready", "reviewer_running", "publish_ready", "awaiting_merge", "blocked", "recovery_approved", "done", "cancelled", null] },
+    "attemptPhase": { "enum": ["prepared", "pane_ready", "agent_ready", "running", "settled", null] },
+    "incidentClass": { "enum": ["agent_decision", "agent_blocked", "review_uncertain", "reviewer_preflight_dirty", "validation_infrastructure", "infrastructure_exhausted", "integrity_violation", "stale_task", "ci_failure", "ci_rework_exhausted", "analyst_unavailable", null] },
+    "outputBucket": { "enum": ["lt64k", "64k_256k", "256k_1m", "gte1m", "unknown", null] },
     "nullableInteger": { "type": ["integer", "null"], "minimum": 0 },
     "nullableBoolean": { "type": ["boolean", "null"] },
     "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
@@ -78,15 +84,15 @@
           "required": ["mode", "state", "jobId", "issueNumber", "revision", "reviewRound", "maxReviewRounds", "lane", "phase", "attemptId", "headSha", "pullRequest", "incidentClass", "incidentLane"],
           "properties": {
             "mode": { "enum": ["idle", "running", "waiting", "needs_decision", "terminal"] },
-            "state": { "$ref": "#/$defs/nullableString" },
-            "jobId": { "$ref": "#/$defs/nullableString" },
+            "state": { "$ref": "#/$defs/jobState" },
+            "jobId": { "type": ["string", "null"], "maxLength": 256 },
             "issueNumber": { "$ref": "#/$defs/nullableInteger" },
             "revision": { "$ref": "#/$defs/nullableInteger" },
             "reviewRound": { "$ref": "#/$defs/nullableInteger" },
             "maxReviewRounds": { "$ref": "#/$defs/nullableInteger" },
             "lane": { "enum": ["worker", "reviewer", null] },
-            "phase": { "$ref": "#/$defs/nullableString" },
-            "attemptId": { "$ref": "#/$defs/nullableString" },
+            "phase": { "$ref": "#/$defs/attemptPhase" },
+            "attemptId": { "type": ["string", "null"], "maxLength": 256 },
             "headSha": { "type": ["string", "null"], "pattern": "^[0-9a-f]{40}$" },
             "pullRequest": {
               "oneOf": [
@@ -102,7 +108,7 @@
                 }
               ]
             },
-            "incidentClass": { "$ref": "#/$defs/nullableString" },
+            "incidentClass": { "$ref": "#/$defs/incidentClass" },
             "incidentLane": { "enum": ["worker", "reviewer", "controller", null] }
           }
         },
@@ -118,7 +124,7 @@
             "credentialMode": { "enum": ["runtime-default", "canonical-oauth", "canonical-model-config", null] },
             "axisConcurrency": { "enum": [1, 2, null] },
             "compactionMode": { "enum": ["runtime-default", "disabled", "controlled-threshold", null] },
-            "lastProgressType": { "$ref": "#/$defs/nullableString" },
+            "lastProgressType": { "type": ["string", "null"], "maxLength": 128 },
             "lastProgressAt": { "$ref": "#/$defs/nullableTime" },
             "elapsedMs": { "$ref": "#/$defs/nullableInteger" },
             "runtimeDeadlineAt": { "$ref": "#/$defs/nullableTime" },
@@ -138,8 +144,8 @@
               "additionalProperties": false,
               "required": ["stdout", "stderr"],
               "properties": {
-                "stdout": { "$ref": "#/$defs/nullableString" },
-                "stderr": { "$ref": "#/$defs/nullableString" }
+                "stdout": { "$ref": "#/$defs/outputBucket" },
+                "stderr": { "$ref": "#/$defs/outputBucket" }
               }
             },
             "validationOutputDigests": {
@@ -160,10 +166,10 @@
           "additionalProperties": false,
           "required": ["taxonomyDomain", "failureDomain", "failureCode", "failureDetailCode", "retryable", "partial", "corrupt", "unknown"],
           "properties": {
-            "taxonomyDomain": { "$ref": "#/$defs/nullableString" },
-            "failureDomain": { "$ref": "#/$defs/nullableString" },
-            "failureCode": { "$ref": "#/$defs/nullableString" },
-            "failureDetailCode": { "$ref": "#/$defs/nullableString" },
+            "taxonomyDomain": { "enum": ["execution", "observation", "acceptance", "deterministic", null] },
+            "failureDomain": { "$ref": "#/$defs/nullableCode" },
+            "failureCode": { "$ref": "#/$defs/nullableCode" },
+            "failureDetailCode": { "$ref": "#/$defs/nullableCode" },
             "retryable": { "$ref": "#/$defs/nullableBoolean" },
             "partial": { "type": "boolean" },
             "corrupt": { "type": "boolean" },
@@ -175,8 +181,8 @@
           "additionalProperties": false,
           "required": ["automaticRule", "action", "notBefore", "quotaConsumed", "humanActionRequired"],
           "properties": {
-            "automaticRule": { "$ref": "#/$defs/nullableString" },
-            "action": { "$ref": "#/$defs/nullableString" },
+            "automaticRule": { "enum": ["worker_pre_dispatch_infrastructure", "reviewer_same_head_infrastructure", "provider_pre_side_effect_transient", null] },
+            "action": { "enum": ["retry_fresh_worker", "retry_fresh_reviewer", null] },
             "notBefore": { "$ref": "#/$defs/nullableTime" },
             "quotaConsumed": { "type": "boolean" },
             "humanActionRequired": { "type": "boolean" }
@@ -210,10 +216,10 @@
               "additionalProperties": false,
               "required": ["state", "issueNumber", "revision", "incidentClass"],
               "properties": {
-                "state": { "$ref": "#/$defs/nullableString" },
+                "state": { "$ref": "#/$defs/fleetWorkflowState" },
                 "issueNumber": { "$ref": "#/$defs/nullableInteger" },
                 "revision": { "$ref": "#/$defs/nullableInteger" },
-                "incidentClass": { "$ref": "#/$defs/nullableString" }
+                "incidentClass": { "$ref": "#/$defs/incidentClass" }
               }
             }
           ]

@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "schemaSha256": "52487703e17a07dd556fcafea2be85cdd963d0e3057161824b0482730eeb8faa",
+  "schemaSha256": "76ffcc9b8857bfe7ed54d8a7ea60cdd721a3061f7304a07d92599e4f9642cba1",
   "fixtures": {
     "approval-card.json": "130603539063603db1559e228b6f2cdbc5e14b2f4ddc249797f42a1cb635d9f1",
     "diagnostic-view.json": "f5cef8f08ea6f14c2dcf2416043cdbfd2c949e8304a9e5218cf707e57cc581b1",
