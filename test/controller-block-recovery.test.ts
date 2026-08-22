@@ -1039,6 +1039,61 @@ test("held Reviewer validation block can be reassessed and retried on the same H
   assert.equal(store.state.activeJob?.state, "publish_ready");
 });
 
+test("held failed Reviewer result can be reassessed into a fresh same-HEAD Reviewer", async () => {
+  const headSha = "b".repeat(40);
+  const store = new MemoryStore();
+  const clock = new FakeClock();
+  const ids = new SequenceIds();
+  const controller = new HarnessController({
+    config,
+    store,
+    github: new FakeGitHub([issue({ number: 137, title: "Reassess failed Reviewer infrastructure" })]),
+    git: new FakeGit(),
+    herdr: new FakeHerdr([
+      { lane: "worker", status: "completed", headSha },
+      {
+        lane: "reviewer",
+        status: "failed",
+        reviewedHeadSha: headSha,
+        summary: "Both fixed Review Axis children failed before producing evidence",
+      },
+    ]),
+    analyst: new FakeAnalyst([{
+      kind: "advice",
+      action: "hold",
+      summary: "Repair the exact Reviewer child startup path before retrying",
+      resolutionBrief: "",
+      evidenceRefs: ["task"],
+      unknowns: ["Reviewer child startup"],
+    }]),
+    evidence: new FakeEvidence(),
+    clock,
+    ids,
+    preflight: new FakeRuntimePreflight(),
+  });
+
+  for (let index = 0; index < 14; index += 1) await controller.tick();
+  assert.equal(store.state.activeJob?.state, "blocked");
+  assert.equal(store.state.activeJob?.incident?.class, "review_uncertain");
+  assert.equal(store.state.activeJob?.activeAttempt?.result?.lane, "reviewer");
+  assert.equal(store.state.activeJob?.activeAttempt?.result?.status, "failed");
+  assert.equal((await controller.tick()).action, "analysis_recorded");
+  const held = store.state.activeJob!;
+  assert.equal(held.analysis?.action, "hold");
+  assert.deepEqual(operatorActionsFor(held).map((action) => action.kind), ["reassess", "cancel"]);
+
+  await reassessIncident(store, {
+    expectedRevision: held.revision,
+    incidentId: held.incident!.id,
+    analysisId: held.analysis!.id,
+    actor: "human@example.test",
+    reason: "The bound custom Reviewer child model-config wrapper passed its regression and live preflight.",
+  }, { clock, ids });
+  assert.equal(store.state.activeJob?.incident?.class, "infrastructure_exhausted");
+  assert.deepEqual(store.state.activeJob?.incident?.allowedActions, ["retry_fresh_reviewer", "hold"]);
+  assert.equal(store.state.activeJob?.analysis, null);
+});
+
 test("legacy pre-start Reviewer residue is reassessed through an auditable compatibility migration", async () => {
   const headSha = "b".repeat(40);
   const store = new MemoryStore();

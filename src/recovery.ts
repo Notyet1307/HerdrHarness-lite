@@ -169,7 +169,7 @@ export async function reassessIncident(
   if (job.analysis.incidentId !== job.incident.id) throw new Error("analysis is not bound to the active incident");
   const replacementClass = reassessmentClassFor(job);
   if (!replacementClass || !operatorActionsFor(job).some((action) => action.kind === "reassess")) {
-    throw new Error("only an exact held infrastructure incident, HEAD-bound Reviewer block, pre-start Reviewer residue, pre-fix Worker HEAD-report mismatch, controller-recorded Analyst execution failure, or HEAD-bound CI incident within the rework limit can be reassessed");
+    throw new Error("only an exact held infrastructure incident, HEAD-bound Reviewer blocked/failed result, pre-start Reviewer residue, pre-fix Worker HEAD-report mismatch, controller-recorded Analyst execution failure, or HEAD-bound CI incident within the rework limit can be reassessed");
   }
 
   const successor = makeIncident({

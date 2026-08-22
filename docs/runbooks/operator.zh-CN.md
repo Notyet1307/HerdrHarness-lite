@@ -171,6 +171,7 @@ node dist/src/cli.js decide \
 2. 区分 runtime liveness、durable result、Git fixed point、GitHub checks 与 ledger truth。
 3. 保留 dirty worktree、result、receipt、Controller log 和 bounded evidence；不要先清理现场。
 4. Analyst `hold` 只表示无执行授权。需要新证据时消费 reassessment option。
+   exact-HEAD Reviewer 的 durable `blocked` 与 `failed` 结果在基础设施修复后都可出现该 option；它只重开 Analysis，不复用旧 child/session，也不直接授权 retry。
 5. 只有当前 `approve_retry` 或 `resolve_decision` option 能授权 fresh retry。
 6. 授权后由 Controller 关闭旧 pane、生成 TypedHandoff 并创建 fresh Attempt。
 7. 读回新 revision 和 Attempt identity；不得向旧 Agent 手工发送续跑 prompt。
