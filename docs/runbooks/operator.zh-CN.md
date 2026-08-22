@@ -182,11 +182,11 @@ Review Axis 失败时，durable blocked summary 中的 `Harness Review Axis fail
 
 若备用模型不能生成完整 `runs.all` 参数，Reviewer gate 还接受一个 exact `herdr-harness-review-axis` + `Axis: Standards|Spec` task 简写，并由 Harness 补齐固定 workflow 字段。该兼容只减少格式负担，不提供 agent discovery、management action、任意 scope/async、非 fresh context 或额外工具；这些调用仍应被拒绝。
 
-Review Axis 最终输出可以是 whole JSON，或唯一一个标注 `json` 的 Markdown fence。fence 内对象仍必须通过完整 axis schema；围栏外 prose 不投影。多 fence、无标签 fence、解析失败或字段漂移都不能靠启发式提取，应保持 blocked。
+Review Axis 最终输出可以是 whole JSON、唯一一个标注 `json` 的 Markdown fence，或完全没有 code fence 时 prose 中唯一一个通过完整 axis schema 的 JSON 对象。prose 不投影；多 fence、无标签 fence、多个有效对象、解析失败或字段漂移都保持 blocked。
 
 若失败的 axis tool result 返回 `retryAvailable`，顶层 Reviewer 会以相同 brief 和 fresh context 只重跑该缺失 axis 一次；已有有效 axis 报告不会重采样。第二次仍失败时才进入 durable blocked / same-HEAD reassessment，不要手工改 checkpoint 或放宽 JSON schema。
 
-`runs.all` entry 可省略 `key`，Harness 会从 exact `Axis: Standards|Spec` task 推导；显式错误 key 或其他额外字段仍拒绝。pi-subagents 追加的 `acceptanceReport` 不是 axis verdict authority，解析后会被剥离并留在 private evidence；除此以外的额外顶层字段仍构成 schema failure。
+`runs.all` entry 可省略 `key`，Harness 会从 exact `Axis: Standards|Spec` task 推导；显式错误 key 或其他额外字段仍拒绝。锁定的 pi-subagents 版本可能用 wrapper 或扁平字段追加 acceptance report；这些固定非权威字段解析后会被剥离并留在 private evidence，未知额外顶层字段仍构成 schema failure。
 
 Short provider probe、Herdr `done`、Reviewer child completed 或 validation pass 均不足以宣告恢复。至少等新的 durable role result 和对应 Git gate。
 
