@@ -436,7 +436,7 @@ test("Reviewer preparation exports a read-only exact-HEAD snapshot and writable 
     mkdirSync(credentialRuntimeRoot);
     writeFileSync(credentialLauncherPath, [
       'const { writeFileSync } = require("node:fs");',
-      'writeFileSync(process.env.FAKE_CREDENTIAL_ARGS, JSON.stringify(process.argv.slice(2)));',
+      'writeFileSync(process.env.FAKE_CREDENTIAL_ARGS, JSON.stringify({ args: process.argv.slice(2), piAgentDir: process.env.PI_CODING_AGENT_DIR }));',
     ].join("\n"), { mode: 0o500 });
     const canonicalRoot = join(root, "state", "attempt-canonical");
     const canonicalWorkspace = await cli.prepareReviewer({
@@ -468,8 +468,10 @@ test("Reviewer preparation exports a read-only exact-HEAD snapshot and writable 
       encoding: "utf8",
     });
     assert.equal(canonicalWrapped.status, 0, canonicalWrapped.stderr);
-    const credentialArgs = JSON.parse(readFileSync(credentialArgsPath, "utf8")) as string[];
+    const credentialLaunch = JSON.parse(readFileSync(credentialArgsPath, "utf8")) as { args: string[]; piAgentDir: string };
+    const credentialArgs = credentialLaunch.args;
     assert.equal(credentialArgs[credentialArgs.indexOf("--credential-agent-dir") + 1], input.piAgentDir);
+    assert.equal(credentialLaunch.piAgentDir, input.piAgentDir);
     assert.ok(canonicalWorkspace.reviewPath);
     assert.equal(readFileSync(join(attemptRoot, "trusted-context.md"), "utf8"), "preserve me\n");
     assert.deepEqual(await new GitCli(runner).prepareReviewer(preparedInput), workspace);

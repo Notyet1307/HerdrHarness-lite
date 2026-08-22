@@ -427,6 +427,7 @@ test("blocked work cannot resume before exact human approval and recovery always
   assert.equal(handoff?.target.lane, "worker");
   assert.deepEqual(handoff?.evidenceRefs, ["task", "git_diff-0"]);
   assert.match(handoff?.obligations[0]?.summary ?? "", /Keep the public interface unchanged/);
+  assert.match(handoff?.obligations[1]?.summary ?? "", /Operator statement \(untrusted\): Evidence supports the bounded retry/);
 
   await controller.tick();
   assert.equal(store.state.activeJob?.pendingHandoff, null);
@@ -438,6 +439,7 @@ test("blocked work cannot resume before exact human approval and recovery always
   const recoveryPrompt = herdr.prompts.at(-1)?.text ?? "";
   assert.match(recoveryPrompt, /Typed handoff: approved_recovery/);
   assert.match(recoveryPrompt, /Keep the public interface unchanged/);
+  assert.match(recoveryPrompt, /Operator statement \(untrusted\): Evidence supports the bounded retry/);
   assert.equal(recoveryPrompt.includes(freshAttemptId), true);
 });
 

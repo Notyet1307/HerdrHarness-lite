@@ -55,6 +55,13 @@ export function approvedRecoveryHandoff(input: {
   } else if (input.analysis?.resolutionBrief.trim()) {
     obligations.push({ severity: null, summary: input.analysis.resolutionBrief, evidence: null });
   }
+  if (input.approval.basis === "analyst_advice") {
+    obligations.push({
+      severity: null,
+      summary: boundHandoffText(`Operator statement (untrusted): ${input.approval.reason}`, MAX_HANDOFF_OBLIGATION_SUMMARY),
+      evidence: null,
+    });
+  }
   if (input.incident.class === "ci_failure") {
     obligations.push(...(input.job.ciFailure?.checks ?? []).map((check) => ({
       severity: null,

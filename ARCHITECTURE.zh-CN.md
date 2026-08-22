@@ -250,6 +250,8 @@ SDK host 构造主 Pi Session 时使用独立的 Attempt-private `pi-agent`，�
 
 Reviewer 的固定 Review Axis wrapper 不从可变的 `PI_CODING_AGENT_DIR` 推断凭据位置；Reviewer extensions 在完成 subagent config 隔离后恢复并保留 `HERDR_HARNESS_REVIEW_CANONICAL_PI_AGENT_DIR`，wrapper 只把该专用 Attempt-bound 路径交给 credential startup launcher。主 Reviewer 的工具子进程仍使用 `tool-agent`，Review Axis 仍通过 canonical OAuth startup lease 读取原 canonical store，两条路径不得互换。
 
+Review Axis wrapper 还只对 launcher/child 进程把 `PI_CODING_AGENT_DIR` 收紧为上述 canonical 路径，确保 launcher 取得 lease 后启动的普通 Pi CLI 从同一 store 读取 OAuth；该覆盖不回写主 Reviewer 进程环境。人工批准 Analyst 建议时，bounded approval reason 作为显式标注的 untrusted operator statement 进入 `approved_recovery` TypedHandoff obligations；它给 fresh Attempt 提供诊断事实，不新增执行或审批 authority。
+
 Worker 工具文本结果在进入后续模型上下文前还有 24 KiB 总上限，超限时保留头尾并给出原始字节数和 digest。Pi 内建分页/完整输出路径仍是重新读取事实的入口；截断结果和 compaction summary 都不是 workflow truth。
 
 ## 9. 上下文信任模型
