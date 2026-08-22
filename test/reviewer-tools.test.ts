@@ -49,12 +49,18 @@ test("Reviewer axis startup policy serializes OAuth and preserves custom Provide
   const extension = await import(pathToFileURL(resolve("pi/extensions/reviewer-tools.js")).href) as {
     reviewerAxisStartupAllowed(concurrency: number, standardsComplete: boolean, axes: Array<string | null>): boolean;
     reviewAxisFailureProjection(result: unknown): Record<string, unknown>;
+    parseReviewAxisJson(output: string): unknown;
   };
   assert.equal(extension.reviewerAxisStartupAllowed(1, false, ["Standards", "Spec"]), false);
   assert.equal(extension.reviewerAxisStartupAllowed(1, false, ["Spec"]), false);
   assert.equal(extension.reviewerAxisStartupAllowed(1, false, ["Standards"]), true);
   assert.equal(extension.reviewerAxisStartupAllowed(1, true, ["Spec"]), true);
   assert.equal(extension.reviewerAxisStartupAllowed(2, false, ["Standards", "Spec"]), true);
+  const contract = { status: "pass", summary: "ok", findings: [], evidenceRefs: [] };
+  assert.deepEqual(extension.parseReviewAxisJson(JSON.stringify(contract)), contract);
+  assert.deepEqual(extension.parseReviewAxisJson(`prose\n\`\`\`json\n${JSON.stringify(contract)}\n\`\`\``), contract);
+  assert.equal(extension.parseReviewAxisJson(`\`\`\`\n${JSON.stringify(contract)}\n\`\`\``), undefined);
+  assert.equal(extension.parseReviewAxisJson(`\`\`\`json\n${JSON.stringify(contract)}\n\`\`\`\n\`\`\`json\n${JSON.stringify(contract)}\n\`\`\``), undefined);
 
   const sentinel = "access_token_AXIS_BUDGET_SENTINEL";
   const provider = extension.reviewAxisFailureProjection({
@@ -195,7 +201,9 @@ test("axisConcurrency=1 descriptor blocks dual launch and admits Standards then 
     assert.equal(standards.agent, undefined);
     assert.equal(standards.task, undefined);
     const standardsTask = workflowEntries(String(standards.workflowScript))[0]!.task;
-    await toolResultHook!({
+    const fencedSentinel = "PRIVATE_AXIS_FENCE_PROSE_SENTINEL";
+    const standardsJson = JSON.stringify({ status: "pass", summary: "Standards passed", findings: [], evidenceRefs: [] });
+    const projectedStandards = await toolResultHook!({
       toolCallId: "standards",
       toolName: "subagent",
       input: standards,
@@ -205,9 +213,11 @@ test("axisConcurrency=1 descriptor blocks dual launch and admits Standards then 
         agent: "herdr-harness-review-axis",
         task: standardsTask,
         exitCode: 0,
-        finalOutput: JSON.stringify({ status: "pass", summary: "Standards passed", findings: [], evidenceRefs: [] }),
+        finalOutput: `${fencedSentinel}\n\n\`\`\`json\n${standardsJson}\n\`\`\`\n\n${fencedSentinel}`,
       }] },
     });
+    assert.equal(projectedStandards?.isError, undefined);
+    assert.equal(JSON.stringify(projectedStandards).includes(fencedSentinel), false);
     assert.equal(existsSync(join(root, "standards-axis.json")), true);
     const spec = { ...reviewCall, workflowScript: reviewWorkflowScript([reviewTasks[1]!]) };
     assert.equal(await toolCallHook!({ toolCallId: "spec", toolName: "subagent", input: spec }), undefined);

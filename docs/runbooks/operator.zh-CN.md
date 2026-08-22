@@ -182,6 +182,8 @@ Review Axis 失败时，durable blocked summary 中的 `Harness Review Axis fail
 
 若备用模型不能生成完整 `runs.all` 参数，Reviewer gate 还接受一个 exact `herdr-harness-review-axis` + `Axis: Standards|Spec` task 简写，并由 Harness 补齐固定 workflow 字段。该兼容只减少格式负担，不提供 agent discovery、management action、任意 scope/async、非 fresh context 或额外工具；这些调用仍应被拒绝。
 
+Review Axis 最终输出可以是 whole JSON，或唯一一个标注 `json` 的 Markdown fence。fence 内对象仍必须通过完整 axis schema；围栏外 prose 不投影。多 fence、无标签 fence、解析失败或字段漂移都不能靠启发式提取，应保持 blocked。
+
 Short provider probe、Herdr `done`、Reviewer child completed 或 validation pass 均不足以宣告恢复。至少等新的 durable role result 和对应 Git gate。
 
 ## 9. 失败诊断与 Fleet 聚合
