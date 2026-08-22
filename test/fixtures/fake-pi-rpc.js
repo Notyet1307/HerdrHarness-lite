@@ -238,6 +238,9 @@ function respond(command) {
       content: [{ type: "text", text: "" }],
       stopReason: process.env.FAKE_PI_ASSISTANT_STOP_REASON,
       errorMessage: process.env.FAKE_PI_ASSISTANT_ERROR ?? "Provider request failed",
+      ...(process.env.FAKE_PI_PROVIDER_FAILURE_CODE
+        ? { providerFailureCode: process.env.FAKE_PI_PROVIDER_FAILURE_CODE }
+        : {}),
     };
     emit({ type: "message_start", message: failureMessage });
     emit({ type: "message_end", message: failureMessage });

@@ -219,6 +219,22 @@ test("Pi RPC event adapter projects only the RPC subscriber and preserves diagno
       role: "assistant",
       stopReason: "error",
       errorMessage: providerError,
+      diagnostics: [{
+        type: "provider_transport_failure",
+        timestamp: Date.now(),
+        error: {
+          name: "WebSocketError",
+          message: "access_token_DIAGNOSTIC_SENTINEL",
+          stack: "access_token_STACK_SENTINEL",
+          code: "ECONNRESET",
+        },
+        details: {
+          configuredTransport: "auto",
+          eventsEmitted: true,
+          phase: "after_message_stream_start",
+          requestBytes: 1234,
+        },
+      }],
       content: [{ type: "text", text: "untrusted provider response" }],
     },
   };
@@ -233,8 +249,15 @@ test("Pi RPC event adapter projects only the RPC subscriber and preserves diagno
   assert.equal(received[0]?.toolCallObserved, false);
   assert.match(String((received[0]?.message as Record<string, unknown>).errorMessage), /^HTTP 429 rate limit/);
   assert.ok(Buffer.byteLength(String((received[0]?.message as Record<string, unknown>).errorMessage)) <= 16 * 1024);
+  assert.equal((received[0]?.message as Record<string, unknown>).providerFailureCode, "provider_network");
+  assert.equal(JSON.stringify(received[0]).includes("DIAGNOSTIC_SENTINEL"), false);
+  assert.equal(JSON.stringify(received[0]).includes("STACK_SENTINEL"), false);
   assert.equal(JSON.stringify(received[0]).includes("untrusted provider response"), false);
   assert.deepEqual(event.message.content, [{ type: "text", text: "untrusted provider response" }]);
+
+  const older = projectPiRpcEvent(event, "0.84.1");
+  assert.equal((older.message as Record<string, unknown>).providerFailureCode, undefined);
+  assert.equal(JSON.stringify(older).includes("DIAGNOSTIC_SENTINEL"), false);
 });
 
 test("Worker context controls pin exact task data and compact once between tool turns", async () => {

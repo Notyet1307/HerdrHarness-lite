@@ -419,7 +419,7 @@ async function main(argv: string[]): Promise<void> {
           toolExecutionCount,
           toolErrorCount,
           transcriptBytes,
-        }),
+        }, message.providerFailureCode),
       };
     }
     if (type === "agent_end") summary.willRetry = event.willRetry === true;

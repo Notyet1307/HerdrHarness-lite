@@ -64,7 +64,10 @@ gh auth status
 gh repo view OWNER/REPOSITORY
 herdr session list --json
 pi --version
+node dist/src/cli.js preflight --config /ABSOLUTE/PATH/harness.config.json --lane reviewer --json
 ```
+
+`preflight` 会验证完整 Harness 配置，并为一个精确 lane 执行当前绑定的 Pi/Provider 与可选本地 Docker 检查。它不 claim Issue、不推进 Job，也不写 `state.json`；但可能更新私有 credential probe cache 与 preflight agent directory。有界 JSON 只包含配置 digest、lane、Docker 可用性以及稳定 failure code/retryability。
 
 ## Build
 
@@ -80,7 +83,7 @@ node dist/src/transport-cli.js fleet status --config /PRIVATE/PATH/fleet-observe
 
 ## 单项目 Tick canary
 
-`tick` 有写入副作用：它可能 preflight、claim Issue 或推进 active Job。只在 disposable lane 或明确授权的真实 frontier 上执行，并确认没有另一个 Controller 持有同一项目 `stateDir`。
+`tick` 有写入副作用：它可能 preflight、claim Issue 或推进 active Job。blocked lane 的健康检查应先使用上面的非 workflow `preflight`；只在 disposable lane 或明确授权的真实 frontier 上执行 `tick`，并确认没有另一个 Controller 持有同一项目 `stateDir`。
 
 ```bash
 node dist/src/cli.js status --config /ABSOLUTE/PATH/harness.config.json

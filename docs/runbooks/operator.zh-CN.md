@@ -94,6 +94,21 @@ node dist/src/cli.js status --config /ABSOLUTE/PATH/harness.config.json --operat
 - 要 claim 的 Issue/Map frontier 是本次明确允许推进的队列；
 - 部署操作不会顺带启动 Worker 或 Reviewer。
 
+### 运行时 preflight（不推进 workflow）
+
+对一个 lane 运行当前配置绑定的 Pi/Provider 与可选本地 Docker 检查：
+
+```bash
+node dist/src/cli.js preflight \
+  --config /ABSOLUTE/PATH/harness.config.json \
+  --lane reviewer \
+  --json
+```
+
+该命令先验证完整 Harness 配置，只接受 `worker` 或 `reviewer`。它不 claim Issue、不推进 Job、不取得 Controller lease，也不写 `state.json`；Provider probe 仍会使用 credential startup lease，并可能更新 canonical credential store 旁的私有 probe cache 与 `stateDir/preflight` 下的隔离 agent directory。JSON 只给出时间、配置 digest、lane、Docker 可用性、稳定 failure code 与 retryable 属性，不包含 auth path、Provider 原文、stderr 或 stack。
+
+`ok=true` 只证明该次短检查成功，不能证明旧 Attempt 可交付，也不授权 retry。blocked Job 仍必须通过当前 `reassess` / `approve_retry` option 和 fresh Attempt 恢复。若 Controller 正在为同一 credential domain 启动 Attempt，startup lease 会串行化 probe；不要并发重复调用。
+
 ## 5. Tick canary
 
 先在 disposable lane 或明确允许推进的真实 lane 使用单步 `tick`：

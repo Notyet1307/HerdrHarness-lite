@@ -63,7 +63,10 @@ gh auth status
 gh repo view OWNER/REPOSITORY
 herdr session list --json
 pi --version
+node dist/src/cli.js preflight --config /ABSOLUTE/PATH/harness.config.json --lane reviewer --json
 ```
+
+`preflight` validates the complete Harness configuration and runs the configured Pi/Provider plus optional local-Docker checks for exactly one lane. It does not claim an Issue, advance a Job, or write `state.json`; it may update the private credential probe cache and preflight agent directory. Its bounded JSON contains only the config digest, lane, Docker availability, and a stable failure code/retryability result.
 
 ## Build
 
@@ -77,7 +80,7 @@ node dist/src/fleet-cli.js --help
 
 ## Single-project tick canary
 
-`tick` is mutating: it may preflight, claim an Issue, or advance the active Job. Use a disposable lane or an explicitly authorized real frontier, and ensure no other Controller owns the same project `stateDir`.
+`tick` is mutating: it may preflight, claim an Issue, or advance the active Job. Use the non-workflow `preflight` command above for a blocked-lane health check. Use `tick` only in a disposable lane or an explicitly authorized real frontier, and ensure no other Controller owns the same project `stateDir`.
 
 ```bash
 node dist/src/cli.js status --config /ABSOLUTE/PATH/harness.config.json
