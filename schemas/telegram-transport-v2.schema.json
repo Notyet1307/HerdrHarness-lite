@@ -297,8 +297,8 @@
       "additionalProperties": false,
       "required": ["label", "value"],
       "properties": {
-        "label": { "type": "string", "minLength": 1, "maxLength": 80 },
-        "value": { "type": "string", "minLength": 1, "maxLength": 512 }
+        "label": { "type": "string", "minLength": 1, "maxLength": 80, "pattern": "^[^\\u0000\\r\\n]+$" },
+        "value": { "type": "string", "minLength": 1, "maxLength": 512, "pattern": "^[^\\u0000\\r\\n]+$" }
       }
     },
     "event": {
@@ -312,13 +312,13 @@
         "routeId": { "$ref": "#/$defs/routeId" },
         "projectId": { "$ref": "#/$defs/nullableProjectId" },
         "fleetId": { "$ref": "#/$defs/nullableProjectId" },
-        "eventId": { "type": "string", "minLength": 1, "maxLength": 256 },
-        "dedupeKey": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "eventId": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "^[^\\u0000\\r\\n]+$" },
+        "dedupeKey": { "type": "string", "minLength": 1, "maxLength": 512, "pattern": "^[^\\u0000\\r\\n]+$" },
         "occurredAt": { "$ref": "#/$defs/time" },
         "severity": { "enum": ["info", "warning", "critical"] },
         "category": { "enum": ["project.started", "project.done", "project.cancelled", "incident.new", "analyst.decision", "operator.approval", "recovery.automatic", "recovery.exhausted", "controller.down", "controller.up", "fleet.down", "fleet.up", "fleet.config-drift", "project.backoff", "project.tripped", "project.error", "project.adopted", "project.running", "ledger.unavailable", "ledger.restored", "state.unavailable", "state.restored", "preflight.failed", "runtime.stall", "runtime.deadline"] },
-        "title": { "type": "string", "minLength": 1, "maxLength": 160 },
-        "summary": { "type": "string", "minLength": 1, "maxLength": 1000 },
+        "title": { "type": "string", "minLength": 1, "maxLength": 160, "pattern": "^[^\\u0000\\r\\n]+$" },
+        "summary": { "type": "string", "minLength": 1, "maxLength": 1000, "pattern": "^[^\\u0000\\r\\n]+$" },
         "facts": { "type": "array", "maxItems": 16, "items": { "$ref": "#/$defs/fact" } },
         "actionRequired": { "type": "boolean" },
         "operatorActionKinds": { "type": "array", "maxItems": 4, "uniqueItems": true, "items": { "enum": ["approve_retry", "reassess", "resolve_decision", "cancel"] } },
@@ -328,11 +328,22 @@
           "required": ["token", "approveLabel", "expiresAt"],
           "properties": {
             "token": { "type": "string", "pattern": "^[0-9A-F]{16}$" },
-            "approveLabel": { "type": "string", "minLength": 1, "maxLength": 64 },
+            "approveLabel": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[^\\u0000\\r\\n]+$" },
             "expiresAt": { "$ref": "#/$defs/time" }
           }
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": { "required": ["approval"] },
+          "then": {
+            "properties": {
+              "category": { "const": "operator.approval" },
+              "actionRequired": { "const": true }
+            }
+          }
+        }
+      ]
     }
   }
 }

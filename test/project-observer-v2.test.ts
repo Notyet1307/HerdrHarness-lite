@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -15,6 +15,8 @@ test("Project Observer v2 migrates state, suppresses replay, and dedupes Control
     const controllerLog = join(root, "controller.log");
     const captureScript = join(root, "capture.mjs");
     const captureFile = join(root, "delivered.jsonl");
+    const hermesScript = join(root, "hermes.mjs");
+    const hermesCaptureFile = join(root, "hermes-delivered.jsonl");
     mkdirSync(stateDir, { recursive: true });
     writeFileSync(controllerLog, "", { mode: 0o600 });
     writeFileSync(captureScript, [
@@ -23,6 +25,14 @@ test("Project Observer v2 migrates state, suppresses replay, and dedupes Control
       'for await (const chunk of process.stdin) value += chunk;',
       'appendFileSync(process.argv[2], `${value.trim()}\\n`);',
     ].join("\n"), { mode: 0o600 });
+    writeFileSync(hermesScript, [
+      "#!/usr/bin/env node",
+      'import { appendFileSync } from "node:fs";',
+      'let value = "";',
+      'for await (const chunk of process.stdin) value += chunk;',
+      `appendFileSync(${JSON.stringify(hermesCaptureFile)}, JSON.stringify({ argv: process.argv.slice(2), payload: JSON.parse(value) }) + "\\n");`,
+    ].join("\n"), { mode: 0o700 });
+    chmodSync(hermesScript, 0o700);
     writeFileSync(harnessConfig, JSON.stringify({
       repo: "owner/repo",
       stateDir,
@@ -109,6 +119,66 @@ test("Project Observer v2 migrates state, suppresses replay, and dedupes Control
 
     migrated = JSON.parse(readFileSync(observerState, "utf8"));
     assert.equal(migrated.outbox.length, 0);
+    migrated.outbox.push({
+      kind: "payload",
+      key: "rollback-pending-v2",
+      payload: {
+        version: 2,
+        kind: "event",
+        generatedAt: new Date().toISOString(),
+        routeId: "exposure",
+        projectId: "Exposure-Agent",
+        fleetId: "engineering-fleet",
+        eventId: "event-rollback-pending",
+        dedupeKey: "rollback-pending-v2",
+        occurredAt: new Date().toISOString(),
+        severity: "info",
+        category: "state.restored",
+        title: "Pending before rollback",
+        summary: "Pending v2 delivery survives transport rollback.",
+        facts: [],
+        actionRequired: false,
+        operatorActionKinds: [],
+        unexpected: "private state must not cross the transport boundary",
+      },
+      attempts: 0,
+      nextAttemptAt: 0,
+    });
+    writeFileSync(observerState, JSON.stringify(migrated), { mode: 0o600 });
+
+    const rollback = JSON.parse(readFileSync(observerConfig, "utf8"));
+    delete rollback.transportVersion;
+    delete rollback.routeId;
+    delete rollback.projectId;
+    delete rollback.fleetId;
+    delete rollback.deliveryCommand;
+    rollback.laneId = "exposure";
+    rollback.hermesBin = hermesScript;
+    rollback.hermesProfile = "fixture";
+    rollback.target = "telegram";
+    writeFileSync(observerConfig, JSON.stringify(rollback), { mode: 0o600 });
+    assert.ok(runObserver(observerConfig).status !== 0, "v1 rollback accepted an unknown Transport field");
+    delete migrated.outbox[0].payload.unexpected;
+    migrated.outbox[0].payload.category = "operator.approval";
+    migrated.outbox[0].payload.actionRequired = true;
+    migrated.outbox[0].payload.operatorActionKinds = ["approve_retry"];
+    migrated.outbox[0].payload.approval = {
+      token: "0123456789ABCDEF",
+      approveLabel: "Approve fresh Worker",
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    };
+    writeFileSync(observerState, JSON.stringify(migrated), { mode: 0o600 });
+    assert.equal(runObserver(observerConfig).status, 0, "v1 rollback rejected migrated v3 state");
+    const rolledBack = JSON.parse(readFileSync(observerState, "utf8"));
+    assert.equal(rolledBack.version, 2);
+    assert.equal(rolledBack.outbox.length, 0);
+    assert.equal(readDelivered(captureFile).length, 3, "v1 rollback used the removed delivery command");
+    const rollbackDelivered = readDelivered(hermesCaptureFile);
+    assert.equal(rollbackDelivered.length, 1, "v1 Hermes rollback replayed or dropped a v2 transition");
+    assert.deepEqual(rollbackDelivered[0].argv, ["--profile", "fixture", "harness-card"]);
+    assert.match(rollbackDelivered[0].payload.text, /Pending v2 delivery survives transport rollback/);
+    assert.equal(rollbackDelivered[0].payload.approveCallback, "hh:a:exposure:0123456789ABCDEF");
+    assert.equal(rollbackDelivered[0].payload.holdCallback, "hh:h:exposure:0123456789ABCDEF");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
